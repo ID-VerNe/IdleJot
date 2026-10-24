@@ -40,6 +40,10 @@ EXEMPTIONS = {
     'water-group/memory_engine.py': 'PA: split storage/use-case layers',
     'water-group/daemon/reload.py': 'PD: split plan analysis from restart execution',
     'chatlocal/mcp_chat.py': 'PC: move the schema factory out',
+    # Crossed the wall via issue #9 (forward-wake touched up.py): 926 -> 1010
+    # lines. Its split is NOT in the PA-PD plan; tracked as debt on issue #11
+    # until a section is scheduled. Do not let this entry rot silently.
+    'water-group/daemon/up.py': 'debt: crossed via #9, split section unscheduled',
 }
 
 

@@ -240,6 +240,11 @@ def test_cross_protocol():
     和同名工具会让模型与群友指同一件事却执行不同代码。
     """
     print("[两套协议]")
+    # 门禁自己装路径：CI 直接 `python scripts/xxx.py`，sys.path[0] 是 scripts/，
+    # 仓库根不在里面（本地靠 PYTHONPATH 才绿过一轮，是假绿）。
+    # append 而非 insert：daemon 目录保持高优先级，仓库根不会影子掉导入。
+    if str(ROOT) not in sys.path:
+        sys.path.append(str(ROOT))
     from chatlocal import app_plugins  # 叶子包：只 import base + spec，无副作用
 
     daemon_plugins = commands.PLUGINS.plugins()

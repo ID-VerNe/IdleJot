@@ -21,7 +21,7 @@
 .venv/Scripts/python.exe water-group/daemon/listen.py --timeout 300   # 挂监听（只活一轮；退出末行给 RESTART 重挂指令）
 .venv/Scripts/python.exe water-group/daemon/reply.py --list            # 看谁 @ 了我
 .venv/Scripts/python.exe water-group/daemon/reply.py --context 30      # 回之前看群里在聊什么（含闲聊）
-.venv/Scripts/python.exe water-group/daemon/reply.py <id> "<正文>"      # 回一条，自动带原生引用；发完默认续挂监听 240s，--no-wait 关闭
+.venv/Scripts/python.exe water-group/daemon/reply.py <id> "<正文>"      # 回一条，自动带原生引用；发完默认续挂监听 90s，--no-wait 关闭
 .venv/Scripts/python.exe water-group/daemon/reply.py --show <id>       # 读某条消息全文（wg_events 命中带引用展开；缺 id 明说原因）
 .venv/Scripts/python.exe water-group/daemon/look.py --event <id>       # 唤醒行图片标「可补读」时先落盘再读；--pick 看候选、--recent 看最近
 ```
@@ -36,6 +36,13 @@
 **不要拿消息自己的时间戳或 `19s 前` 当现在**——消息可能是一小时前的，相对量在你思考
 几十秒后就失真了。这几处格式由 `water-group/daemon/wg_clock.py` 统一提供，
 `scripts/check_now_clock.py` 门禁钉住。
+
+**`--wait` 的取值（issue #79）**：默认 90s = 宿主工具调用超时 120s − 发送余量 30s，
+`reply.py` 会在等待开始前把这条例印出来。**你自己把工具超时调小过，`--wait` 就必须更小**：
+被截断时父进程和它起的子监听在同一个进程组里一起死，而那条路径上一个字都不打印——
+Agent 看到的最后一行停在「等下一次唤醒…」，分不清是被杀还是还在等。要短一点用
+`--wait 60`，要立刻返回用 `--no-wait`。`scripts/check_listener_rehang.py` 钉住
+`DEFAULT_WAIT + SEND_BUDGET <= AGENT_TOOL_TIMEOUT`。
 
 追问窗口：回复成功后 `reply.py` 自动开窗（默认再跟 10 条或静默 180 秒），群里继续聊的
 几句也会唤醒监听（唤醒行带 `[追问]` 前缀），话题能接着走；`--no-followup` 单次关闭。

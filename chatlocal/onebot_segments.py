@@ -7,6 +7,7 @@ stops the two paths from drifting apart.
 
 ID_LIMIT = 100
 QQ_LIMIT = 30
+NAME_LIMIT = 100
 
 
 def message_id(raw):
@@ -23,5 +24,22 @@ def qq(raw_qq):
     return str(raw_qq or '')[:QQ_LIMIT]
 
 
-def at(raw_qq):
-    return dict(type='at', qq=qq(raw_qq))
+def name(raw_name):
+    """Normalise the display name carried by an @ segment (issue #52).
+
+    OneBot's raw at segment has ``data.name`` (the @-ed member's display
+    name). Dropping it here is what made every wake line render a bare
+    ``@``; the ingest and detail-render paths share this normaliser so
+    they cannot drift apart on the field name or the limit. Whitespace-only
+    names count as absent -- ``@`` followed by blanks is the original defect
+    wearing a disguise.
+    """
+    return str(raw_name or '').strip()[:NAME_LIMIT]
+
+
+def at(raw_qq, raw_name=None):
+    segment = dict(type='at', qq=qq(raw_qq))
+    display = name(raw_name)
+    if display:
+        segment['name'] = display
+    return segment

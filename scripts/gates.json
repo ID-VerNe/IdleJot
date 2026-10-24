@@ -71,6 +71,7 @@
     {"name": "check_quote_visibility.py", "shard": "reply", "why": "引用原文必须到达 Agent，缺了也要说清原因（#94）"},
     {"name": "check_image_visibility.py", "shard": "reply", "why": "唤醒行图片标记可执行，不许出现裸 [图片]（#35）"},
     {"name": "check_alias_visibility.py", "shard": "reply", "why": "正文外号必须能指到人，认不出也不许编（#30）"},
+    {"name": "check_at_segment_name.py", "shard": "reply", "why": "at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52）"},
     {"name": "check_reply_timing.py", "shard": "reply", "why": "回复时序、密钥排除、轮换与失败透明"},
     {"name": "check_now_clock.py", "shard": "reply", "why": "值守工具链必须带当前时刻（#95）"},
     {"name": "check_miyoushe.py", "shard": "reply", "why": "米游社取数 handler：DS 签名、URL 参数、缓存、错误码"},

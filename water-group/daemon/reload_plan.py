@@ -78,6 +78,7 @@ NO_RESTART = {
     "water-group/daemon/followup.py": "one-shot CLI dependency (reply/watch/status)",
     "water-group/daemon/wg_clock.py": "shared clock helper for guard/CLI, no daemon imports it",
     "water-group/daemon/wg_quotes.py": "shared quote renderer for guard/CLI, no daemon imports it",
+    "water-group/daemon/wg_text.py": "shared body renderer for guard/CLI, no daemon imports it",
     "water-group/daemon/listen.py": "one-shot CLI",
     "water-group/daemon/look.py": "one-shot CLI",
     "water-group/daemon/reply.py": "one-shot CLI",

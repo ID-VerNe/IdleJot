@@ -31,6 +31,7 @@ import up  # noqa: E402  (wake_reason / events / replied_ids live there)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_images  # noqa: E402  (图片标记渲染)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
+import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
 import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收口)
 
 ROOT = HERE.parents[1]
@@ -89,8 +90,12 @@ def main():
                 stamp = wg_clock.clock_ms(e.get("timestamp"))
                 images = wg_images.render(e)
                 quotes = wg_quotes.render_event(e)
+                # 正文按正文字数裁、截断了带 --show 指引（issue #32）：
+                # 80 字额度不再被 [引用 QQ 消息 <id>]@<qq> 这类段占位吃掉。
+                body, _, _ = wg_text.render_body(e.get("content"), wg_text.WAKE_BODY_CHARS,
+                                                  e.get("id"))
                 print(f"id={e.get('id')} {stamp} [{up.wake_reason(e)}] "
-                      f"{e.get('sender')}: {(e.get('content') or '')[:80]}"
+                      f"{e.get('sender')}: {body}"
                       f"{('  ' + quotes) if quotes else ''}"
                       f"{('  ' + images) if images else ''}")
             write_cursor(max(latest_id(rows), max(e.get("id") or 0 for e in fresh)))
@@ -115,8 +120,12 @@ def main():
                     print(wg_clock.now_line())
                     for r in woke:
                         stamp = wg_clock.clock_ms(r.get("ts"))
+                        # 追问行与唤醒行同一份渲染口径（issue #32）。
+                        body, _, _ = wg_text.render_body(r.get("text"),
+                                                          wg_text.WAKE_BODY_CHARS,
+                                                          r.get("id"))
                         print(f"id={r.get('id')} {stamp} [追问] {r.get('sender')}: "
-                              f"{(r.get('text') or '')[:80]}"
+                              f"{body}"
                               f"{('  ' + r['quote']) if r.get('quote') else ''}")
                     # 报告文案由 followup 决定：额度用完的那一批不说「还剩 0 条」
                     # （issue #98）。收窗也在 consume() 里做完，不再留到下一轮。

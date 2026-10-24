@@ -100,6 +100,8 @@ jobs:
             'check_collector_self_echo.py',
             # Module size walls: no file >1000 lines, no class >800 (issue #11 PE)
             'check_module_size.py',
+            # up.py facade: names must stay re-exported and identical (issue #37)
+            'check_up_facade.py',
             # NapCat / OneBot contract and account diagnostics
             'check_napcat_onebot_contract.py',
             'check_napcat_qq_probe.py',

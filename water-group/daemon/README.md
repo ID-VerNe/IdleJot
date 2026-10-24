@@ -13,6 +13,10 @@
 
 配套脚本：
 
+- `up.py`：一键启停与 `--status`。它只是门面，四块实现在同目录三个模块里（issue #37）：
+  `wg_up_probe.py`（哪些 pid/端口是我们的）、`wg_up_wake.py`（配置、OneBot 账号探测、
+  唤醒与账本判定）、`wg_up_stack.py`（taskkill、注入、stop/spawn）。门面名字与归属模块
+  同一对象，`scripts/check_up_facade.py` 钉住；改这三个模块等于改 guard，必须整栈重启
 - `session.py`：确保目标群有活的持续会话（会话绑定在 grant 上，grant 轮换会一起没）
 - `mint_grant.py`：本地 MCP 授权失效时重新签发，沿用上一次的权限范围
 - `mcp_client.py`：最小 JSON-RPC 客户端，遇到 `denied` 自动续签并重放一次

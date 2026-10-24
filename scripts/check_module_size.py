@@ -36,12 +36,11 @@ ADVISORY_FILE_LINES = 700
 
 # Violators pinned at gate creation, each removed by one issue #11 section.
 # Keep this list honest: a stale entry hides real growth.
-EXEMPTIONS = {
-    # Crossed the wall via issue #9 (forward-wake touched up.py): 926 -> 1010
-    # lines. Its split is NOT in the PA-PD plan; tracked as debt on issue #11
-    # until a section is scheduled. Do not let this entry rot silently.
-    'water-group/daemon/up.py': 'debt: crossed via #9, split section unscheduled',
-}
+#
+# Empty since issue #37: up.py (the last entry, "crossed via #9") is a facade now --
+# probing / wake-config / start-stop moved to wg_up_probe / wg_up_wake / wg_up_stack.
+# An exemption must be added back with the issue that will remove it, never "for now".
+EXEMPTIONS = {}
 
 
 def iter_sources(root):

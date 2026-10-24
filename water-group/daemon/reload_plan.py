@@ -55,6 +55,13 @@ ENTRY_FILES = {
 # NapCat injection, not a watchdog bounce.
 GUARD_OWNED = frozenset({
     "water-group/daemon/up.py",
+    # issue #37: up.py is only a facade now; the three modules it imports at module
+    # level are the guard's own code just the same. A child restart cannot swap the
+    # copy the resident guard already imported, so changing them needs the same
+    # full stop/start as up.py itself.
+    "water-group/daemon/wg_up_probe.py",
+    "water-group/daemon/wg_up_wake.py",
+    "water-group/daemon/wg_up_stack.py",
     "water-group/daemon/supervisor.py",
     "water-group/daemon/reload.py",
     "water-group/daemon/winconsole.py",

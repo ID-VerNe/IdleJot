@@ -5,7 +5,7 @@
 是按端口判幂等的，于是「停了但其实没停」，重启还静默空转。根因不是缺一个入口脚本，
 是停止逻辑本身漏了「树外残留」这一层。
 
-本门禁全程离线：`up.subprocess.run`（taskkill / netstat）与 `up.time` 都换成记录器，
+本门禁全程离线：`subprocess.run`（taskkill / netstat）与两个模块的 `time` 都换成记录器，
 日志写进临时 `WATER_GROUP_HOME`。它不碰真栈，也不会杀任何真实进程。
 
     .venv/Scripts/python.exe scripts/check_stop_stack.py
@@ -14,6 +14,7 @@ import ast
 import atexit
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -27,12 +28,14 @@ atexit.register(shutil.rmtree, HOME, True)
 os.environ["WATER_GROUP_HOME"] = str(HOME)
 
 import up  # noqa: E402
+import wg_up_probe  # noqa: E402  (issue #37 PA: finder 与端口探测的真实调用点)
+import wg_up_stack  # noqa: E402  (issue #37 PB: stop_stack 的真实调用点)
 
 SELF = {str(os.getpid()), str(os.getppid())}
 
 
 class Clock:
-    """`up.time` 的替身：sleep 不真睡，time() 每次前进，保证等待循环会收敛。"""
+    """`wg_up_*` 的 `time` 替身：sleep 不真睡，time() 每次前进，保证等待循环会收敛。"""
 
     def __init__(self):
         self.now = 1_000_000.0
@@ -100,10 +103,14 @@ class Completed:
 
 
 class Stubs:
-    """把 up.py 的 OS 边界整体换掉，退出时还原。
+    """把 OS 边界整体换掉，退出时还原（issue #37：补丁打到真实调用点所在的模块）。
 
     `pids` 按「哪一类」回答：`guard` / `watchdog` / `stack`。三者共用一个
-    `_match_pids` 入口，所以打这一个点就覆盖了全部 finder，不必重写它们。
+    `_match_pids` 入口，所以打这一个点就覆盖了全部 finder，不必重写它们——但它现在
+    住在 `wg_up_probe`，打 `up._match_pids` 只会改门面那份引用，finders 照旧走真机器。
+
+    `time` 要打两处：`stop_stack` 自己的 sleep 在 `wg_up_stack`，端口等待循环在
+    `wg_up_probe`。只打一处等于放一半真等待进来。
     """
 
     def __init__(self, pids, os_stub=None, instances=0):
@@ -131,15 +138,20 @@ class Stubs:
         return "guard"
 
     def __enter__(self):
-        self.saved = (up.subprocess.run, up.time, up._match_pids, up._kill_instances)
-        up.subprocess.run = self.os.run
-        up.time = self.clock
-        up._match_pids = self.match
-        up._kill_instances = lambda: self.instances
+        self.saved = (
+            subprocess.run, wg_up_probe.time, wg_up_stack.time,
+            wg_up_probe._match_pids, wg_up_stack._kill_instances,
+        )
+        subprocess.run = self.os.run
+        wg_up_probe.time = self.clock
+        wg_up_stack.time = self.clock
+        wg_up_probe._match_pids = self.match
+        wg_up_stack._kill_instances = lambda: self.instances
         return self
 
     def __exit__(self, *exc):
-        up.subprocess.run, up.time, up._match_pids, up._kill_instances = self.saved
+        (subprocess.run, wg_up_probe.time, wg_up_stack.time,
+         wg_up_probe._match_pids, wg_up_stack._kill_instances) = self.saved
         return False
 
     def stop(self):

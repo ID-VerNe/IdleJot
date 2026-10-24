@@ -32,7 +32,7 @@ CLI 只做两件事：写 `~/.water-group/state/wg_reload.request`，轮询结�
 | `water-group/daemon/collector.py` | 只重启 `collector` |
 | `chatlocal/**`（`app` 的闭包） | 重启 `server_wg` |
 | `water-group/daemon/wg_paths.py` | 重启全部 5 个子进程，并 warning：guard 侧仍是旧副本 |
-| `water-group/daemon/up.py` / `supervisor.py` / `reload.py` / `winconsole.py` / `bootstrap.py` | **拒绝**；这些是 guard-owned，必须从 explorer 重启 `water-group/start-bot.pyw` |
+| `water-group/daemon/up.py` / `wg_up_probe.py` / `wg_up_wake.py` / `wg_up_stack.py` / `supervisor.py` / `reload.py` / `winconsole.py` / `bootstrap.py` | **拒绝**；这些是 guard-owned（issue #37 把 up.py 拆成「门面 + 三个模块」，改哪一块都算 guard 代码），必须从 explorer 重启 `water-group/start-bot.pyw` |
 | `pyproject.toml` / `uv.lock` | **拒绝**；先 `uv sync`，再整栈启动 |
 | `doc/**`、`*.md`、`*.json`、`personas/**` | 不重启；数据变更按读取端是否每次读盘决定 |
 | 一次性 CLI（`reply.py` / `listen.py` / `watch.py` / `look.py` / `dossier.py`） | 不重启；下次调用天然是新进程 |

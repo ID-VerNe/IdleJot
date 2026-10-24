@@ -30,7 +30,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
-import up  # noqa: E402
+import up  # noqa: E402  (门面；补丁见下，issue #37 起要打到 wg_up_wake)
+import wg_up_wake  # noqa: E402  (issue #37 PC: 唤醒判定的真实调用点)
 
 import reply  # noqa: E402
 
@@ -38,6 +39,10 @@ NOW = time.time()
 FRESH = (NOW - 5 * 60) * 1000        # 5 分钟前：任何合理 TTL 内都算新鲜
 OLD = (NOW - 3 * 3600) * 1000        # 3 小时前：默认 TTL 7200 下已过期
 TTL = 7200
+
+# 哪些补丁必须同时打到门面：消费方（watch.py / reply.py）是经 `up.<name>` 调用的，
+# 只改归属模块的话它们读到的还是导入时绑定的旧对象。
+CONSUMED_THROUGH_FACADE = {"events", "replied_ids", "replied_after"}
 
 CASES = []
 
@@ -59,19 +64,30 @@ def rows():
 
 
 def patch_up(event_rows, ledger=()):
-    """固定 up 的输入：事件流、账本、唤醒词、已回判定。"""
-    up.events = lambda: list(event_rows)
-    up.replied_ids = lambda: set(ledger)
-    up.replied_after = lambda *a, **k: False
-    up.self_account = lambda: "10001"
-    up.wake_words = lambda: ["小鲸鱼"]
+    """固定唤醒判定的输入：事件流、账本、唤醒词、已回判定。
+
+    issue #37：这些函数搬到了 `wg_up_wake`。补丁要装两处才算完整——`watch.py` /
+    `reply.py` 经 `up.<name>` 读，`wg_up_wake` 内部互相调用读自己的 globals；
+    只打一处，另一半仍走真实现（门禁照绿，测的却是真账本/真配置）。
+    """
+    stubs = (
+        ("events", lambda: list(event_rows)),
+        ("replied_ids", lambda: set(ledger)),
+        ("replied_after", lambda *a, **k: False),
+        ("self_account", lambda: "10001"),
+        ("wake_words", lambda: ["小鲸鱼"]),
+    )
+    for name, value in stubs:
+        setattr(wg_up_wake, name, value)
+        if name in CONSUMED_THROUGH_FACADE:  # 消费方走 `up.<name>`，门面也要换
+            setattr(up, name, value)
 
 
-_real_config = up.config
+_real_config = wg_up_wake.config
 
 
 def restore_config():
-    up.config = _real_config
+    wg_up_wake.config = _real_config
 
 
 # ---------- wake_expired：时效判定的边界 ----------
@@ -94,7 +110,7 @@ def 卡在边界上不算过期():
     # (x*1000)/1000 的浮点来回有约 1e-7 秒误差，实测约 1.2% 概率把「恰好
     # 等于」舍成「大于」，CI 上随机红过一次；这里全部取值精确可表示。
     ttl = 1.0
-    up.config = lambda: {"pending_reply": {"max_age_seconds": ttl}}
+    wg_up_wake.config = lambda: {"pending_reply": {"max_age_seconds": ttl}}
     try:
         edge = 1_000_000                       # ms，精确
         now = edge / 1000 + ttl                # 1001.0，精确
@@ -113,7 +129,7 @@ def 没有时间戳不判过期():
 
 @case
 def 过期判定读配置():
-    up.config = lambda: {"pending_reply": {"max_age_seconds": 60}}
+    wg_up_wake.config = lambda: {"pending_reply": {"max_age_seconds": 60}}
     two_min_old = {"timestamp": (time.time() - 120) * 1000}
     try:
         got = up.wake_expired(two_min_old)
@@ -126,15 +142,15 @@ def 过期判定读配置():
 def TTL_配置非法回落默认():
     results = []
     for raw in (None, "abc", 0, -5, ""):
-        up.config = lambda raw=raw: {"pending_reply": {"max_age_seconds": raw}}
+        wg_up_wake.config = lambda raw=raw: {"pending_reply": {"max_age_seconds": raw}}
         results.append(up.pending_reply_ttl())
-    up.config = lambda: {}  # 整段缺失
+    wg_up_wake.config = lambda: {}  # 整段缺失
     results.append(up.pending_reply_ttl())
     restore_config()
     return results == [up.DEFAULT_PENDING_REPLY_TTL] * 6
 
 
-_real_config = up.config
+_real_config = wg_up_wake.config
 
 
 # ---------- wake_state / --list：三态标记 ----------
@@ -152,10 +168,10 @@ def 三态标记齐全():
 @case
 def 已回仍然优先():
     patch_up(rows())
-    up.replied_after = lambda *a, **k: True
+    wg_up_wake.replied_after = lambda *a, **k: True
     by_id = {e["id"]: e for e in rows()}
     got = up.wake_state(by_id[9002], rows(), set())  # 过期但回过
-    up.replied_after = lambda *a, **k: False
+    wg_up_wake.replied_after = lambda *a, **k: False
     return got == "已回"
 
 

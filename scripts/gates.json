@@ -43,6 +43,8 @@
     {"name": "check_mcp_onebot.py", "shard": "mcp", "why": "OneBot 设置到工具可见性再到 HTTP notice 读取（隔离夹具）"},
     {"name": "check_mcp_chat_output.py", "shard": "mcp", "why": "轮询输出截断、游标与版本刷新语义"},
     {"name": "check_mcp_chat_turns.py", "shard": "mcp", "why": "对话轮次生命周期与原生引用（19 项并发与防竞争检查）"},
+    {"name": "check_mcp_chat_prompts.py", "shard": "mcp", "why": "提示词装配与人格卡：目录发现、缓存、体积上限与社交状态（#64）"},
+    {"name": "check_mcp_picker.py", "shard": "mcp", "why": "平台过滤先于分页、会话搜索与参数校验（#64）"},
     {"name": "check_mcp_reactions.py", "shard": "mcp", "why": "表情回应 dry-run：真实 MCP HTTP + loopback OneBot"},
     {"name": "check_mcp_language_learning.py", "shard": "mcp", "why": "实时边聊边学契约（合成夹具，无模型调用）"},
     {"name": "check_mcp_language_integration.py", "shard": "mcp", "why": "语言学习跨层集成（真实 MCP wire + 合成 WS）"},
@@ -52,6 +54,7 @@
     {"name": "check_mcp_expression_evidence.py", "shard": "mcp", "why": "表达证据 vs 机器人政策回归"},
     {"name": "check_plugin_registry.py", "shard": "mcp", "why": "插件注册表（#4 PA 与 PB）"},
     {"name": "check_app_plugins.py", "shard": "mcp", "why": "app 侧插件协议：显式 scope/expression 声明、静态表、停用即降级、宿主无插件名硬编码（#4 PD/PD2b）"},
+    {"name": "check_artifacts.py", "shard": "storage", "why": "工件导入、SHA256 共享解析、引用门槛、缓存回收与 OneBot/HTTP 边界（#64）"},
     {"name": "check_memory_engine_imports.py", "shard": "storage", "why": "水群模块单实例身份（动 shim 或 sync_* 时必跑）"},
     {"name": "check_group_memory.py", "shard": "storage", "why": "记忆引擎、MCP 读写工具与两层存储"},
     {"name": "check_group_notes.py", "shard": "storage", "why": "群级结构化术语读写闭环（#31）"},
@@ -94,11 +97,7 @@
     {"name": "check_pr_parity.py", "why": "推送前 parity：干净 worktree + 空数据根下复跑门禁（#61）；CI 本身就是干净环境，且本脚本要建 worktree/读 git 历史，不进 ci"},
     {"name": "check_repo_settings.py", "why": "平台设置只读探测（分支保护 / delete_branch_on_merge / core.hooksPath）；CI 的 GITHUB_TOKEN 读 protection 会 403，只能本机跑（#58）"}
   ],
-  "stale": [
-    {"name": "check_artifacts.py", "issue": 64, "why": "本机实测红：check_artifacts.py:37 AssertionError（0.8s），工件检索期望与现行为不符，待修"},
-    {"name": "check_mcp_chat_prompts.py", "issue": 64, "why": "本机实测红：check_mcp_chat_prompts.py:127 AssertionError（0.4s），提示词体积上限断言过期，待修"},
-    {"name": "check_mcp_picker.py", "issue": 64, "why": "本机实测红：撞 chatlocal/config.py:81 的 imports 导入约束 ValueError（1.5s），夹具路径过期，待修"}
-  ],
+  "stale": [],
   "dead": [],
   "support": [
     {"name": "check_fixture_support.py", "why": "共享夹具模块（无 main）：隔离环境、临时目录、网络护栏，被多个门禁 import"}

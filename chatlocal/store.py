@@ -15,12 +15,13 @@ from .sqlite_util import connect as sqlite_connect, initialize as sqlite_initial
 
 def tokens(text):
     # Water-group slim: jieba was a top-level import that would make the whole
-    # store-import chain fail once jieba is removed in Phase 3. Use regex
-    # \w+ tokenization as a jieba-free stub; message_fts MATCH still works
-    # because every caller of search_messages also falls through to a
-    # substring (instr(lower(content))) scan that does not depend on the
-    # index's token boundaries. Behavior is identical for ASCII queries.
-    return ' '.join(t.lower() for t in re.findall(r'\w+', text or ''))
+    # store-import chain fail once jieba is removed in Phase 3. Keep a
+    # jieba-free regex stub, but split ASCII words from CJK/letter runs: \w+
+    # merged "本地Router选择推理节点" into a single token, so message_fts MATCH
+    # could never hit "Router". Message search is still backed by an
+    # instr(lower(content)) substring scan at every call site, so this only
+    # matters for artifact_fts (unicode61), whose callers rely on the index.
+    return ' '.join(t.lower() for t in re.findall(r'[A-Za-z0-9_]+|[^\W\d_A-Za-z0-9]+', text or ''))
 
 
 class Store:

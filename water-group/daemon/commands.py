@@ -24,7 +24,7 @@ issue #6：每用户扫码绑定）。本文件只留传输与仲裁（前缀、
 issue #6 的两条硬规则：
   - §4.2 隐私缺口：取数 ctx 带用户维度，未绑定的群友**不再**回落全局 CK
     （否则任何群友发 #体力 看到的都是管理员的账号）；全局 CK 只留给
-    slash_commands.miyoushe.admin_qq 白名单与 --test 合成事件；
+    plugins.miyoushe.options.admin_qq 白名单与 --test 合成事件；
   - §4.3 轮询在后台线程：扫码是多轮有状态流程，handler 里同步等会卡住 WS 事件循环。
 """
 import argparse
@@ -62,10 +62,11 @@ DEFAULTS = {
     "ignore_at_self": True,
     "unknown_reply": "",
     "commands": {},
-    "miyoushe": {"ck": [], "uid": "", "admin_qq": [],
-                 "qr_login": {"enabled": True, "daily_limit": 5, "session_ttl": 300}},
-    "sixty": {"enabled": False, "base_url": "", "timeout": 0,
-              "max_items": 5, "default_city": "", "allow": None},
+    # 插件配置由 settings_from 归一：{名字: {enabled, groups, group_off, options}}。
+    # 宿主不认识任何 provider 字段——默认值与类型归一在 plugins/*_plugin.py
+    # （issue #4 PB）。plugins_legacy = 仍在用 slash_commands.<name> 旧键的名字。
+    "plugins": {},
+    "plugins_legacy": [],
     "ws_url": "ws://127.0.0.1:43001",
     "http_url": "http://127.0.0.1:43000",
     "token": "",
@@ -216,23 +217,80 @@ def clear_stale_lock():
     return pid
 
 
+# slash_commands 段里属于平台（不是任何插件）的键。旧配置把插件配置和平台配置
+# 放在同一段，PB 之后插件配置搬到顶层 plugins；这里只负责把两者分开，键名清单
+# 与 DEFAULTS 一一对应。
+_PLATFORM_KEYS = frozenset({
+    "enabled", "prefix", "help_keywords", "cooldown_seconds",
+    "ignore_at_self", "unknown_reply", "commands",
+})
+
+
+def _plugins_from(cfg):
+    """插件三态 + options 归一（issue #4 PB）。宿主不认识任何插件名。
+
+    两种写法等价，归一化后逐字段相等（``check_plugin_registry`` 直接比对两个 dict）：
+
+    * ``slash_commands.<name>: {enabled, ck, ...}`` —— 旧键，除 ``enabled``/
+      ``groups`` 外的键整体当 options。只认**注册表里有的**名字，避免把旧段里的
+      杂键当成插件。
+    * ``plugins.<name>: {enabled, groups, options}`` —— 新键。同名时新键整体覆盖
+      旧键（不做字段级合并：合并会让「删掉旧键」变成一件看不出效果的事）。
+
+    ``groups.<id>.plugins.<name>: false`` 归一成 ``group_off``：群级关闭表达的是
+    「这个群不想看这个插件」，与 ``groups`` 白名单（只在这些群开）是两件事。
+    """
+    section = cfg.get("slash_commands") or {}
+    explicit = cfg.get("plugins") or {}
+    known = {plugin.name for plugin in PLUGINS.plugins()}
+    legacy = {name: entry for name, entry in section.items()
+              if name in known and name not in explicit}
+
+    group_off = {}
+    for gid, gcfg in (cfg.get("groups") or {}).items():
+        for name, on in ((gcfg or {}).get("plugins") or {}).items():
+            if not on:
+                group_off.setdefault(str(name), set()).add(str(gid))
+
+    out = {}
+    # 注册表里的插件先铺默认值（没配也要有 ``enabled``/``options``，否则
+    # ``--status`` 与门控都得各自处理「键不存在」），再补配置里多出来的名字
+    # （拼错的插件名也留一条，门禁才看得见）。
+    order = [plugin.name for plugin in PLUGINS.plugins()]
+    order += [name for name in explicit if name not in order]
+    for name in order:
+        entry = explicit[name] if name in explicit else legacy.get(name)
+        entry = entry if isinstance(entry, dict) else {}
+        plugin = PLUGINS.get(str(name))
+        options = dict(entry.get("options") or {})
+        for key, value in entry.items():
+            if key not in ("enabled", "groups", "options"):
+                options[key] = value      # 旧键平铺写法
+        scoped = entry.get("groups") or []
+        if isinstance(scoped, (str, int)):
+            scoped = [scoped]
+        enabled = entry.get("enabled")
+        out[str(name)] = {
+            "enabled": bool(plugin.default_enabled if plugin else True)
+                       if enabled is None else bool(enabled),
+            "groups": [str(g).strip() for g in scoped if str(g).strip()],
+            "group_off": sorted(group_off.get(str(name), ())),
+            "options": {**dict(plugin.options_defaults if plugin else {}),
+                        **(plugin.normalize(options) if plugin else options)},
+        }
+    return out, sorted(legacy)
+
+
 def settings_from(cfg):
-    """把 config.json 拍平成运行期设置。纯函数，检查脚本直接喂字典。"""
+    """把 config.json 拍平成运行期设置。纯函数，检查脚本直接喂字典。
+
+    插件配置走 ``_plugins_from``：默认值与类型归一都在插件自己那里
+    （``Plugin.options_defaults`` / ``Plugin.normalize``），本函数只认三态。
+    """
     section = cfg.get("slash_commands") or {}
     groups = {str(g) for g, gcfg in (cfg.get("groups") or {}).items()
               if (gcfg or {}).get("enabled")}
-    mys = section.get("miyoushe") or {}
-    ck = mys.get("ck") or []
-    if isinstance(ck, str):
-        ck = [ck] if ck.strip() else []
-    admin = mys.get("admin_qq") or []
-    if isinstance(admin, (str, int)):
-        admin = [admin]
-    qr = mys.get("qr_login") or {}
-    six = section.get("sixty") or {}
-    allow = six.get("allow")
-    if allow is not None:  # None = 用 sixty.DEFAULT_ALLOW；[] = 全禁
-        allow = [str(k).strip() for k in allow if str(k).strip()]
+    plugins_map, legacy = _plugins_from(cfg)
     merged = dict(DEFAULTS)
     merged.update({
         "enabled": bool(section.get("enabled", DEFAULTS["enabled"])),
@@ -242,24 +300,8 @@ def settings_from(cfg):
         "ignore_at_self": bool(section.get("ignore_at_self", DEFAULTS["ignore_at_self"])),
         "unknown_reply": str(section.get("unknown_reply") or ""),
         "commands": section.get("commands") or {},
-        "sixty": {
-            "enabled": bool(six.get("enabled", False)),
-            "base_url": str(six.get("base_url") or "").strip(),
-            "timeout": _positive(six.get("timeout"), 0),
-            "max_items": int(_positive(six.get("max_items"), 5)) or 5,
-            "default_city": str(six.get("default_city") or "").strip(),
-            "allow": allow,
-        },
-        "miyoushe": {
-            "ck": [str(c) for c in ck if str(c).strip()],
-            "uid": str(mys.get("uid") or ""),
-            "admin_qq": [str(q).strip() for q in admin if str(q).strip()],
-            "qr_login": {
-                "enabled": bool(qr.get("enabled", True)),
-                "daily_limit": int(_positive(qr.get("daily_limit"), 5)),
-                "session_ttl": _positive(qr.get("session_ttl"), 300),
-            },
-        },
+        "plugins": plugins_map,
+        "plugins_legacy": legacy,
         "ws_url": str(cfg.get("onebot_ws_url") or DEFAULTS["ws_url"]),
         "http_url": str(cfg.get("onebot_http_url") or DEFAULTS["http_url"]),
         "token": str(cfg.get("onebot_token") or ""),
@@ -267,6 +309,20 @@ def settings_from(cfg):
         "groups": groups,
     })
     return merged
+
+
+def plugin_options(settings, name):
+    """插件私有配置（``settings["plugins"][name]["options"]``）。"""
+    return ((settings.get("plugins") or {}).get(name) or {}).get("options") or {}
+
+
+def qr_login_options(settings):
+    """扫码登录的配置。**PC 之前唯一的宿主→provider 读取点**。
+
+    ``#登录`` 与轮询线程都要这一段；qr_login 迁成插件后本函数与两个调用点一起
+    搬进插件（issue #4 PC），宿主就彻底不认识 miyoushe 这个词了。
+    """
+    return plugin_options(settings, "miyoushe").get("qr_login") or {}
 
 
 def _positive(value, fallback):
@@ -463,9 +519,8 @@ def login_reply(key, args, settings, event):
     if key == "绑定":
         return qr_login.bind_uid(user_id, args)
     if key == "登录":
-        mys = settings.get("miyoushe") or {}
-        if not (mys.get("qr_login") or {}).get("enabled", True):
-            return "扫码登录未开启（config → slash_commands.miyoushe.qr_login.enabled）"
+        if not qr_login_options(settings).get("enabled", True):
+            return "扫码登录未开启（config → plugins.miyoushe.options.qr_login.enabled）"
         try:
             session = qr_login.start_login(settings, user_id, event.get("group_id"))
         except qr_login.QrLoginError as exc:
@@ -629,8 +684,7 @@ def serve():
     if qr_login is not None:
         qr_login.start_poller(
             lambda group_id, qq, text: notify_login(box["settings"], group_id, qq, text),
-            cfg_getter=lambda: ((box["settings"].get("miyoushe") or {})
-                                .get("qr_login") or {}))
+            cfg_getter=lambda: qr_login_options(box["settings"]))
         log("qr-login poller started")
     try:
         return _serve(settings, connect, ConnectionClosed, box)
@@ -639,7 +693,7 @@ def serve():
 
 
 def plugin_counts():
-    """启动日志里的插件指纹：``miyoushe:17,sixty:14``。缺项 = 那个插件没加载起来。"""
+    """启动日志里的插件指纹：``名字:指令数,名字:指令数``。缺项 = 那个插件没加载起来。"""
     return ",".join(f"{plugin.name}:{len(plugin.commands)}"
                     for plugin in PLUGINS.plugins())
 

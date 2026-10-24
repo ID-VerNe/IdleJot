@@ -43,24 +43,33 @@
         "desc": "连通性测试",
         "reply": "pong"
       }
-    },
+    }
+  },
+  "plugins": {
     "miyoushe": {
-      "ck": [],
-      "uid": "",
-      "admin_qq": [],
-      "qr_login": {
-        "enabled": true,
-        "daily_limit": 5,
-        "session_ttl": 300
+      "enabled": true,
+      "groups": [],
+      "options": {
+        "ck": [],
+        "uid": "",
+        "admin_qq": [],
+        "qr_login": {
+          "enabled": true,
+          "daily_limit": 5,
+          "session_ttl": 300
+        }
       }
     },
     "sixty": {
       "enabled": false,
-      "base_url": "",
-      "timeout": 6,
-      "max_items": 5,
-      "default_city": "",
-      "allow": ["简报", "热搜", "天气", "预报", "历史", "摸鱼", "运势", "行情", "豆瓣", "科技", "KFC", "笑话", "答案", "一言"]
+      "groups": [],
+      "options": {
+        "base_url": "",
+        "timeout": 6,
+        "max_items": 5,
+        "default_city": "",
+        "allow": ["简报", "热搜", "天气", "预报", "历史", "摸鱼", "运势", "行情", "豆瓣", "科技", "KFC", "笑话", "答案", "一言"]
+      }
     }
   },
   "groups": {
@@ -70,6 +79,9 @@
       "participation": "natural",
       "trigger_mode": "mention_only",
       "enabled": true,
+      "plugins": {
+        "sixty": false
+      },
       "member_mappings": {
         "10001": {
           "name": "张三",

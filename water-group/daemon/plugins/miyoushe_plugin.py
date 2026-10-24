@@ -11,7 +11,8 @@ from typing import Mapping
 
 import miyoushe
 
-from plugins.base import CAP_CREDENTIAL, Command, CredentialProvider, Hooks, Plugin
+from plugins.base import (CAP_CREDENTIAL, Command, CredentialProvider, Hooks, Plugin,
+                          positive)
 
 try:
     import qr_login
@@ -45,13 +46,38 @@ def _commands() -> tuple[Command, ...]:
 
 
 def _admins(settings: Mapping) -> set[str]:
-    section = settings.get("miyoushe") or {}
-    return {str(qq).strip() for qq in (section.get("admin_qq") or []) if str(qq).strip()}
+    return set(PLUGIN.options(settings).get("admin_qq") or [])
 
 
 def _global_credentials(settings: Mapping) -> tuple[list[str], str]:
-    section = settings.get("miyoushe") or {}
-    return list(section.get("ck") or []), str(section.get("uid") or "")
+    options = PLUGIN.options(settings)
+    return list(options.get("ck") or []), str(options.get("uid") or "")
+
+
+def _normalize(options: Mapping) -> dict:
+    """旧 ``slash_commands.miyoushe`` 的归一化搬到这里（issue #4 PB）。
+
+    ``ck`` 允许写成单个字符串（手改配置时最常见），``admin_qq`` 允许标量；
+    ``qr_login`` 三个键有缺省值，且 ``daily_limit=0`` 表示不限流，不能被
+    ``or`` 吃掉。
+    """
+    ck = options.get("ck") or []
+    if isinstance(ck, str):
+        ck = [ck] if ck.strip() else []
+    admins = options.get("admin_qq") or []
+    if isinstance(admins, (str, int)):
+        admins = [admins]
+    qr = options.get("qr_login") or {}
+    return {
+        "ck": [str(c) for c in ck if str(c).strip()],
+        "uid": str(options.get("uid") or ""),
+        "admin_qq": [str(qq).strip() for qq in admins if str(qq).strip()],
+        "qr_login": {
+            "enabled": bool(qr.get("enabled", True)),
+            "daily_limit": int(positive(qr.get("daily_limit"), 5)),
+            "session_ttl": positive(qr.get("session_ttl"), 300),
+        },
+    }
 
 
 def _blocked(ctx: Mapping, settings: Mapping | None = None) -> str:
@@ -105,11 +131,14 @@ def _credentials(settings: Mapping) -> CredentialProvider:
 
 
 class _MiyoushePlugin(Plugin):
-    """只为拿一个可覆写的 ``load()``（``Plugin`` 是 frozen dataclass，实例不能改）。"""
+    """``load()`` 拿日志句柄；``normalize`` 收口旧配置的形状（issue #4 PB）。"""
 
     def load(self, host) -> None:
         global _LOG
         _LOG = host.log
+
+    def normalize(self, options: Mapping) -> dict:
+        return _normalize(options)
 
 
 PLUGIN = _MiyoushePlugin(

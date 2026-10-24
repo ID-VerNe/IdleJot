@@ -37,6 +37,15 @@ Ctx = dict[str, Any]
 Reply = Any
 
 
+def positive(value: Any, fallback: float) -> float:
+    """非负数解析：坏值/负数回落 fallback（配置里手写的 0 是有效值）。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return number if number >= 0 else fallback
+
+
 class PluginError(RuntimeError):
     """注册期错误：重名、api 不兼容、能力缺失。一律 fail-fast，不静默覆盖。"""
 
@@ -102,10 +111,38 @@ class Plugin:
     requires: frozenset[str] = frozenset()
     error_types: tuple[type[BaseException], ...] = ()
     hooks: Hooks = field(default_factory=Hooks)
+    # 缺省是否启用。60s 资讯设为 False（旧行为：合入但没开配置就静默落空）。
+    default_enabled: bool = True
+    # 插件私有配置的默认值；宿主不再知道任何 provider 字段（issue #4 PB）。
+    options_defaults: Mapping[str, Any] = field(default_factory=dict)
 
     def enabled(self, settings: Settings, group_id: str = "") -> bool:
-        """插件级开关。PB 起由 ``plugins.<name>`` 配置驱动；本轮一律 True。"""
-        return True
+        """三态门控：``enabled`` 总开关 → ``groups`` 白名单 → 群级 ``group_off``。
+
+        配置由 ``settings_from`` 归一（见 ``commands._plugins_from``），插件不解析
+        原始 JSON；群级覆盖写成 ``groups.<id>.plugins.<name>: false``。
+
+        ``group_id`` 为空表示「不问具体群」（``--status`` 那类全局查询）：只判总
+        开关，不套群级覆盖——否则配了 ``groups`` 白名单的插件会在状态里显示停用。
+        """
+        cfg = (settings.get("plugins") or {}).get(self.name) or {}
+        if not bool(cfg.get("enabled", self.default_enabled)):
+            return False
+        if not group_id:
+            return True
+        scoped = cfg.get("groups") or ()
+        if scoped and str(group_id) not in scoped:
+            return False
+        return str(group_id) not in (cfg.get("group_off") or ())
+
+    def options(self, settings: Settings) -> Mapping[str, Any]:
+        """本插件的归一化配置（``settings_from`` 已套过 ``normalize``）。"""
+        entry = (settings.get("plugins") or {}).get(self.name) or {}
+        return entry.get("options") or {}
+
+    def normalize(self, options: Mapping[str, Any]) -> dict[str, Any]:
+        """把原始 ``options`` 归一成运行期形状。默认原样复制。"""
+        return dict(options)
 
     def load(self, host: "Host") -> None:
         """宿主装配完成后的初始化。不得在这里做网络请求。"""

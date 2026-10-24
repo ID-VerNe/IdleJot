@@ -126,6 +126,7 @@ class Registry:
 
     def status_line(self, settings: Settings | None = None) -> str:
         parts: list[str] = []
+        legacy = set((settings or {}).get("plugins_legacy") or ())
         for name, plugin in self._plugins.items():
             total = len(plugin.commands)
             if settings is None:
@@ -135,6 +136,9 @@ class Registry:
                     1 for cmd in plugin.commands
                     if plugin.enabled(settings) and cmd.available(settings))
                 text = f"{name} {'已启用' if live else '停用'}({live} 指令)"
+            if name in legacy:
+                # 旧键还能用，但归一化结果与新键等价；提示一句免得两处配置打架。
+                text += f"（仍用旧键 slash_commands.{name}，可迁到 plugins.{name}）"
             extra = plugin.hooks.status(settings) if (plugin.hooks.status and settings is not None) else ""
             if extra:
                 text += f" {extra}"

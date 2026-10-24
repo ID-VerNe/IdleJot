@@ -61,7 +61,7 @@
 
 | 改的东西 | 生效方式 |
 |---|---|
-| `water-group/config.json`（群列表、各类开关、`sixty.enabled`…） | `commands.py` **按消息懒重载**（`RELAY_SECONDS=30`，判断点在下一条消息 `dispatch` 之前），**不用重启** |
+| `water-group/config.json`（群列表、各类开关、`plugins.<名字>.enabled`…） | `commands.py` **按消息懒重载**（`RELAY_SECONDS=30`，判断点在下一条消息 `dispatch` 之前），**不用重启** |
 | `commands.py` / `sixty.py` / `miyoushe.py` / `qr_login.py` 等 handler 代码 | `.\reload.ps1`：按 AST 闭包只重启 `commands`（`HANDLERS` 是 import 期合成的，进程级重启才会换模块） |
 | `memory_engine.py` | `.\reload.ps1`：闭包会命中 `app` / `commands` / `watchdog`，自动重启对应子进程 |
 | `up.py` / `bootstrap.py` / `reload.py` / `winconsole.py` / `watchdog.py` / `supervisor.py` / `start-bot.pyw`（启动链、控制台、NapCat 注入） | **必须整栈重启**：`.\stop.ps1`（或 `up.py --stop`）后从 explorer 启动 `start-bot.pyw`；`reload.ps1` 会把 guard-owned 代码拒绝掉，普通重载不会替换已运行的 `up.py` 和它拉起的 NapCat（#4 的旧乱码控制台窗口就是这么留下的） |

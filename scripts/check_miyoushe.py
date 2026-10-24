@@ -490,9 +490,11 @@ def test_commands_wiring():
           "#体力" in commands.resolve_reply("帮助", settings)
           and "#公告" in commands.resolve_reply("命令", settings))
     check("commands: ck 字符串归一成列表",
-          commands.settings_from({"slash_commands": {"miyoushe": {"ck": "a=b"}}})["miyoushe"]["ck"] == ["a=b"])
+          commands.settings_from({"slash_commands": {"miyoushe": {"ck": "a=b"}}})
+          ["plugins"]["miyoushe"]["options"]["ck"] == ["a=b"])
     check("commands: 空 ck 归一成空列表",
-          commands.settings_from({"slash_commands": {"miyoushe": {"ck": "  "}}})["miyoushe"]["ck"] == [])
+          commands.settings_from({"slash_commands": {"miyoushe": {"ck": "  "}}})
+          ["plugins"]["miyoushe"]["options"]["ck"] == [])
 
 
 def main():

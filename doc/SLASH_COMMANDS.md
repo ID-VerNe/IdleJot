@@ -57,12 +57,42 @@ QQ 群 ── NapCat WS 43001 ──┬─ 客户端① chatlocal 后端（现�
 | `ignore_at_self` | `true` | `@机器人 #xxx` 混合消息让给 Agent，避免双响应 |
 | `unknown_reply` | `""` | 未配置关键词的回复；留空 = 静默忽略（防刷屏） |
 | `commands` | `{}` | 关键词 → `{desc, reply}`，纯静态文本 |
-| `miyoushe.admin_qq` | `[]` | 可用全局 CK 的 QQ 白名单（见 §8 隐私变更） |
-| `miyoushe.qr_login` | `{enabled:true, daily_limit:5, session_ttl:300}` | 扫码登录开关/每日次数/二维码有效期（秒） |
+| `miyoushe.admin_qq` | `[]` | 可用全局 CK 的 QQ 白名单（见 §8 隐私变更），现写 `plugins.miyoushe.options.admin_qq` |
+| `miyoushe.qr_login` | `{enabled:true, daily_limit:5, session_ttl:300}` | 扫码登录开关/每日次数/二维码有效期（秒），现写 `plugins.miyoushe.options.qr_login` |
 
 `onebot_ws_url`（默认 `ws://127.0.0.1:43001`）也在这里配，与 `onebot_http_url` 并列。
 
 改 `config.json` **30 秒热生效**，不用重启；把 `enabled` 改回 `false` 守护自行退出。
+
+### 3.1 插件配置（`plugins`，issue #4 PB）
+
+`#` 指令背后的插件（米游社取数、60s 资讯）有自己的字段，不再挤在
+`slash_commands` 里，而是顶层 `plugins.<名字>`：
+
+```json
+"plugins": {
+  "miyoushe": {
+    "enabled": true,
+    "options": {"ck": [], "uid": "", "admin_qq": [], "qr_login": {"enabled": true}}
+  },
+  "sixty": {"enabled": false, "options": {"base_url": "", "allow": ["简报", "天气"]}}
+},
+"groups": {
+  "123456789": {"plugins": {"sixty": false}}
+}
+```
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `enabled` | 插件自报（`miyoushe` 开、`sixty` 关） | 总开关；关掉后该插件的指令全部落空、`#帮助` 也不列 |
+| `groups` | `[]` | 只在这些群开；空 = 所有群 |
+| `options` | 插件自报 | 插件私有字段；默认值与类型归一（`ck` 字符串→列表一类）由插件负责 |
+| `groups.<群号>.plugins.<名字>: false` | — | 群级关闭，优先级最高 |
+
+旧写法 `slash_commands.<名字>` 仍然认：除 `enabled`/`groups` 外的键整体当
+`options`，归一化结果与新写法**逐字段相等**（`scripts/check_plugin_registry.py`
+直接比对两个 dict）。`up.py --status` 的「插件」一行会标注还在用旧键的插件。
+两种写法同名时**新键整体覆盖旧键**，不做字段级合并。
 
 ## 4. 行为边界
 
@@ -136,11 +166,13 @@ Yunzai 生态独有的价值在渲染图与插件广度；Python handler 的价�
 
 ### 配 CK
 
-`water-group/config.json` → `slash_commands.miyoushe`：
+`water-group/config.json` → `plugins.miyoushe.options`（旧写法
+`slash_commands.miyoushe` 仍认，见 §3.1）：
 
 ```json
-"miyoushe": {"ck": ["ltuid=...; ltoken=...; cookie_token=..."], "uid": "100000000",
-             "admin_qq": ["主人的QQ号"]}
+"plugins": {"miyoushe": {"enabled": true, "options": {
+  "ck": ["ltuid=...; ltoken=...; cookie_token=..."], "uid": "100000000",
+  "admin_qq": ["主人的QQ号"]}}}
 ```
 
 CK 是账号凭证：只放本地 gitignore 的 config.json，**不要**外发、不要贴群、不进日志。
@@ -294,7 +326,7 @@ UID 直接拒绝（绑错游戏会提示加前缀）；Web 流没拿到 stoken �
 ## 9. 60s 资讯指令（sixty.py，issue #53）
 
 `sixty.py` 挂了第二组动态 handler：数据源是 `vikiboss/60s`（MIT）的实例
-`config.json` 里 `sixty.base_url` 指向的实例，群友发 `#简报` / `#热搜` / `#天气` 直接取数回帖，
+`config.json` 里 `plugins.sixty.options.base_url` 指向的实例，群友发 `#简报` / `#热搜` / `#天气` 直接取数回帖，
 同样不过 Agent。与米游社那组的区别：**无鉴权、无凭证、与账号绑定体系完全无关**，
 所以全部 `need_ck=False`，未绑定群友照样用。
 
@@ -317,7 +349,7 @@ UID 直接拒绝（绑错游戏会提示加前缀）；Web 流没拿到 stoken �
 | `#答案` | `/v2/answer` | 答案之书，随机一句（中文，不上英文原文） |
 | `#一言` | `/v2/hitokoto` | 随机一句话 |
 
-### 配置（`slash_commands.sixty`）
+### 配置（`plugins.sixty.options`）
 
 | 键 | 默认 | 说明 |
 |---|---|---|
@@ -327,6 +359,10 @@ UID 直接拒绝（绑错游戏会提示加前缀）；Web 流没拿到 stoken �
 | `max_items` | `5` | 列表类指令条数 |
 | `default_city` | `""` | 天气 / 油价兜底城市 |
 | `allow` | `["简报","热搜","天气","预报","历史","摸鱼","运势","行情","豆瓣","科技","KFC","笑话","答案","一言"]` | 白名单；`[]` = 全禁，缺省 = 默认名单 |
+
+`enabled` 与 `allow` 是两层闸门：插件总开关（含群级覆盖）在前，`allow` 在后。
+旧写法 `slash_commands.sixty.{enabled, base_url, ...}` 仍然认（见 §3.1），
+归一化结果与上表逐字段相等。
 
 ### 天气三级回退
 
@@ -380,7 +416,7 @@ UID 直接拒绝（绑错游戏会提示加前缀）；Web 流没拿到 stoken �
 
 ### 实机验证（2026-10-23）
 
-开关是 `config.json` 的 `slash_commands.sixty.enabled`（该文件不入库）。`commands.py` 的配置
+开关是 `config.json` 的 `plugins.sixty.enabled`（该文件不入库）。`commands.py` 的配置
 **按消息懒重载**（`RELAY_SECONDS=30`，判断点在消息循环里）：改完不必重启，下一条群消息之前就生效；
 `--test` 是独立进程，直接读新配置。
 

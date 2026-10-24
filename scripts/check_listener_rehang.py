@@ -66,6 +66,9 @@ GROUP = "1:group:123"
 # 文档里挂着 `--timeout N` 示例的四处（issue #83）：Agent 照抄的就是这些命令。
 DOC_SAMPLES = ("AGENTS.md", "README.md", ".agents/rules/water_group.md",
                ".agents/skills/water-group/SKILL.md")
+# 守护脚本里也有会被人照抄的提示串（`up.py --status` 的「下一步」）。
+DAEMON_SOURCES = tuple(sorted(p.relative_to(ROOT).as_posix()
+                              for p in (DAEMON.glob("*.py"))))
 
 CASES = []
 
@@ -354,7 +357,12 @@ def 等待开始前声明边界():
 
     这条是 issue 的决定性一条：`listen.py` 按设计不返回，群里一直安静时宿主迟早
     会截断这次调用，而截断路径上一个字都不打印。所以断言不是「有输出」，而是
-    「等待开始那一句在 NO_WORK 之前就出来了」——被砍掉时它是唯一的痕迹。
+    「等待开始那一句在 `TIMEOUT` 之前就出来了」——被砍掉时它是唯一的痕迹。
+
+    锚点必须是 `TIMEOUT`（`watch.py` 等完之后才打的那行），不能用 `NO_WORK`：
+    两者都在等待之后，把这句话挪到 `run()` 下面仍然会排在 `NO_WORK` 前面，
+    只有排在 `TIMEOUT` 之前才证明「等待开始前」。变异实测：把打印挪到
+    `run()` 之后，这条红。
     """
     with temp_dir(prefix="wg-rehang-") as home:
         fixture_home(home)
@@ -362,7 +370,9 @@ def 等待开始前声明边界():
                           "--no-digest")
     out = proc.stdout
     waiting = index_of(out, "等最多 1s（第 1 轮）")
-    return proc.returncode == 0 and waiting >= 0 and index_of(out, "NO_WORK") > waiting
+    timed_out = index_of(out, "TIMEOUT")
+    return (proc.returncode == 0 and waiting >= 0 and timed_out >= 0
+            and timed_out > waiting and index_of(out, "NO_WORK") > timed_out)
 
 
 @case
@@ -388,15 +398,16 @@ def 超预算的取值不写进重挂命令():
 
 
 @case
-def 文档示例不超预算():
-    """文档里的挂监听示例必须装得进一次工具调用（issue #83 候选 4）。
+def 示例命令不超预算():
+    """文档与守护脚本里的 `--timeout` 示例都得装得进一次工具调用（issue #83）。
 
     源码改对了不算修好：Agent 照抄的是 `AGENTS.md` / `README.md` / `SKILL.md` /
-    rules 里的示例命令。这四处一旦写回 300/240，用户在真实环境里就复现 issue 的
-    症状，而本机门禁全绿。
+    rules 里的示例命令，以及 `up.py --status` 的「下一步」提示串（`up.py:242`
+    曾经硬编码 300，比文档还难发现——它是运行时打印的）。这四处与
+    `water-group/daemon/*.py` 一起扫，白名单为空：示例本来就该是这个口径。
     """
     over = []
-    for rel in DOC_SAMPLES:
+    for rel in DOC_SAMPLES + DAEMON_SOURCES:
         text = (ROOT / rel).read_text(encoding="utf-8")
         for value in re.findall(r"--timeout[ =](\d+)", text):
             if int(value) > wg_budget.WAIT_BUDGET:

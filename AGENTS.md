@@ -345,7 +345,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 62 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
 | 63 | `reply` | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
 
-共 63 个 CI 门禁，分 5 个分片（`static` 12、`runtime` 14、`mcp` 14、`storage` 8、`reply` 15）；`manual` 14、`stale` 3、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
+共 63 个 CI 门禁，分 5 个分片（`static` 12、`runtime` 14、`mcp` 14、`storage` 8、`reply` 15）；`manual` 15、`stale` 3、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
 <!-- gates:ci:end -->
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂
@@ -377,7 +377,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | `--history` | commit 作者/提交者邮箱（只放行 GitHub noreply）与 commit message |
 | `--text <文件>` / `--text -` | issue / PR / commit 文案草稿，发布前跑 |
 | `.githooks/commit-msg` | 每次 commit 自动扫 message |
-| `.githooks/pre-push` | 每次 push 自动跑 `--require-private --history` |
+| `.githooks/pre-push` | 每次 push 自动跑 `--require-private --history`，再对每个被推送的 commit 跑 `scripts/check_pr_parity.py`（干净 worktree + 空数据根复跑门禁，issue #61）；`SKIP_PARITY=1` 可跳过第二步并在 stderr 留痕 |
 
 钩子靠本地配置生效：`git config core.hooksPath .githooks`（换机器后重设一次）。新图片必须先人工打开确认，再登记进 `REVIEWED_IMAGES`，否则门禁 fail。
 

@@ -62,6 +62,9 @@ Tulpa 只保存会话和等待消息，不调用内置模型、不替外部客�
 
 
 def schemas(tool):
+    # 转发节点上限只认 MAX_NODES：常量在 PA 提到 100 后 schema 仍写 50，
+    # 显式重读被压成两页、next_call 的 limit=100 还会被自己的 schema 拒绝（issue #8 分节 PD）。
+    from .mcp_chat_details import MAX_NODES
     sid = dict(session_id=session_id(SESSION_ID_DESCRIPTION))
     key = dict(idempotency_key=idempotency_key())
     rows = [
@@ -83,7 +86,7 @@ def schemas(tool):
         tool('read_chat_forward', '分页读取当前已读事件的直接转发或引用原文内转发。优先使用已有内容；仅未完成项沿 read_call/next_call 原样读取，引用位置使用返回的 reply_index。节点内图片用父 event_id 和 image_index；unrecoverable_truncation 表示处理上限之外无法继续。',
              dict(**sid,event_id=dict(type='integer',minimum=1),forward_index=dict(type='integer',minimum=0,maximum=99,default=0),
                   reply_index=dict(type='integer',minimum=0,maximum=7,description='仅引用内转发填写；沿返回调用复制引用位置，forward_index 为引用原文中的段位置。'),
-                  offset=dict(type='integer',minimum=0,maximum=50,default=0),limit=dict(type='integer',minimum=1,maximum=50,default=50)),
+                  offset=dict(type='integer',minimum=0,maximum=MAX_NODES,default=0),limit=dict(type='integer',minimum=1,maximum=MAX_NODES,default=MAX_NODES)),
              ['session_id','event_id']),
         tool('wait_chat_messages', '统一等待群消息或可执行的 learning_ready。消息优先；潜水/silence 也要确认上批并继续等待。learning_ready 时领取一个阶段；claim 返回 task 时独立模型调用后沿 task.submit_call 提交。claim/submit 附 updated_chat 时沿 next_call 先聊天；未领取任务或已提交且无附带聊天时回本工具。idle/冷却/预算暂停继续等待，不结束、不忙轮询。确认上批用 acknowledge_through_id。无需用户手动领取任务。',
              dict(**sid, acknowledge_through_id=dict(type='integer', minimum=0), note=dict(type='string', maxLength=1500),

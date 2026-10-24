@@ -713,10 +713,10 @@ def wake_reason(event):
 
 
 def pending_reply_ttl():
-    """待回唤醒的时效上限（秒），读 config.json 的 pending_reply.max_age_seconds。
+    """待回唤醒的时效上限（秒），读 config.json 顶层 pending_reply.max_age_seconds。
 
-    与 followup 段平级。缺失或非法（含 0 / 负数）时回落 7200：一个拼错的
-    配置不该把时效关掉，那正是这个修复要治的病。
+    缺失或非法（含 0 / 负数）时回落 7200：一个拼错的配置不该把时效关掉，那正
+    是这个修复要治的病。
     """
     raw = (config().get("pending_reply") or {}).get("max_age_seconds")
     try:
@@ -890,7 +890,6 @@ def app_plugins_line():
 def report(exclude_pids=None, resident_pid=None):
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
-    import followup
 
     account, nickname = (None, None)
     info = login_info()
@@ -933,15 +932,6 @@ def report(exclude_pids=None, resident_pid=None):
     cmds = commands_pids(exclude=exclude_pids)
     command = (f"运行中 pid={','.join(cmds)}（# 指令直回，不过 Agent）" if cmds
                else "未运行（# 指令无自动回复）")
-    window = followup.load()
-    if window and not followup.stale(window):
-        until = window.get("until") or 0
-        left = wg_clock.seconds_left(until)
-        left_text = f"，还剩 {left}s" if left is not None else ""
-        follow = (f"进行中（回复后还可跟 {window.get('budget')} 条，"
-                  f"静默至 {wg_clock.clock(until)}{left_text}）")
-    else:
-        follow = "未开窗（只等 @ 和关键词）"
     rows = events()
     ledger = replied_ids()
     wakes = [e for e in rows if wake_reason(e)][-6:]
@@ -955,9 +945,15 @@ def report(exclude_pids=None, resident_pid=None):
     print(f"#指令     : {command}")
     try:
         import commands as wg_commands  # noqa: PLC0415  只读：拿插件状态与设置
-        plugin_line = wg_commands.PLUGINS.status_line(wg_commands.load_settings())
+        settings = wg_commands.load_settings()
+        plugin_line = wg_commands.PLUGINS.status_line(settings)
+        # 追问行走 window_status 事件（issue #4 PD2a）：与插件行同一次 import，
+        # 门控口径也一致——插件行说「停用」而追问行说「进行中」是自相矛盾。
+        follow = (wg_commands.PLUGINS.emit("window_status", {"settings": settings})
+                  or "未开窗（只等 @ 和关键词）")
     except Exception as exc:  # noqa: BLE001  status must not fail because a plugin is broken
         plugin_line = f"状态不可读（{type(exc).__name__}: {exc}）"
+        follow = "状态不可读"
     print(f"插件      : {plugin_line}")
     try:
         app_line = app_plugins_line()

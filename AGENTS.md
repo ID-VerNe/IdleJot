@@ -38,8 +38,10 @@
 `scripts/check_now_clock.py` 门禁钉住。
 
 追问窗口：回复成功后 `reply.py` 自动开窗（默认再跟 10 条或静默 180 秒），群里继续聊的
-几句也会唤醒监听（唤醒行带 `[追问]` 前缀），话题能接着走；`--no-followup` 单次关闭，
-`config.json` 的 `followup` 段调参数，详见 `~/.water-group/rules/water_group.md`。
+几句也会唤醒监听（唤醒行带 `[追问]` 前缀），话题能接着走；`--no-followup` 单次关闭。
+它是插件（issue #4 PD2a）：参数与开关在 `config.json` 的 `plugins.followup`
+（`enabled` 三态 + `groups` 白名单 + `options.max_messages` / `idle_seconds`），
+旧写法顶层 `followup` 段仍逐字段兼容；详见 `~/.water-group/rules/water_group.md`。
 
 > **职责边界（issue #83）**：接管后主 Agent 只水群——白名单是 `listen.py` / `reply.py` / `up.py --status`（只读）/ 追问窗口接话。
 > 改仓库、跑测试门禁、写文档、审 PR、排查一律 `Agent(run_in_background: true)` 派后台 subagent，派完立刻回监听，不原地等。

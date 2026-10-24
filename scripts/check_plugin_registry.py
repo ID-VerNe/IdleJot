@@ -17,6 +17,16 @@
 7. **群级覆盖生效**（PB）：``groups.<群号>.plugins.<名字>: false`` 在该群
    落空、且不出现在 ``#帮助`` 里。
 
+issue #4 PD2a 追加（事件型插座）：
+
+8. **事件型插件必须静态注册**：``EVENT_LOADERS`` 里的每一项都在 ``LOADERS``
+   里，且 ``plugins.emit``（CLI 路）与 commands 注册表拿到同一个 PLUGIN 对象——
+   两条派发路两份状态是会分叉的。
+9. **legacy_section 等价**：插件声明历史上的顶层配置段（追问窗口的
+   ``"followup"``），归一化结果必须与 ``plugins.<名字>`` 新键逐字段相同，
+   且**不进** ``plugins_legacy``（那个列表的 --status 提示写死了
+   ``slash_commands.<名字>``，顶层段不是同一种迁移）。
+
     .venv/Scripts/python.exe scripts/check_plugin_registry.py
 """
 import json
@@ -159,6 +169,45 @@ def test_plugin_config():
           "sixty 已启用" in commands.PLUGINS.status_line(only),
           commands.PLUGINS.status_line(only))
 
+    # 第三种旧写法（PD2a）：顶层 followup 段逐字段等效，且不进 plugins_legacy
+    legacy_followup = commands.settings_from({"followup": {
+        "enabled": True, "max_messages": 5, "idle_seconds": 60}})
+    new_followup = commands.settings_from({"plugins": {"followup": {
+        "enabled": True, "options": {"max_messages": 5, "idle_seconds": 60}}}})
+    check("legacy_section 顶层段与新键归一化逐字段相等",
+          legacy_followup["plugins"]["followup"] == new_followup["plugins"]["followup"],
+          f"{legacy_followup['plugins']['followup']} != "
+          f"{new_followup['plugins']['followup']}")
+    check("顶层段不进 plugins_legacy", legacy_followup["plugins_legacy"] == [],
+          str(legacy_followup["plugins_legacy"]))
+    check("顶层段停用也认",
+          commands.settings_from({"followup": {"enabled": False}})
+          ["plugins"]["followup"]["enabled"] is False)
+
+
+def test_event_plugins():
+    """事件型插座（issue #4 PD2a）：没有 ``#`` 指令的能力怎么注册与派发。"""
+    print("[事件型插件]")
+    import plugins
+
+    follow = commands.PLUGINS.get("followup")
+    check("followup 已注册", follow is not None)
+    check("followup 挂 on_event", follow is not None and follow.hooks.on_event is not None)
+    check("CLI 路与注册表是同一个 PLUGIN", plugins._load_followup() is follow,
+          "两条派发路两份状态是会分叉的")
+    check("EVENT_LOADERS 非空", bool(plugins.EVENT_LOADERS))
+    for name, loader in plugins.EVENT_LOADERS:
+        check(f"EVENT_LOADERS[{name}] 也在 LOADERS", (name, loader) in plugins.LOADERS)
+    # 无指令插件不许显示成「停用(0 指令)」——那读起来像坏了。
+    # 只钉 followup 段：sixty 那种「有指令但全被门控关掉」显示 0 指令是合理的。
+    line = commands.PLUGINS.status_line(commands.settings_from({}))
+    segment = next(s for s in line.split(" / ") if s.startswith("followup"))
+    check("--status 无指令插件不显示指令计数", "指令" not in segment, segment)
+    check("--status 有 followup 开关一行", "followup 已启用" in line, line)
+    off = commands.settings_from({"plugins": {"followup": {"enabled": False}}})
+    check("--status 停用态一致", "followup 停用" in commands.PLUGINS.status_line(off),
+          commands.PLUGINS.status_line(off))
+
 
 def test_lifecycle():
     print("[生命周期 / 登录指令归属]")
@@ -279,6 +328,7 @@ def main():
     test_config_names()
     test_help_is_answerable()
     test_plugin_config()
+    test_event_plugins()
     test_lifecycle()
     test_duplicate()
     test_static_reachable()

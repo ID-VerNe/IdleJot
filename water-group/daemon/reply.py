@@ -10,9 +10,9 @@ The ledger matters for handoff. The collector only delivers a batch when someone
 without a local record the next agent reads the status report, sees [待回] on a
 message that was already answered, and replies to it twice.
 
-Every successful send also opens a follow-up window (followup.py): the group can
-keep talking for a while afterwards and watch.py still wakes on it, so a reply
-does not fall on deaf ears the moment it lands. --no-followup turns that off.
+Every successful send also opens a follow-up window (追问窗口插件，issue #4 PD2a):
+the group can keep talking for a while afterwards and watch.py still wakes on it,
+so a reply does not fall on deaf ears the moment it lands. --no-followup turns that off.
 
 Usage:
   reply.py <event_id> "<text>" [--intent "..."] [--no-quote] [--no-followup]
@@ -39,7 +39,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import mcp_client  # noqa: E402
-import followup  # noqa: E402
+import plugins  # noqa: E402  (事件型能力派发口：追问窗口，issue #4 PD2a)
 import wg_aliases  # noqa: E402  (别名指向渲染，issue #30)
 import winconsole  # noqa: E402
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
@@ -273,8 +273,9 @@ def event_target(event_id):
             return parts[2], str(row["onebot_message_id"])
         return None
     # 追问唤醒要回的是被 mention_only 滤掉的闲聊，wg_events.jsonl 里没有它，
-    # 只能回库拿编号——不然引用挂不上，群号也只能靠猜。
-    return followup.lookup(event_id)
+    # 只能回库拿编号——不然引用挂不上，群号也只能靠猜。DB 兜底归追问插件，
+    # 不过它的三态开关：关了窗口也要能回 --context 里看到的闲聊（PD2a）。
+    return plugins.emit("event_lookup", {"event_id": event_id})
 
 
 _ROSTER = {}
@@ -660,7 +661,8 @@ def latest_group_id():
         if len(parts) == 3 and parts[1] == "group":
             return parts[2]
     # 一条唤醒都没有的时候（追问窗口里的闲聊不会进 wg_events），退回全量库问。
-    return followup.latest_group_id()
+    # 同上：DB 兜底不过三态开关（issue #4 PD2a）。
+    return plugins.emit("active_group") or ""
 
 
 def unanswered(answered):
@@ -687,17 +689,38 @@ def unanswered(answered):
             and not up.wake_expired(e)]
 
 
-def open_followup(event_id, wanted=True, not_before=None):
-    """发送成功后开追问窗口，让话题继续；wanted=False 或配置关了就不开。
+def _plugin_settings():
+    """追问窗口一类插件的归一化设置（三态门控要它）。
+
+    延迟 import commands：reply 的其余路径不碰插件，别让每条回复都拖指令树
+    进来（实测约 80ms；顶层 requests 已花 111ms，可接受但不该白花）。
+    读不到配置时回落空设置——插件按 default_enabled 走，回复链路不陪葬。
+    """
+    try:
+        import commands  # noqa: PLC0415
+        return commands.load_settings()
+    except Exception:  # noqa: BLE001  设置坏了不该让已发出的回复报错
+        return {}
+
+
+def open_followup(event_id, group_id="", wanted=True, not_before=None):
+    """发送成功后开追问窗口，让话题继续；wanted=False 或插件停了就不开。
 
     not_before 是发送开始的墙上时间：窗口只收这之后的发言，避免把 Agent 思考
-    期间堆下的历史闲聊算成接话（issue #29）。
+    期间堆下的历史闲聊算成接话（issue #29）。group_id 带进去，三态门控按群判
+    （issue #4 PD2a）——这个群关了追问窗口，别的群照开。
     """
-    if not wanted or not followup.enabled():
+    if not wanted:
         return None
-    state = followup.open(event_id, not_before=not_before)
-    print(f"[追问] 窗口已开：还可跟 {state['budget']} 条，"
-          f"静默 {state['idle_seconds']}s 后收回")
+    state = plugins.emit("reply_sent", {
+        "settings": _plugin_settings(),
+        "group_id": group_id,
+        "event_id": event_id,
+        "not_before": not_before,
+    })
+    if state:
+        print(f"[追问] 窗口已开：还可跟 {state['budget']} 条，"
+              f"静默 {state['idle_seconds']}s 后收回")
     return state
 
 
@@ -841,7 +864,8 @@ def main():
         if sent == len(bubble_segments):
             record(answered, args.text)
             print("SENT")
-            open_followup(target, not args.no_followup, not_before=send_started)
+            open_followup(target, group_id=group_id,
+                          wanted=not args.no_followup, not_before=send_started)
             return wait_for_next(args.wait) if args.wait else 0
         if sent:
             # 已经有气泡落地，再走计划通道会把首条重复发一遍。
@@ -868,7 +892,8 @@ def main():
         if final_target != target:
             print(f"note: batch moved, plan target was {final_target}")
         print("SENT")
-        open_followup(final_target, not args.no_followup, not_before=send_started)
+        open_followup(final_target, group_id=group_id,
+                      wanted=not args.no_followup, not_before=send_started)
         return wait_for_next(args.wait) if args.wait else 0
     print("SEND_FAILED")
     return 1

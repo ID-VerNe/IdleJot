@@ -337,6 +337,10 @@ uv run python scripts/check_dossier_ingest.py
 #     bin/ 与 archive/ 的脚本必须在对应 INDEX.md 登记；drafts/ 非空只警告；
 #     archive/ 条目缩水只报告。无数据根时自动跑 A/B 自检，不空转
 uv run python scripts/check_tmp_hygiene.py
+
+# 25. 转发体唤醒（issue #9）：合并转发里的 @ 与关键词必须参与 wake_reason；
+#     首层/嵌套两层、不可得时不猜、节点 100/字符 4000 封顶、# 指令闸门优先
+uv run python scripts/check_forward_wake.py
 ```
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

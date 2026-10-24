@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from wg_daemon import logger, write_json
+from wg_config import config_path  # noqa: E402  (config.json 路径单一规则，issue #51)
 from wg_paths import logs_dir, state_dir
 
 # The watchdog runs without a console, so any console child it spawns (powershell,
@@ -32,7 +33,9 @@ from wg_paths import logs_dir, state_dir
 import winconsole  # noqa: E402  (探针开窗抑制，一次收口)
 
 LOG = logs_dir() / "napcat-watchdog.log"
-CONFIG = ROOT / "water-group" / "config.json"
+# 与 wg_config / bootstrap 同一份路径规则：IDLEJOT_WG_CONFIG / TULPA_WG_CONFIG
+# 覆盖时探针读同一份配置，不会出现「探针读旧路径、注入读新路径」。
+CONFIG = config_path()
 # Machine-readable "the link is down" marker (issue #45): halt used to exist
 # only as a log line, so a duty agent saw "no wake-up" with no way to tell a
 # quiet group from a dead chain. up.py --status and any watcher read this.
@@ -211,8 +214,36 @@ def relaunch():
     except Exception as exc:  # noqa: BLE001
         log(f"launch failed: {type(exc).__name__}: {exc}")
         return False
-    log(f"launch -> {ok} {note}")
+    record = bootstrap.last_launch()
+    if record:
+        # 把「这次拉起的是谁」写进日志（issue #46）：下一轮失败时靠它比对，
+        # 而不是只剩一句 launch -> False 可看。
+        log(f"launch -> {ok} {note} launcher pid={record['launcher_pid']} at {record['started_at']}")
+    else:
+        log(f"launch -> {ok} {note} (no injection this round)")
     return ok
+
+
+def launch_trace():
+    """上一轮注入的实例现在是什么状态（issue #46）。
+
+    `killed 0` 本身不说明问题：可能是上一实例还活着但命令行没指纹，finder
+    认不出；也可能是它启动即死、从没进过进程表。把记录里的 `pid@时间` 与现读
+    的实例列表一起写进日志，连续两次失败是不是同源就能直接看出来。
+    """
+    from water_group import bootstrap
+
+    record = bootstrap.read_launch_record()
+    if not record:
+        return "prev launch: none recorded"
+    pid = record["launcher_pid"]
+    started = record.get("started_at") or "?"
+    instances = record.get("instance_pids") or []
+    if instances:
+        return f"prev launch pid={pid} at {started} still up (pids {','.join(instances)})"
+    if record.get("launcher_alive"):
+        return f"prev launch pid={pid} at {started} still booting"
+    return f"prev launch pid={pid} at {started} gone before settling"
 
 
 def write_halt_state(kind, fails, reason, first_fail_at=None):
@@ -249,6 +280,10 @@ def kill_injected_instances():
     port owner leaves the QQ main running with no bridge: a ~190 MB orphan that
     still holds the shared profile and fights whatever gets injected next. That
     is how ten of them accumulated while the log kept reporting a clean relaunch.
+
+    Identification lives in bootstrap (issue #46): the launch record we wrote when
+    spawning the launcher, matched against QQ's ParentProcessId, plus the old
+    `-q <account>` marker as a fallback.
     """
     from water_group import bootstrap
 
@@ -361,8 +396,11 @@ def main():
                 continue
 
             pid = owner_pid()
+            # 先读上一轮实例的状态再动手：杀掉之后 instance_pids 就空了，
+            # 「它本来还活着」这个事实只能在这一刻记下来（issue #46）。
+            trace = launch_trace()
             killed = kill_injected_instances()
-            log(f"unresponsive pid={pid}, killed {killed} injected instance(s)")
+            log(f"unresponsive pid={pid}, killed {killed} injected instance(s); {trace}")
             if killed:
                 time.sleep(3)
             relaunch()
@@ -379,7 +417,7 @@ def main():
                 if fails == 1:
                     first_fail_at = time.strftime("%Y-%m-%d %H:%M:%S")
                 delay = min(BACKOFF_BASE * (2 ** (fails - 1)), BACKOFF_MAX)
-                log(f"boot timeout (#{fails}), backing off {delay}s")
+                log(f"boot timeout (#{fails}), {launch_trace()}, backing off {delay}s")
                 time.sleep(delay)
         except Exception as exc:  # noqa: BLE001
             log(f"loop error: {type(exc).__name__}: {exc}")

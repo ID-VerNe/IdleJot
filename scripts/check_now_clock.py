@@ -15,6 +15,11 @@
 全程临时 `WATER_GROUP_HOME` / `IDLEJOT_WG_DB`，不碰实机状态：
 
     .venv/Scripts/python.exe scripts/check_now_clock.py
+
+issue #51 之后 `watch.py` 启动就要 `self_account`（没有就拒绝启动）：本门禁
+进程内跑 `watch.main()` 的用例与若干子进程 CLI 因此带一份最小身份夹具
+（`FIXTURE_CONFIG`，`IDLEJOT_WG_CONFIG` 指过去），否则会红在「监听拒绝启动」
+上，而它测的是唤醒块的时间锚。
 """
 import atexit
 import contextlib
@@ -44,6 +49,15 @@ os.environ["IDLEJOT_WG_DB"] = str(HOME / "data" / "mcp-access.sqlite3")
 for _name in ("IDLEJOT_WG_STATE", "TULPA_WG_STATE"):
     os.environ.pop(_name, None)
 
+# #51 之后 watch.py 启动就要 self_account（缺身份拒绝启动）：watch 用例进程内
+# 跑 main()、子进程 CLI 也可能校验身份。写一份最小配置到临时数据根，用
+# IDLEJOT_WG_CONFIG 指过去——不读实机配置（门禁不许依赖机器状态）。
+FIXTURE_CONFIG = HOME / "config.json"
+FIXTURE_CONFIG.write_text(json.dumps({"self_account": "10001",
+                                      "onebot_token": "clock-fixture"},
+                                     ensure_ascii=False), encoding="utf-8")
+os.environ["IDLEJOT_WG_CONFIG"] = str(FIXTURE_CONFIG)
+
 sys.path.insert(0, str(DAEMON))
 
 import followup  # noqa: E402
@@ -51,6 +65,7 @@ import reply  # noqa: E402
 import up  # noqa: E402
 import watch  # noqa: E402
 import wg_clock  # noqa: E402
+import wg_config  # noqa: E402
 
 DB = Path(os.environ["IDLEJOT_WG_DB"])
 SID = "session-clock"
@@ -99,6 +114,7 @@ def child_env():
     env = dict(os.environ)
     env["WATER_GROUP_HOME"] = str(HOME)
     env["IDLEJOT_WG_DB"] = str(DB)
+    env["IDLEJOT_WG_CONFIG"] = str(FIXTURE_CONFIG)
     env["PYTHONUTF8"] = "1"
     for name in ("IDLEJOT_WG_STATE", "TULPA_WG_STATE"):
         env.pop(name, None)
@@ -233,11 +249,16 @@ def watch_唤醒块先给现在():
     watch.read_cursor = lambda: 0
     watch.write_cursor = lambda value: None
     sys.argv = ["watch.py", "--timeout", "5", "--replay"]
+    # #51 后 main() 启动即校验 self_account：本用例在进程内跑，桩一份最小身份
+    # （wg_config.CONFIG 是 import 期求值的模块全局，子进程那套 env 覆盖管不到）。
+    real_config = wg_config.CONFIG
+    wg_config.CONFIG = FIXTURE_CONFIG
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf):
             code = watch.main()
     finally:
+        wg_config.CONFIG = real_config
         (up.events, up.replied_ids, up.wake_reason, up.wake_expired,
          up.replied_after, watch.read_cursor, watch.write_cursor, sys.argv) = saved
     lines = [ln.strip() for ln in buf.getvalue().splitlines() if ln.strip()]

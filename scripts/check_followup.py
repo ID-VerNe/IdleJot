@@ -333,6 +333,13 @@ def check_watch_budget_wake():
     append([(601, {"sender": "丙", "content": "最后一句",
                    "timestamp": 1792500400000}, 1792500400.0)])
     followup.open(anchor, max_messages=1, idle_seconds=600)
+    # #51 之后 watch.py 启动就要 self_account；config.json 被 gitignore，CI 干净
+    # checkout 没有它——写份最小配置用 IDLEJOT_WG_CONFIG 指过去（只进子进程 env，
+    # 不动本进程 environ：本文件其他用例对 config 有自己的桩）。
+    fixture = Path(TMP) / "watch-fixture-config.json"
+    fixture.write_text(json.dumps({"self_account": "10001",
+                                   "onebot_token": "followup-fixture"},
+                                  ensure_ascii=False), encoding="utf-8")
     env = dict(os.environ)
     env["PYTHONUTF8"] = "1"
     for name in ("WATER_GROUP_HOME", "IDLEJOT_WG_STATE", "TULPA_WG_STATE",
@@ -342,6 +349,7 @@ def check_watch_budget_wake():
     env["TULPA_WG_STATE"] = TMP
     env["IDLEJOT_WG_DB"] = str(DB)
     env["TULPA_WG_DB"] = str(DB)
+    env["IDLEJOT_WG_CONFIG"] = str(fixture)
     result = subprocess.run([sys.executable, str(WATCH), "--timeout", "5"],
                             cwd=str(ROOT), env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True,

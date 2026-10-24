@@ -14,12 +14,18 @@ issue #91 里连续 4 次「只有 WAKE、没有内容」就是这么来的。
 `NO_WORK`，且 `TIMEOUT` 在前（顺序丢了同样说明透传是假的）。在「继承 stdout」
 的旧写法上 `TIMEOUT` 是空的 —— 这是这条门禁存在的唯一理由。
 
+issue #51 之后 `watch.py` 启动时要 `self_account`（没有就拒绝启动），而
+config.json 被 gitignore、CI 的干净 checkout 里没有它：门禁因此写一份临时配置
+并用 `IDLEJOT_WG_CONFIG` 指过去（`run_passthrough` 不传 `env=`，listen 的子进程
+原样继承），否则会红在错误的病因上。
+
 第二条更小：`WAKE` 只能由 `watch.py` 打。透传修好之后 `listen.py` 再补一句
 `print("WAKE")` 就会出现两行，读日志的人会以为有两次唤醒（issue #91 第 5 点）。
 
     .venv/Scripts/python.exe scripts/check_listen_passthrough.py
 """
 import ast
+import json
 import os
 import subprocess
 import sys
@@ -34,9 +40,27 @@ ISOLATING_VARS = ("IDLEJOT_WG_STATE", "TULPA_WG_STATE", "IDLEJOT_WG_DB",
                   "IDLEJOT_WG_MEMORY_DB")
 
 
-def run_listen(home):
+def write_fixture_config(tmp):
+    """issue #51 后 watch.py 启动就要 self_account，没有就拒绝启动（exit 1）。
+
+    config.json 被 gitignore，CI 的干净 checkout 里没有它——不给 watch 一份
+    最小身份的话，这条门禁会红在「监听拒绝启动」上，而它测的是透传。配置写到
+    临时目录、用 `IDLEJOT_WG_CONFIG` 指过去：不碰仓库树（崩在中间不会给开发机
+    留占位配置），也不读实机配置（门禁不许依赖机器状态）。
+    """
+    config = Path(tmp) / "config.json"
+    config.write_text(json.dumps({"self_account": "10001",
+                                  "onebot_token": "listen-fixture"},
+                                 ensure_ascii=False), encoding="utf-8")
+    return config
+
+
+def run_listen(home, config):
     env = dict(os.environ)
     env["WATER_GROUP_HOME"] = str(home)
+    # run_passthrough 不传 env=，listen 的 watch 子进程原样继承——覆盖对
+    # 孙子的 watch.py 同样生效。
+    env["IDLEJOT_WG_CONFIG"] = str(config)
     env["PYTHONUTF8"] = "1"
     for name in ISOLATING_VARS:
         env.pop(name, None)
@@ -66,7 +90,8 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8")
 
     with tempfile.TemporaryDirectory(prefix="wg-listen-") as home:
-        result = run_listen(home)
+        config = write_fixture_config(home)
+        result = run_listen(home, config)
     out = result.stdout or ""
     failures = []
 

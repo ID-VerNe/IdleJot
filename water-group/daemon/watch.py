@@ -60,6 +60,25 @@ def latest_id(rows):
     return max((r.get("id") or 0) for r in rows) if rows else 0
 
 
+def require_wake_identity():
+    """缺 self_account 的监听必须拒绝启动，而不是假装在工作（issue #51）。
+
+    config.json 丢失时 ``self_account()`` 读空：``wake_reason`` 的 @ 匹配
+    （``str(seg.qq) == ""``）永假、关键词列表为空——监听进程活着、collector 在收
+   消息、游标在推进，只有「Agent 不回应」一个症状，而 Agent 侧看到的是「没有
+    唤醒」，与「群里没人说话」完全无法区分。一个永远唤不醒的监听比没有监听更糟。
+
+    返回 0 放行；返回 1 并打印缺什么、怎么恢复（config.example.json）。
+    """
+    if up.self_account():
+        return 0
+    print("[拒绝] water-group/config.json 缺失或未设置 self_account：")
+    print("       @ 判定永假、self_names 关键词为空，这个监听不可能被唤醒。")
+    print("       按 water-group/config.example.json 恢复配置后重试；")
+    print("       当前缺什么可以用 up.py --status 的「配置」行核对。")
+    return 1
+
+
 def _plugin_settings():
     """追问窗口插件的归一化设置（三态门控要它，issue #4 PD2a）。
 
@@ -82,6 +101,11 @@ def main():
     args = parser.parse_args()
 
     winconsole.ensure_utf8_stdio()
+
+    # 先验身份再等唤醒：缺 self_account 时每一条 @ 都判不中，挂着也是白挂
+    # （issue #51）。listen.py 经 run_passthrough 透传这个退出码。
+    if require_wake_identity():
+        return 1
 
     cursor = 0 if args.replay else (args.after if args.after is not None else read_cursor())
     deadline = time.time() + args.timeout

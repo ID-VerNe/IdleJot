@@ -38,7 +38,7 @@
 
 适配器字段按本机 Antigravity 2.23.1 内嵌 cortex.proto 核对，且每次校验 TTFT + streaming 与生成步骤结束时间是否一致；
 字段缺失或时间不一致的生成记录不归类为模型等待。升级导致无法解析时，应重新核对，不能猜测。
-`scripts/check_antigravity_reply_timing.py` 使用合成 protobuf/SQLite 检查解析、只读、时间不匹配拒绝及分段总时长守恒。
+`scripts/antigravity_reply_timing.py` 是这条链路的解析器（`reply_timing_report.py --antigravity` 仍用它读本机宿主时序），解析、只读、时间不匹配拒绝与分段总时长守恒的合成夹具门禁已随桌面壳清理删除（issue #59），改动解析器时需人工复核。
 
 主要阶段：
 

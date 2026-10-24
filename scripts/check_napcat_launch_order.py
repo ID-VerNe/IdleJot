@@ -51,6 +51,10 @@ class FakeProc:
 def stubbed(**overrides):
     names = dict(
         is_port_open=lambda port: False,
+        # issue #51：ensure_napcat 现在会先 ensure_config()（缺失时从模板重建
+        # 配置）。门禁在干净 checkout 上跑，不打桩就会把 config.example.json
+        # 拷进仓库工作区——那是真实副作用，必须桩掉。
+        ensure_config=lambda: None,
         wait_napcat_ports=lambda seconds=12: True,
         kill_stale_instances=lambda: 0,
         configured_account=lambda: "10001",

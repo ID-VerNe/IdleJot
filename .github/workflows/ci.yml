@@ -7,15 +7,25 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+# 同一分支/PR 的新推送取消旧运行（issue #60）：不再让上一轮白烧 runner。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  checks:
+  gates:
     # slim is Windows-only (taskkill/WMI/.pyw, pywin32); there is no Linux
-    # terminal chain to validate anymore, so this is the only job.
+    # terminal chain to validate anymore, so this is the only matrix job.
+    name: gates (${{ matrix.shard }})
     runs-on: windows-latest
     timeout-minutes: 40
     env:
       PYTHONUTF8: '1'
       GRADIO_ANALYTICS_ENABLED: 'False'
+    strategy:
+      # 门禁分片互不影响：一片红不取消其余片，一次红灯看全貌（issue #60）。
+      fail-fast: false
+      matrix:
+        shard: [static, runtime, mcp, storage, reply]
     steps:
       # Pinned to an exact tag, same rule as setup-uv below. v5 runs on
       # Node.js 24, which clears the Node 20 deprecation annotation (#25).
@@ -30,92 +40,24 @@ jobs:
           python-version: '3.13'
       - name: Sync pinned dependencies
         run: uv sync --frozen
-      - name: Regression suite
+      # 门禁清单、顺序、单门禁参数与分片归属都在 scripts/gates.json（issue #59/#60）；
+      # 上面的 matrix.shard 与清单的 shards 由 scripts/check_gate_manifest.py 钉住。
+      # 分片内部仍是串行执行（保持 AGENTS.md §2.6 的安静窗口），结果写进 job 摘要。
+      - name: Regression suite (scripts/gates.json)
+        run: uv run --frozen python scripts/run_gates.py ci --shard ${{ matrix.shard }}
+  checks:
+    # 分支保护要求的必需上下文就是 `checks`（issue #58）。matrix 的检查名会变成
+    # `gates (static)` 之类，所以保留这个汇总 job 顶住原来的名字：任一色分片没绿即失败。
+    name: checks
+    needs: gates
+    if: always()
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: 汇总分片结果
         shell: pwsh
+        env:
+          MATRIX_RESULT: ${{ needs.gates.result }}
         run: |
-          $checks = @(
-            # Commit gate: publication scan and path hygiene (issue #14 class)
-            'check_publication.py',
-            'check_path_hygiene.py',
-            'check_no_console_child.py',
-            'check_listen_passthrough.py',
-            'check_issue_16_audit_fixes.py',
-            # Daemon entry smoke and stop-stack integrity
-            'check_daemon_entries.py',
-            'check_stop_stack.py',
-            'check_bootstrap_health.py',
-            'check_napcat_launch_order.py',
-            'check_water_group_import.py',
-            # MCP protocol and chat contract
-            'check_mcp.py',
-            'check_mcp_onebot.py',
-            'check_mcp_chat_output.py',
-            'check_mcp_chat_turns.py',
-            'check_mcp_reactions.py',
-            'check_mcp_language_learning.py',
-            'check_mcp_language_integration.py',
-            'check_mcp_multi_group_learning.py',
-            'check_mcp_jargon_matching.py',
-            'check_mcp_jargon_pipeline.py',
-            'check_mcp_expression_evidence.py',
-            # Memory engine, personas and planning
-            'check_memory_engine_imports.py',
-            'check_group_memory.py',
-            'check_group_notes.py',
-            'check_sender_name.py',
-            'check_text_truncation.py',
-            # dossier.py 写入动词：载荷校验、超长拒绝、游标只在写入成功后推进（issue #6）
-            'check_dossier_ingest.py',
-            # 跨群主档污染审计/清理/还原：只读审计、只剔覆盖行已持有条目、
-            # 群内并集不变、备份可还原、dry-run 零写入（issue #34 PA）
-            'check_pollution_scrub.py',
-            # 私有目录巡检：tmp/ 禁脚本、bin+archive 必须登记、drafts 发完即删（issue #6）
-            'check_tmp_hygiene.py',
-            # One backend start must write one startup banner (issue #97)
-            'check_app_log_once.py',
-            'check_anti_habituation.py',
-            'check_plan_recovery.py',
-            # Water-group daemons: wake ledger, follow-up, replies, commands
-            'check_wake_ledger.py',
-            'check_forward_wake.py',
-            'check_followup.py',
-            'check_pending_reply.py',
-            'check_reply_context.py',
-            'check_reply_quote.py',
-            'check_quote_visibility.py',
-            'check_image_visibility.py',
-            'check_alias_visibility.py',
-            'check_reply_timing.py',
-            'check_now_clock.py',
-            'check_slash_commands.py',
-            'check_miyoushe.py',
-            'check_sixty.py',
-            'check_plugin_registry.py',
-            # App-side plugin protocol: static surface, degrade-on-disable, no name branches (issue #4 PD)
-            'check_app_plugins.py',
-            'check_qr_login.py',
-            'check_log_encoding.py',
-            'check_watchdog_token.py',
-            'check_watchdog_halt.py',
-            'check_collector_self_echo.py',
-            # Module size walls: no file >1000 lines, no class >800 (issue #11 PE)
-            'check_module_size.py',
-            # up.py facade: names must stay re-exported and identical (issue #37)
-            'check_up_facade.py',
-            # NapCat / OneBot contract and account diagnostics
-            'check_napcat_onebot_contract.py',
-            'check_napcat_qq_probe.py',
-            'check_qq_account_diagnostics.py',
-            'check_upgrade.py'
-          )
-          foreach ($check in $checks) {
-            # Publication gate also scans commit identities and messages; it
-            # derives personal tokens from the private store when present
-            # (CI has none, so CI covers credentials, paths and history).
-            if ($check -eq 'check_publication.py') {
-              uv run --frozen python "scripts/$check" --history
-            } else {
-              uv run --frozen python "scripts/$check"
-            }
-            if ($LASTEXITCODE -ne 0) { throw "$check failed" }
-          }
+          "分片矩阵结果：$env:MATRIX_RESULT" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          if ($env:MATRIX_RESULT -ne 'success') { exit 1 }

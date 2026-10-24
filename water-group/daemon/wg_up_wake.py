@@ -12,6 +12,7 @@ NapCat 前要问「OneBot 答不答」），所以方向只能是 stack → wake
 `WATER_GROUP_HOME` 在 import 前隔离，见 `scripts/check_stop_stack.py`）。
 """
 import json
+import os
 import time
 import urllib.request
 from pathlib import Path
@@ -46,8 +47,23 @@ def config():
     return wg_config.config()
 
 
+def config_problems():
+    """配置健康度（issue #51）：缺失/占位被说出来，不静默退化。
+
+    委托 ``wg_config.problems()``——「缺什么」只有一份实现，``--status`` 的配置行
+    与 bootstrap 注入前的拒绝判定共用它。空列表 = 健康。
+    """
+    return wg_config.problems()
+
+
 def onebot_token():
-    return config().get("onebot_token", "")
+    # env 覆盖优先，与 watchdog.onebot_token()（#17）同一组变量、同一语义：
+    # 轮换/冷启动/只用 env 的部署三种情况下探针行为一致。缺省再读 config.json。
+    token = (os.environ.get("IDLEJOT_ONEBOT_TOKEN")
+             or os.environ.get("TULPA_ONEBOT_TOKEN", "")).strip()
+    if token:
+        return token
+    return str(config().get("onebot_token") or "")
 
 
 def login_info():

@@ -70,13 +70,21 @@
 | `state/` | 唤醒事件、已回账本、游标、会话、追问窗口、锁与心跳 |
 | `logs/` | supervisor / collector / napcat / watchdog / launcher / stopper |
 | `data/` | `group_memories.sqlite3`（小本本）、`mcp-access.sqlite3`（消息与 MCP）、`chats.sqlite3` |
-| `tmp/` | Agent 的 scratch 脚本（别写仓库 `.tmp/`） |
+| `tmp/` | **只放机器产物**（Gradio TEMP、voice 抽取、测试夹具残留）。它是 `TEMP` 的重定向目标，语义就是「随时可整目录删」，**不得放脚本** |
+| `bin/` | 需要保留、需要复用的脚本，必须在 `bin/INDEX.md` 登记一行 |
+| `archive/` | 退役脚本与草稿，`archive/scratch/<YYYY-MM>/` 按月分桶；只增不删，不承诺可运行 |
+| `drafts/` | issue / PR 草稿，**发完即删**（远端已留存）；`bin/draft.py post` 负责门禁 + 发布 + 删除 |
 | `rules/` | **私有 Agent 规则**（本文的私有版） |
 | `personas/` | **私有人员卡**（仓库 `water-group/personas/` 只留公开模板，同名私有优先） |
 
 路径单一事实来源：`water-group/daemon/wg_paths.py`；`chatlocal/config.py` 与
 `water-group/memory_engine.py` 按同规则复述一份，改规则时三处一起改
 （`scripts/check_path_hygiene.py` 会拦漏改）。
+
+**别在 `tmp/` 里写脚本**（issue #6）：`TEMP` / `TMP` 在 `chatlocal/config.py:22-23` 就被
+改写到它，任何「磁盘紧张先清 temp」的动作都有权把它整目录删掉。脚本放 `bin/`（复用）
+或 `archive/`（退役），一次性产物用完归档。`scripts/check_tmp_hygiene.py` 四条断言巡检：
+`tmp/` 顶层有 `.py/.md/.ps1` 或 `bin/`、`archive/` 里有脚本没登记索引，都直接红。
 
 ## 5. 出问题先看三处
 

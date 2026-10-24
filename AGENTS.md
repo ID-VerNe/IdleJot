@@ -320,6 +320,13 @@ uv run python scripts/check_no_console_child.py
 # 16. NapCat 启动顺序：直接注入优先，注入失败不降级到 .bat（防 #39 的 cmd 黑框复发）
 uv run python scripts/check_napcat_launch_order.py
 
+# 16b. 配置缺失 fail-loud（issue #51）：wg_config.problems() 逐项点名（缺失/非法
+#      JSON/self_account 占位符/onebot_token 缺失，env 覆盖不计）；bootstrap.
+#      ensure_napcat() 账号为空拒绝注入且零进程；watch.require_wake_identity()
+#      缺 self_account 返回 1（永远唤不醒的监听比没有监听更糟）；up.report()
+#      消费 config_problems 且门面同一对象
+uv run python scripts/check_config_fail_loud.py
+
 # 17. 60s 资讯层契约：信封判 code、天气参数是 query、城市后缀归一化、allow 闸门（issue #53）
 uv run python scripts/check_sixty.py
 

@@ -32,10 +32,13 @@ if __package__ in (None, ""):
 # 后 flat import，避免第二份路径规则各自漂移。
 sys.path.insert(0, str(Path(__file__).resolve().parent / "daemon"))
 import winconsole  # noqa: E402  (探针开窗抑制，一次收口)
+from wg_config import config_path  # noqa: E402  (config.json 路径单一规则，issue #51)
 from wg_paths import logs_dir, personas_dir, state_dir
 
 NAPCAT_DIR = ROOT_DIR / "tools" / "napcat-shell"
-CONFIG_FILE = ROOT_DIR / "water-group" / "config.json"
+# 与 wg_config 同一份路径规则（env 覆盖同族）：本文件自己读 config.json 的三处
+# （configured_account / qq_extra_args / ensure_config）不许各写一份路径。
+CONFIG_FILE = config_path()
 CONFIG_EXAMPLE = ROOT_DIR / "water-group" / "config.example.json"
 STATUS_FILE = state_dir() / "status.json"
 
@@ -399,15 +402,32 @@ def ensure_napcat():
     racing for the same account share one user-data-dir and their GPU processes
     fight until QQ dies (see kill_stale_instances), so a second attempt is worse
     than an honest error.
+
+    issue #51: a missing config.json used to degrade the whole chain silently --
+    an empty account simply dropped the quick-login argument, NapCat fell back
+    to a QR code nobody could scan (50x Login Error ErrCode:3 in issue #50), and
+    nothing on this path said why. The account is now checked before anything is
+    spawned: no account, no injection, and the note names what to restore.
     """
     if is_port_open(43000) and is_port_open(43001):
         return True, "在线"
+
+    # 文件不在时先从模板重建，让「占位符状态」可见；ensure_config 幂等，
+    # 文件在时零动作。少了这一步，配置丢失后会一路静默（issue #51）。
+    ensure_config()
+
+    account = configured_account()
+    if not account:
+        # 少传账号参数 = NapCat 只能弹二维码等人扫，而「没配账号」与「扫码被拒」
+        # 之间隔着整条链路。拒绝注入并说清缺什么，不起任何进程。
+        return False, ("缺 self_account：water-group/config.json 缺失或未设置"
+                       "（占位符不算），NapCat 无法快速登录、只能弹二维码。"
+                       "请按 config.example.json 恢复配置后重试。")
 
     stale = kill_stale_instances()
     if stale:
         print(f"[启动] 已清理 {stale} 个残留 QQ 实例，避免多实例争用同一 user-data-dir")
 
-    account = configured_account()
     qq_exe = resolve_qq_exe()
     force_bat = os.environ.get("TULPA_NAPCAT_LAUNCHER", "").strip().lower() == "bat"
 

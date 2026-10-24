@@ -73,9 +73,11 @@ NO_RESTART = {
     "chatlocal/tulpa_model.py": "one-shot/dead module, not in a daemon closure",
     "chatlocal/watch_check.py": "one-shot/dead module, not in a daemon closure",
     "water-group/daemon/dossier.py": "one-shot CLI",
-    # Read fresh by reply.py / watch.py and by up.py's report; no daemon imports it
-    # since commands stopped pulling in up for config (issue #4 PA0).
-    "water-group/daemon/followup.py": "one-shot CLI dependency (reply/watch/status)",
+    # PD2a 后 commands 在插件注册期 import 到它（plugins.load_all →
+    # followup_plugin），但守护进程从不派发窗口事件——reply_sent / wake_scan /
+    # window_status 只从 reply / watch / up 三个一次性 CLI 发出，改了下次调用
+    # 就是新副本；守护进程里那份旧代码是死的，重启它没有意义。
+    "water-group/daemon/followup.py": "CLI-only at runtime (reply/watch/up); daemon copy never invoked",
     "water-group/daemon/wg_clock.py": "shared clock helper for guard/CLI, no daemon imports it",
     "water-group/daemon/wg_quotes.py": "shared quote renderer for guard/CLI, no daemon imports it",
     "water-group/daemon/wg_text.py": "shared body renderer for guard/CLI, no daemon imports it",

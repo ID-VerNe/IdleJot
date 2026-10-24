@@ -11,12 +11,13 @@
 """
 from __future__ import annotations
 
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 from plugins.base import (
     API_VERSION,
     Command,
     CredentialProvider,
+    Ctx,
     Plugin,
     PluginError,
     Settings,
@@ -123,6 +124,23 @@ class Registry:
                 return fn
         return None
 
+    def emit(self, event: str, ctx: Ctx | None = None) -> Any:
+        """派发命名事件（issue #4 PD2a，事件型能力的插座）。
+
+        按注册序问每个声明了 ``on_event`` 的插件，第一个非 ``None`` 的结果即止。
+        返回 ``None`` = 没人接，宿主继续走默认分支。事件是否受三态门控由插件
+        自己决定（见 ``base.Hooks.on_event``）——宿主不在这里替插件做选择。
+        """
+        ctx = ctx or {}
+        for plugin in self._plugins.values():
+            fn = plugin.hooks.on_event
+            if fn is None:
+                continue
+            result = fn(event, ctx)
+            if result is not None:
+                return result
+        return None
+
     def credential_provider(self, settings: Settings) -> CredentialProvider | None:
         for plugin in self._plugins.values():
             make = plugin.hooks.credentials
@@ -151,14 +169,22 @@ class Registry:
         parts: list[str] = []
         legacy = set((settings or {}).get("plugins_legacy") or ())
         for name, plugin in self._plugins.items():
-            total = len(plugin.commands)
-            if settings is None:
-                text = f"{name} 已注册({total} 指令)"
+            if not plugin.commands:
+                # 事件型插件没有指令可数（追问窗口一类）：直接报开关状态，
+                # 别显示成「停用(0 指令)」——那读起来像坏了。
+                if settings is None:
+                    text = f"{name} 已注册"
+                else:
+                    text = f"{name} {'已启用' if plugin.enabled(settings) else '停用'}"
             else:
-                live = sum(
-                    1 for cmd in plugin.commands
-                    if plugin.enabled(settings) and cmd.available(settings))
-                text = f"{name} {'已启用' if live else '停用'}({live} 指令)"
+                total = len(plugin.commands)
+                if settings is None:
+                    text = f"{name} 已注册({total} 指令)"
+                else:
+                    live = sum(
+                        1 for cmd in plugin.commands
+                        if plugin.enabled(settings) and cmd.available(settings))
+                    text = f"{name} {'已启用' if live else '停用'}({live} 指令)"
             if name in legacy:
                 # 旧键还能用，但归一化结果与新键等价；提示一句免得两处配置打架。
                 text += f"（仍用旧键 slash_commands.{name}，可迁到 plugins.{name}）"

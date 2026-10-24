@@ -201,12 +201,25 @@ def _plugins_from(cfg):
 
     ``groups.<id>.plugins.<name>: false`` 归一成 ``group_off``：群级关闭表达的是
     「这个群不想看这个插件」，与 ``groups`` 白名单（只在这些群开）是两件事。
+
+    第三种旧写法（issue #4 PD2a）：插件用 ``Plugin.legacy_section`` 声明自己
+    历史上的**顶层**配置段（追问窗口的 ``"followup"``），宿主按旧键平铺读——
+    ``enabled`` 进三态、其余键进 options。只认注册表里有的名字，优先级在新键
+    与 ``slash_commands`` 旧键之后。它不进 ``plugins_legacy``：那个列表的
+    --status 提示写死了 ``slash_commands.<name>``，顶层段不是同一种迁移。
     """
     section = cfg.get("slash_commands") or {}
     explicit = cfg.get("plugins") or {}
     known = {plugin.name for plugin in PLUGINS.plugins()}
     legacy = {name: entry for name, entry in section.items()
               if name in known and name not in explicit}
+    sections = {}
+    for plugin in PLUGINS.plugins():
+        if (plugin.legacy_section and plugin.name not in explicit
+                and plugin.name not in legacy):
+            entry = cfg.get(plugin.legacy_section)
+            if isinstance(entry, dict):
+                sections[plugin.name] = entry
 
     group_off = {}
     for gid, gcfg in (cfg.get("groups") or {}).items():
@@ -221,7 +234,12 @@ def _plugins_from(cfg):
     order = [plugin.name for plugin in PLUGINS.plugins()]
     order += [name for name in explicit if name not in order]
     for name in order:
-        entry = explicit[name] if name in explicit else legacy.get(name)
+        if name in explicit:
+            entry = explicit[name]
+        elif name in legacy:
+            entry = legacy[name]
+        else:
+            entry = sections.get(name)
         entry = entry if isinstance(entry, dict) else {}
         plugin = PLUGINS.get(str(name))
         options = dict(entry.get("options") or {})

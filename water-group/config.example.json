@@ -15,11 +15,6 @@
     "burst_messages": 80,
     "max_material": 60
   },
-  "followup": {
-    "enabled": true,
-    "max_messages": 10,
-    "idle_seconds": 180
-  },
   "pending_reply": {
     "max_age_seconds": 7200
   },
@@ -46,6 +41,14 @@
     }
   },
   "plugins": {
+    "followup": {
+      "enabled": true,
+      "groups": [],
+      "options": {
+        "max_messages": 10,
+        "idle_seconds": 180
+      }
+    },
     "miyoushe": {
       "enabled": true,
       "groups": [],

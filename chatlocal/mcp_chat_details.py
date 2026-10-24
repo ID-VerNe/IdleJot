@@ -8,14 +8,16 @@ from .mcp_chat_media import image_ref
 from .onebot import OneBotError
 from .onebot_segments import at as at_segment, reply as reply_segment
 
-MAX_NODES=50
+MAX_NODES=100  # QQ 单条合并转发的上限，实测 get_forward_msg 一次全量返回（issue #8）
 MAX_TEXT=12000
 
 
 def forward_nodes(value):
     if isinstance(value,list):return value
     if isinstance(value,dict):
-        for key in ('messages','nodes'):  # SnowLuma response / persisted nested nodes
+        # `content` 是 NapCat 解析 multiForwardMsgElement 时的键名（parseMultMsg 打开后
+        # 才填，见 issue #8）；`messages` / `nodes` 分别是适配器返回与本地持久化形态。
+        for key in ('content','messages','nodes'):
             if isinstance(value.get(key),list):return value[key]
     return None
 
@@ -54,6 +56,9 @@ def sanitize_nodes(value,depth=0,budget=None):
             else:segments.append(dict(type=str(kind)[:24]))
         result.append(dict(sender_id=str(sender.get('user_id',node.get('user_id','')))[:30],
                            sender=str(sender.get('card') or sender.get('nickname') or '')[:200],
+                           # 节点自己的 message_id 是真实可用的（实测同一批节点各不相同），
+                           # 保留它才能对转发内单条再 get_msg（issue #8）。
+                           message_id=str(node.get('message_id') or node.get('real_id') or '')[:30],
                            timestamp=node.get('time') if type(node.get('time')) in (int,float) else None,
                            segments=segments,truncated=truncated))
     if result and len(result)<len(source):result[-1]['truncated']=True
@@ -279,7 +284,8 @@ class ChatDetails:
         return dict(content=''.join(parts)[:MAX_TEXT],segments=result)
 
     def render_nodes(self,nodes,media,stamp,allow_images=True,quote_message_id=None):
-        return [dict({k:n[k] for k in ('sender_id','sender','timestamp','truncated') if k in n},
+        # message_id 一起透出：Agent 可以拿它对该条再 get_msg（issue #8）。
+        return [dict({k:n[k] for k in ('sender_id','sender','message_id','timestamp','truncated') if k in n},
                      **self.render(n['segments'],media,n['timestamp']*1000 if n.get('timestamp') else stamp,allow_images,quote_message_id)) for n in nodes]
 
     @timing.stage('chat.details.enrich')

@@ -530,11 +530,20 @@ class DetailBot(ReactionBot):
 
 
 def main():
-    from chatlocal.mcp_chat_details import sanitize_nodes,MAX_TEXT
+    from chatlocal.mcp_chat_details import MAX_NODES, forward_nodes, sanitize_nodes,MAX_TEXT
     from chatlocal.mcp_chat_materials import incomplete
-    for count in (50,51):
+    # issue #8: NapCat 的 forward 段键名是 content（parseMultMsg 打开后才填），
+    # 节点自己的 message_id 必须保留，否则转发内单条无法再 get_msg。
+    raw={'id':'res','content':[dict(sender=dict(user_id=1,nickname='a'),time=1,message_id=42,
+                                    message=[dict(type='text',data=dict(text='hi'))])]}
+    inline=forward_nodes(raw)
+    assert inline is not None and len(inline)==1,inline
+    parsed=sanitize_nodes(inline)
+    assert parsed[0]['message_id']=='42' and parsed[0]['segments'][0]['text']=='hi',parsed
+    assert forward_nodes([{'x':1}])==[{'x':1}]
+    for count in (MAX_NODES,MAX_NODES+1):
         nodes=sanitize_nodes([dict(message=[text('x')]) for _ in range(count)])
-        assert len(nodes)==50 and incomplete(dict(nodes=nodes))==(count>50)
+        assert len(nodes)==MAX_NODES and incomplete(dict(nodes=nodes))==(count>MAX_NODES)
     for count in (MAX_TEXT,MAX_TEXT+1):
         nodes=sanitize_nodes([dict(message=[text('x'*count)])])
         assert incomplete(dict(nodes=nodes))==(count>MAX_TEXT)

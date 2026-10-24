@@ -8,7 +8,7 @@ import json
 import time
 
 from .memory_format import merge_text_list, normalize_list, render_l1_card
-from .memory_store import INTEREST_SLOTS, MEMORY_SLOTS
+from .memory_store import GROUP_NOTE_L1_CAP, INTEREST_SLOTS, MEMORY_SLOTS
 
 
 class MemoryDossierMixin:
@@ -64,7 +64,100 @@ class MemoryDossierMixin:
 
             cards.append(render_l1_card(prof, group_event_note))
 
+        # Issue #31: a capped snippet of this group's structured notes (black
+        # talk, shop names, venue, in-group conventions) rides along with the
+        # member cards so the Agent can resolve a term without a separate read.
+        # Capped -- the full set stays behind query_group_notes. Rendered as a
+        # card string like the rest of the list: `member_dossiers` stays a list
+        # of one-line cards, and a note line never displaces a member card.
+        if group_id:
+            notes = self.query_group_notes(group_id, limit=GROUP_NOTE_L1_CAP)
+            if notes:
+                note_str = "；".join(f"{n['term']}={n['value']}" for n in notes)
+                cards.append(f"【群级术语】{note_str}")
+
         return cards
+
+    def upsert_group_notes(self, group_id, notes, source_event_id=None):
+        """Writes structured group-level notes keyed by ``(group_id, term)``.
+
+        A term is a black-talk word, shop-name short name, venue or in-group
+        convention; ``value`` is what it points to. Re-writing the same term
+        overwrites its value in place (upsert) -- there is exactly one meaning
+        per term per group, so history is not accumulated here. Requires a
+        group id: notes are group-scoped by definition (issue #31).
+        """
+        gid = str(group_id).strip() if group_id else ""
+        if not gid or not notes:
+            return {"success": False, "updated": 0}
+        now = time.time()
+        updated = 0
+        with self.lock, self._connect() as conn:
+            for note in notes:
+                if not isinstance(note, dict):
+                    continue
+                term = str(note.get("term") or "").strip()
+                if not term:
+                    continue
+                value = str(note.get("value") or "").strip()
+                kind = str(note.get("kind") or "glossary").strip()[:32] or "glossary"
+                conn.execute(
+                    """
+                    INSERT INTO group_notes (group_id, term, kind, value, updated_at, source_event_id)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(group_id, term) DO UPDATE SET
+                        kind=excluded.kind, value=excluded.value, updated_at=excluded.updated_at,
+                        source_event_id=excluded.source_event_id
+                    """,
+                    (gid, term, kind, value, now, source_event_id),
+                )
+                updated += 1
+        return {"success": True, "group_id": gid, "updated": updated}
+
+    def query_group_notes(self, group_id, query=None, limit=20):
+        """Reads back structured group notes for a group.
+
+        With ``query`` it matches the term (exact) or the value (substring);
+        without it, returns the most recently updated notes (used for the
+        capped L1 injection). Group-scoped: a term written in group A is
+        never visible from group B (issue #31).
+        """
+        gid = str(group_id).strip() if group_id else ""
+        if not gid:
+            return []
+        limit = int(limit or 20)
+        q = str(query or "").strip()
+        with self.lock, self._connect() as conn:
+            if q:
+                rows = conn.execute(
+                    """
+                    SELECT group_id, term, kind, value, updated_at, source_event_id
+                    FROM group_notes
+                    WHERE group_id=? AND (term=? OR value LIKE ?)
+                    ORDER BY updated_at DESC LIMIT ?
+                    """,
+                    (gid, q, f"%{q}%", limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT group_id, term, kind, value, updated_at, source_event_id
+                    FROM group_notes
+                    WHERE group_id=?
+                    ORDER BY updated_at DESC LIMIT ?
+                    """,
+                    (gid, limit),
+                ).fetchall()
+        return [
+            {
+                "term": r["term"],
+                "kind": r["kind"],
+                "value": r["value"],
+                "updated_at": r["updated_at"],
+                "source_event_id": r["source_event_id"],
+            }
+            for r in rows
+        ]
 
     def query_member_dossier(self, identifier, group_id=None, limit=10):
         """Tier 2 (L2 DB Storage) query for MCP tool `query_member_dossier`.
@@ -346,11 +439,15 @@ class MemoryDossierMixin:
         events=None,
         messages=None,
         summary=None,
+        notes=None,
     ):
         """Batch consolidates recent chat insights and events into structured dossiers.
 
         Allows external agents to summarize recent chat batch events, update
         multiple members' profiles and record gossips/events in one call.
+        ``notes`` writes group-scoped structured terms (black talk, shop
+        names, venues, in-group conventions) via ``upsert_group_notes``
+        (issue #31) -- the structured counterpart to the flat ``summary`` row.
         """
         updated_profiles = []
         recorded_events_count = 0
@@ -442,6 +539,13 @@ class MemoryDossierMixin:
             )
             recorded_events_count += 1
 
+        # 5. Structured group notes (issue #31): black talk, shop names,
+        # venues, in-group conventions -- keyed by (group_id, term), upserted.
+        notes_count = 0
+        if notes and isinstance(notes, list) and gid:
+            notes_res = self.upsert_group_notes(gid, notes)
+            notes_count = notes_res.get("updated", 0)
+
         updated_unique = list(dict.fromkeys(updated_profiles))
         return {
             "success": True,
@@ -450,5 +554,6 @@ class MemoryDossierMixin:
             "updated_members": updated_unique,
             "recorded_events_count": recorded_events_count,
             "digested_messages_count": digested_count,
+            "notes_count": notes_count,
             "note": f"成功归档：已提炼更新 {len(updated_unique)} 位群友档案，沉淀 {recorded_events_count} 条事件记忆。",
         }

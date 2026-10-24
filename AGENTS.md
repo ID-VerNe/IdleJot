@@ -267,6 +267,12 @@ Agent 必须且仅能通过标准化 MCP 工具维护群友记忆，**严禁自�
 # 1. 动态记忆引擎、MCP读写工具与两层存储测试 (12项核心门禁)
 uv run python scripts/check_group_memory.py
 
+# 1b. 群级结构化术语（黑话/店名/场地/群内约定）读写闭环（issue #31）：
+#     group_notes 建表与 (group_id, term) 主键；consolidate notes 写入后按 term 读回；
+#     重复写走 upsert 不加行；跨群隔离；L1 注入封顶 GROUP_NOTE_L1_CAP；
+#     MCP query_group_notes 工具声明
+uv run python scripts/check_group_notes.py
+
 # 2. 一键后台启动健康检查与代理隔离测试
 uv run python scripts/check_bootstrap_health.py
 

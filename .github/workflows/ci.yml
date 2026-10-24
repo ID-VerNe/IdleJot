@@ -61,6 +61,8 @@ jobs:
             # Memory engine, personas and planning
             'check_memory_engine_imports.py',
             'check_group_memory.py',
+            # Structured group-level notes: write, read by term, upsert, isolation (issue #31)
+            'check_group_notes.py',
             'check_text_truncation.py',
             # dossier.py 写入动词：载荷校验、超长拒绝、游标只在写入成功后推进（issue #6）
             'check_dossier_ingest.py',

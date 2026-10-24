@@ -27,6 +27,8 @@ os.environ["WATER_GROUP_HOME"] = str(TMP)
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
 import reload  # noqa: E402
+import reload_exec  # noqa: E402  (issue #11 PD: 执行层；补丁打到这里才到真实调用点)
+import reload_plan  # noqa: E402  (issue #11 PD: 分析层；补丁打到这里才到真实调用点)
 import wg_daemon  # noqa: E402  (issue #11 PB: JSON 助手搬到 wg_daemon)
 
 
@@ -91,13 +93,13 @@ def check_syntax():
     error = reload._compile_with_retry(bad, attempts=1)
     assert error and "SyntaxError line" in error, error
 
-    original = reload._compile_with_retry
-    reload._compile_with_retry = lambda path, attempts=3: "SyntaxError line 1: bad"
+    original = reload_plan._compile_with_retry
+    reload_plan._compile_with_retry = lambda path, attempts=3: "SyntaxError line 1: bad"
     try:
         plan = reload.Planner().plan(["water-group/daemon/commands.py"])
         assert plan.rejected and plan.targets == [], plan
     finally:
-        reload._compile_with_retry = original
+        reload_plan._compile_with_retry = original
     print("  ok  语法错整批拒绝，targets 清空")
 
 
@@ -199,12 +201,12 @@ def check_no_port_spawn():
     old = FakeProc("app")
     spawned = []
     reloader = reload.Reloader(spawn=lambda name: spawned.append(name), verify=False)
-    original = reload._wait_ports_free
-    reload._wait_ports_free = lambda ports, timeout: False
+    original = reload_exec._wait_ports_free
+    reload_exec._wait_ports_free = lambda ports, timeout: False
     try:
         status, why = reloader._restart_app({"app": old}, lambda name: spawned.append(name))
     finally:
-        reload._wait_ports_free = original
+        reload_exec._wait_ports_free = original
     assert status == "failed" and "busy" in why, (status, why)
     assert not spawned, spawned
     print("  ok  端口未释放：不 spawn 新 app")

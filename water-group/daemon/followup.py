@@ -195,6 +195,8 @@ def since(after_id, session, not_before=None, limit=50):
                 out.append({
                     "id": event_id,
                     "sender": data.get("sender") or "",
+                    # 追问行也要能取到群号：别名指向按群取覆盖行并集（issue #30）。
+                    "conversation_id": data.get("conversation_id") or "",
                     # 闸门用原始文本：text 已经 collapse 空白，会把 " #ping" 洗成
                     # "#ping"；而 commands.command_key 要求行首、不 strip（#70）。
                     "raw": data.get("content") or "",

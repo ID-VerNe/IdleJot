@@ -28,6 +28,7 @@ sys.path.insert(0, str(HERE))
 
 import followup  # noqa: E402  (追问窗口：回复之后继续听闲聊)
 import up  # noqa: E402  (wake_reason / events / replied_ids live there)
+import wg_aliases  # noqa: E402  (别名指向渲染，issue #30)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_images  # noqa: E402  (图片标记渲染)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
@@ -94,10 +95,16 @@ def main():
                 # 80 字额度不再被 [引用 QQ 消息 <id>]@<qq> 这类段占位吃掉。
                 body, _, _ = wg_text.render_body(e.get("content"), wg_text.WAKE_BODY_CHARS,
                                                   e.get("id"))
+                # 人名指向：发送者附档案锚，正文命中的外号指出是谁（issue #30）。
+                gid = wg_aliases.group_of(e.get("conversation_id"))
+                tag = wg_aliases.sender_tag(e.get("sender"), gid)
+                hits = wg_aliases.body_hits(e.get("content"), gid,
+                                            sender=e.get("sender"))
                 print(f"id={e.get('id')} {stamp} [{up.wake_reason(e)}] "
-                      f"{e.get('sender')}: {body}"
+                      f"{e.get('sender')}{tag}: {body}"
                       f"{('  ' + quotes) if quotes else ''}"
-                      f"{('  ' + images) if images else ''}")
+                      f"{('  ' + images) if images else ''}"
+                      f"{''.join('  ' + h for h in hits)}")
             write_cursor(max(latest_id(rows), max(e.get("id") or 0 for e in fresh)))
             print("WAKE")
             return 0
@@ -124,10 +131,17 @@ def main():
                         body, _, _ = wg_text.render_body(r.get("text"),
                                                           wg_text.WAKE_BODY_CHARS,
                                                           r.get("id"))
-                        print(f"id={r.get('id')} {stamp} [追问] {r.get('sender')}: "
+                        # 人名指向与唤醒行同款（issue #30）；追问行没有
+                        # conversation_id 字段时退回跨群主档别名。
+                        gid = wg_aliases.group_of(r.get("conversation_id"))
+                        tag = wg_aliases.sender_tag(r.get("sender"), gid)
+                        hits = wg_aliases.body_hits(r.get("text"), gid,
+                                                    sender=r.get("sender"))
+                        print(f"id={r.get('id')} {stamp} [追问] {r.get('sender')}{tag}: "
                               f"{body}"
                               f"{('  ' + r['quote']) if r.get('quote') else ''}"
-                              f"{('  ' + r['images']) if r.get('images') else ''}")
+                              f"{('  ' + r['images']) if r.get('images') else ''}"
+                              f"{''.join('  ' + h for h in hits)}")
                     # 报告文案由 followup 决定：额度用完的那一批不说「还剩 0 条」
                     # （issue #98）。收窗也在 consume() 里做完，不再留到下一轮。
                     print(followup.wake_report(window, len(woke)))

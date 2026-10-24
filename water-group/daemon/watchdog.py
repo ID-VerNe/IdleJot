@@ -9,6 +9,7 @@ path and the direct-injection fallback for hosts where `reg query` is unavailabl
 """
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -36,6 +37,30 @@ LOG = logs_dir() / "napcat-watchdog.log"
 # 与 wg_config / bootstrap 同一份路径规则：IDLEJOT_WG_CONFIG / TULPA_WG_CONFIG
 # 覆盖时探针读同一份配置，不会出现「探针读旧路径、注入读新路径」。
 CONFIG = config_path()
+# issue #50：Login Error 只出现在 napcat.log，而 launch/halt 记录在
+# napcat-watchdog.log——两条时间线分开，「launch -> True 在线」的谎就没人看得见
+# （实测 99 条 Login Error 期间 watchdog 日志零行）。增量扫这份日志，把新出现
+# 的登录错误映射进 watchdog 自己的时间线。
+NAPCAT_LOG = logs_dir() / "napcat.log"
+LOGIN_ERROR_RE = re.compile(r"Login Error,ErrType:\s*(\d+)\s+ErrCode:\s*(\d+)")
+# 同一个 (ErrType, ErrCode) 多久之内算重复：ErrCode 3 的循环约两分钟一条，
+# 不记重会把日志淹掉。窗口内的重复静默跳过，窗口外再次出现说明又打了一轮。
+LOGIN_ERROR_DEDUPE_SECONDS = 300
+LOGIN_ERROR_HINTS = {
+    # issue #50 实测：同账号在别处登录（桌面 QQ / 手机 QQ）时快速登录被拒，
+    # NapCat 每约两分钟重试一次、次次 ErrCode 3。退出冲突端后一扫即过。
+    (1, 3): "同账号冲突或授权被拒（桌面 QQ / 手机 QQ 登录了同一账号）："
+            "退出冲突端后重试，实测退出后一扫即过",
+}
+# 扫描进度与去重窗口。模块级是因为 watchdog 是单进程长循环；门禁直接重置它
+# 来跑多案（见 scripts/check_watchdog_login_error.py）。
+_LOGIN_ERROR_SCAN = {"offset": 0, "seen": {}}
+# issue #50：halt 的 reason 要能说出最后一次 launch 的真实结果。boot timeout
+# 五连之后只写「5 consecutive boot failures」等于没写——配置缺失（#51）与
+# 登录被拒（#50）在标记里必须可分辨。注意与 bootstrap.LAST_LAUNCH 区分：那边
+# 是「这次 spawn 的启动器记录」（issue #46 的身份钥匙），这边是「launch 的
+# 成败与说辞」，同名不同物，刻意改名 OUTCOME 防止以后被当成一个东西改。
+LAST_LAUNCH_OUTCOME = {"ok": None, "note": ""}
 # Machine-readable "the link is down" marker (issue #45): halt used to exist
 # only as a log line, so a duty agent saw "no wake-up" with no way to tell a
 # quiet group from a dead chain. up.py --status and any watcher read this.
@@ -206,13 +231,91 @@ def is_our_instance(pid):
         return False
 
 
+def report_login_errors(now=None):
+    """把 napcat.log 里新出现的 Login Error 映射进 watchdog 日志（issue #50）。
+
+    Login Error 只出现在 napcat.log，halt / launch 记录在 napcat-watchdog.log：
+    两条时间线分开，值守的人就看不出「launch -> True 在线」是在说谎——实测
+    99 条 Login Error 期间 watchdog 日志零行。同一 (ErrType, ErrCode) 300 秒内
+    只记一次（ErrCode 3 的循环约两分钟一条，不记重会淹掉日志）；未映射的码
+    原文照录并指向 napcat.log——编原因比没有原因更糟。
+
+    增量读：模块级 offset 记录扫到哪；日志被轮转/截断（size < offset）时从头
+    读。返回本次记录下来的条数（调用方观察与门禁用）。
+    """
+    now = time.time() if now is None else now
+    try:
+        size = NAPCAT_LOG.stat().st_size
+    except OSError:
+        return 0
+    offset = _LOGIN_ERROR_SCAN["offset"]
+    if size < offset:
+        # 轮转/截断：别把旧错误当成新的再报一遍。
+        offset = 0
+    if size == offset:
+        return 0
+    try:
+        with open(NAPCAT_LOG, "rb") as fh:
+            fh.seek(offset)
+            chunk = fh.read(size - offset)
+    except OSError:
+        return 0
+    _LOGIN_ERROR_SCAN["offset"] = size
+    recorded = 0
+    for raw in chunk.splitlines():
+        found = LOGIN_ERROR_RE.search(raw.decode("utf-8", "ignore"))
+        if not found:
+            continue
+        key = (int(found.group(1)), int(found.group(2)))
+        last = _LOGIN_ERROR_SCAN["seen"].get(key)
+        if last is not None and now - last < LOGIN_ERROR_DEDUPE_SECONDS:
+            continue
+        _LOGIN_ERROR_SCAN["seen"][key] = now
+        detail = raw.decode("utf-8", "ignore").strip()
+        hint = LOGIN_ERROR_HINTS.get(key)
+        if hint:
+            log(f"login error: {detail} —— {hint}")
+        else:
+            log(f"login error: {detail} —— 未映射的错误码，原文照录；"
+                f"完整上下文看 ~/.water-group/logs/napcat.log")
+        recorded += 1
+    return recorded
+
+
+def unresponsive_note(pid, killed):
+    """unresponsive 的文案要分型（issue #50 修复候选 4）。
+
+    「没有 LISTENING 监听者」与「监听者在但不应答」是两回事：前者说明实例
+    已经退出（或从未起来），后者才是桥挂了——混成一句 pid=None 就没法判断
+    该不该重注入。
+    """
+    if pid is None:
+        return (f"unresponsive: 无 LISTENING 监听者（实例缺失或已退出），"
+                f"killed {killed} injected instance(s)")
+    return (f"unresponsive pid={pid}（端口在但 OneBot 不应答），"
+            f"killed {killed} injected instance(s)")
+
+
+def boot_timeout_reason(fails):
+    """boot timeout 的 halt reason 带上最后一次 launch 的真实结果（issue #50）。
+
+    配置缺失（#51 的「缺 self_account」）与登录被拒（#50 的「登录态未确认」）
+    都表现为 boot timeout；不带 last launch note 的标记分不出这两种病因。
+    """
+    reason = f"{fails} consecutive boot failures, cooling down"
+    note = LAST_LAUNCH_OUTCOME.get("note")
+    return f"{reason}; last launch: {note}" if note else reason
+
+
 def relaunch():
     from water_group import bootstrap
 
     try:
         ok, note = bootstrap.ensure_napcat()
     except Exception as exc:  # noqa: BLE001
-        log(f"launch failed: {type(exc).__name__}: {exc}")
+        note = f"{type(exc).__name__}: {exc}"
+        log(f"launch failed: {note}")
+        LAST_LAUNCH_OUTCOME.update(ok=False, note=note)
         return False
     record = bootstrap.last_launch()
     if record:
@@ -221,6 +324,9 @@ def relaunch():
         log(f"launch -> {ok} {note} launcher pid={record['launcher_pid']} at {record['started_at']}")
     else:
         log(f"launch -> {ok} {note} (no injection this round)")
+    # halt 的 reason 要能说出最后一次 launch 的真实结果（issue #50）：
+    # 配置缺失（#51）与登录被拒（#50）在标记里必须可分辨。
+    LAST_LAUNCH_OUTCOME.update(ok=ok, note=note)
     return ok
 
 
@@ -309,6 +415,10 @@ def main():
     first_fail_at = None
     while True:
         try:
+            # Login Error 平时只出现在 napcat.log；先映射进本条时间线，healthy
+            # 的分支才不会把「没人说话」和「登录被拒但桥还应答」混为一谈
+            # （issue #50：99 条 Login Error 期间本日志零行）。
+            report_login_errors()
             # Checked before the probe, and on a short cycle: a crashed instance
             # still answers on the port through its sidecar, so health alone would
             # never notice. Every second the dialog stays up is a second it is on
@@ -389,7 +499,7 @@ def main():
                 # relaunches, so a transient cause still recovers on its own.
                 log(f"halt: {fails} consecutive boot failures, cooling down {HALT_SLEEP}s before one more try")
                 write_halt_state("boot timeout", fails,
-                                 f"{fails} consecutive boot failures, cooling down", first_fail_at)
+                                 boot_timeout_reason(fails), first_fail_at)
                 time.sleep(HALT_SLEEP)
                 fails = 0
                 first_fail_at = None
@@ -400,7 +510,9 @@ def main():
             # 「它本来还活着」这个事实只能在这一刻记下来（issue #46）。
             trace = launch_trace()
             killed = kill_injected_instances()
-            log(f"unresponsive pid={pid}, killed {killed} injected instance(s); {trace}")
+            # issue #50 分型（无监听者 vs 端口在不应答）拼上 issue #46 的
+            # launch_trace：这一行同时回答「谁不应答」和「上一轮拉起的是谁」。
+            log(f"{unresponsive_note(pid, killed)}; {trace}")
             if killed:
                 time.sleep(3)
             relaunch()

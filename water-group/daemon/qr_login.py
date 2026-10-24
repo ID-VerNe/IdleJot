@@ -507,7 +507,11 @@ def discover_uids(auth):
 
 
 def _qr_config(settings):
-    cfg = (settings.get("miyoushe") or {}).get("qr_login") or {}
+    # 配置在 settings["plugins"]["miyoushe"]["options"]["qr_login"]（issue #4 PB）；
+    # 旧键 slash_commands.miyoushe 由 commands.settings_from 归一，这里只认新形状。
+    # PC 把扫码登录整体迁成插件时，这段连同调用点一起搬走。
+    options = (((settings or {}).get("plugins") or {}).get("miyoushe") or {}).get("options") or {}
+    cfg = options.get("qr_login") or {}
     return {
         "enabled": bool(cfg.get("enabled", True)),
         "daily_limit": int(cfg.get("daily_limit") if cfg.get("daily_limit") is not None

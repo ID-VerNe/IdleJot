@@ -22,6 +22,7 @@
 | 模块 | 职责 |
 | --- | --- |
 | `commands.py` | 群里的 `#关键词` 直接回复，不过 Agent（`doc/SLASH_COMMANDS.md`） |
+| `plugins/` | 指令插件的契约与注册表：`base.py`（`Plugin` / `Command` / `Hooks`）、`registry.py`、`*_plugin.py`（issue #4）。新增插件 = 一个适配器文件 + `LOADERS` 一行 |
 | `miyoushe.py` | 米游社取数 handler（`#体力` / `#深渊` / `#原石` …） |
 | `qr_login.py` | 每用户扫码登录：会话表 + 单轮询线程（`#登录`，issue #6） |
 | `user_store.py` | `~/.water-group/users/<qq>.json` 凭证存储（auth 字段 DPAPI 加密） |

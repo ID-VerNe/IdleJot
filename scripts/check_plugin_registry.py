@@ -1,6 +1,6 @@
-"""插件注册表门禁（issue #4 PA）。
+"""插件注册表门禁（issue #4 PA / PB）。
 
-四条契约 + 一条防回退，每条都对应一种真实故障：
+七条契约 + 一条防回退，每条都对应一种真实故障：
 
 1. **加载失败必须可见**：坏的插件留 ``load_error``，``--status`` 有一行；旧的
    ``try/except`` 置空表让群里表现为「这个指令没了」。
@@ -11,6 +11,11 @@
 5. **``plugins/*.py`` 必须静态可达**：全部出现在 ``commands`` 的 AST 闭包里。
    运行时扫目录发现插件会让 ``check_hot_reload`` 的覆盖门禁红，且 ``reload``
    无法把插件改动映射到进程。
+6. **旧键与新键归一化等价**（PB）：``slash_commands.<名字>`` 与
+   ``plugins.<名字>.options`` 必须产出逐字段相同的 ``settings["plugins"]``，
+   否则「迁配置」会悄悄改变行为。
+7. **群级覆盖生效**（PB）：``groups.<群号>.plugins.<名字>: false`` 在该群
+   落空、且不出现在 ``#帮助`` 里。
 
     .venv/Scripts/python.exe scripts/check_plugin_registry.py
 """
@@ -107,6 +112,53 @@ def test_help_is_answerable():
     check("门控关掉的指令不在帮助里", not (set(closed) & set(listed)), str(set(closed) & set(listed)))
 
 
+def test_plugin_config():
+    print("[旧键 ↔ 新键 ↔ 群级覆盖]")
+    old = commands.settings_from({
+        "slash_commands": {"enabled": True,
+                           "miyoushe": {"ck": ["a=b"], "uid": "1", "admin_qq": ["2"],
+                                        "qr_login": {"daily_limit": 3}},
+                           "sixty": {"enabled": True, "base_url": "http://x",
+                                     "allow": ["天气"]}}})
+    new = commands.settings_from({
+        "slash_commands": {"enabled": True},
+        "plugins": {
+            "miyoushe": {"enabled": True, "options": {
+                "ck": ["a=b"], "uid": "1", "admin_qq": ["2"],
+                "qr_login": {"daily_limit": 3}}},
+            "sixty": {"enabled": True, "options": {
+                "base_url": "http://x", "allow": ["天气"]}}}})
+    check("旧键与新键归一化逐字段相等", old["plugins"] == new["plugins"],
+          f"{old['plugins']} != {new['plugins']}")
+    check("旧键记为 legacy（--status 提示可迁）",
+          old["plugins_legacy"] == ["miyoushe", "sixty"], str(old["plugins_legacy"]))
+    check("新键不算 legacy", new["plugins_legacy"] == [], str(new["plugins_legacy"]))
+    line = commands.PLUGINS.status_line(old)
+    check("--status 标注旧键", "旧键 slash_commands.miyoushe" in line, line)
+
+    # 群级覆盖：总开关开着，某个群单独关掉
+    scoped = commands.settings_from({
+        "slash_commands": {"enabled": True,
+                           "sixty": {"enabled": True, "base_url": "http://x"}},
+        "groups": {"1": {"enabled": True, "plugins": {"sixty": False}},
+                   "2": {"enabled": True}}})
+    check("群级关闭：该群 #天气 落空",
+          not commands.PLUGINS.available("天气", scoped, "1"))
+    check("群级关闭：别的群 #天气 可用",
+          commands.PLUGINS.available("天气", scoped, "2"))
+    check("群级关闭：#帮助 不列", "天气" not in commands.help_text(scoped, "1"))
+    check("群级关闭：#帮助 照列别的群", "天气" in commands.help_text(scoped, "2"))
+    check("群级关闭不影响别的插件",
+          commands.PLUGINS.available("体力", scoped, "1"))
+
+    # 群白名单插件在 --status 里不能被显示成停用（group_id="" 只判总开关）
+    only = commands.settings_from({"plugins": {"sixty": {
+        "enabled": True, "groups": ["2"]}}})
+    check("--status 不把群白名单插件当停用",
+          "sixty 已启用" in commands.PLUGINS.status_line(only),
+          commands.PLUGINS.status_line(only))
+
+
 def test_duplicate():
     print("[重名 fail-fast]")
     registry = Registry()
@@ -157,6 +209,7 @@ def main():
     test_load_errors()
     test_config_names()
     test_help_is_answerable()
+    test_plugin_config()
     test_duplicate()
     test_static_reachable()
     print()

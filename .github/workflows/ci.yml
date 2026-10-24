@@ -97,6 +97,7 @@ jobs:
             'check_log_encoding.py',
             'check_watchdog_token.py',
             'check_watchdog_halt.py',
+            'check_watchdog_launch_identity.py',
             'check_collector_self_echo.py',
             # Module size walls: no file >1000 lines, no class >800 (issue #11 PE)
             'check_module_size.py',

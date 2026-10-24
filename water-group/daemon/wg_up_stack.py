@@ -55,6 +55,7 @@ class StopResult:
     orphans: list = field(default_factory=list)
     port_owners: list = field(default_factory=list)
     refused: list = field(default_factory=list)
+    # 收掉的注入实例数（收前只读计数与直接收掉取较大者，issue #46）。
     instances: int | None = 0
     ports_left: list = field(default_factory=list)
     # The `#` daemon's lock file, cleared when its holder turned out to be dead.
@@ -110,7 +111,7 @@ def _taskkill_tree(pid):
 
 
 def _kill_instances():
-    """Injected QQ instances only, identified by `-q <self_account>`.
+    """Injected QQ instances only, identified by the launch record or `-q <account>`.
 
     Returns None when bootstrap cannot be imported: the caller must be able to say
     "not counted" rather than "zero", see StopResult.
@@ -121,6 +122,23 @@ def _kill_instances():
         from water_group import bootstrap
 
         return bootstrap.kill_stale_instances()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _count_instances():
+    """只读预扫描：停止动作开始前，现在有几个注入实例（issue #46 计数口径）。
+
+    注入实例通常挂在守护树下，第 1 遍树杀就一并带走了；只在事后数「按标记
+    杀掉的」，会把「整棵树收干净」报成「注入实例 0 个」。所以先数，收完再取
+    较大值。None 仍表示 bootstrap 导不进来（未统计），不能混成 0。
+    """
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    try:
+        from water_group import bootstrap
+
+        return bootstrap.count_injected_instances()
     except Exception:  # noqa: BLE001
         return None
 
@@ -178,6 +196,9 @@ def stop_stack():
     # thing they are watching.
     protected = set(transient_pids(exclude=me)) | set(me)
 
+    # 先数再收：实例通常挂在守护树下，树杀一过就再也数不到了（issue #46）。
+    instances_before = _count_instances()
+
     for finder in (supervisor_pids, watchdog_pids):
         for pid in finder(exclude=protected):
             _taskkill_tree(pid)
@@ -194,6 +215,10 @@ def stop_stack():
         result.orphans.append(pid)
 
     result.instances = _kill_instances()
+    if instances_before is not None and result.instances is not None:
+        # 树杀已经收掉的也算数：报告要说明「这次停栈收掉了几个」，而不是
+        # 只说明「事后按标记又抓到几个」（issue #46）。
+        result.instances = max(instances_before, result.instances)
     result.stale_lock = _clear_stale_commands_lock()
 
     result.ports_left = wait_ports_free(12)

@@ -14,6 +14,7 @@ import uuid
 from .app_plugins import TOOL_NAMES as APP_TOOL_NAMES
 from .app_plugins.loader import build as build_app_plugins
 from .mcp_access import AccessDenied
+from .name_guard import clean_sender_name
 from .mcp_chat_hints import DOSSIER_REMINDER
 from .mcp_chat_limits import WAIT_TIMEOUT_SECONDS
 from .mcp_chat_schemas import schemas  # noqa: F401  (issue #11 PC: facade re-export)
@@ -436,8 +437,15 @@ class MCPChat(ChatWaitMixin):
                                     if kind in ('image','mface') else dict(type='forward',state='detail_limit') if kind=='forward' else dict(type=label))
         else:return
         content=''.join(parts)
+        # issue #39: the upstream card/nickname can be QQ quote-bubble UI text
+        # (``<X>回应了你的消息：<Y>``) rather than a real card. Never let that
+        # string become the displayed sender -- fall back to the QQ number so
+        # the member stays recognisable and the bubble cannot reach the dossier.
+        sender_name = clean_sender_name(
+            str(sender.get('card') or sender.get('nickname') or uid), uid
+        )
         payload=dict(source='send_receipt' if send_request is not None else 'onebot_websocket',onebot_message_id=mid,conversation_id=cid,sender_id=uid,
-                     sender=str(sender.get('card') or sender.get('nickname') or uid)[:200],
+                     sender=sender_name[:200],
                      timestamp=timestamp,received_at=time.time(),is_self=uid==account,content=content[:12000],
                      truncated=len(content)>12000 or (isinstance(source,list) and len(source)>100),segments=segments[:100])
         payload['app_epochs']=self.apps.stamps()

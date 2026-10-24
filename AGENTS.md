@@ -371,6 +371,11 @@ uv run python scripts/check_app_plugins.py
 #     不变、无 group_id 查询不再泄漏群内事实；原主档列表入 key_memories_backup，
 #     --restore-pollution 原样还原并清槽；两个写动词都有 --dry-run 且零写入
 uv run python scripts/check_pollution_scrub.py
+
+# 29. 发信人名形态校验（issue #39）：QQ 引用气泡文案（`<X>回应了你的消息：<Y>`）
+#     不得进 chat_inbox.payload.sender，也不得进档案 aliases/primary_name；
+#     入库侧与建档侧共用 chatlocal/name_guard.py 单一清洗
+uv run python scripts/check_sender_name.py
 ```
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

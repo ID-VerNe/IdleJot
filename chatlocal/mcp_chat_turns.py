@@ -287,14 +287,12 @@ class ChatTurns:
         if p['state']=='READY':
             result['quote_guidance']=self.quote_guidance(p,data)
             result['next_call']=dict(tool='send_chat_reply',arguments=dict(session_id=p['session_id'],plan_id=p['id']),requires=['bubbles'])
-            if hasattr(self.chat,'learning'):
-                context=self.chat.learning.plan_context(p)
-                if context:
-                    result['learned_language']=context
-                    if context.get('selection_required'):
-                        result['phase']='SELECTING_EXPRESSION'
-                        result['next']='结合候选选择表达并组织文字，直接 send_chat_reply 一起提交 expression_ids 和 bubbles；[] 明确不用，不必单独调用选择工具。'
-                        result['next_call']['requires']=['expression_ids','bubbles']
+            patch=self.chat.apps.plan_context(p)
+            if patch:
+                result[patch['field']]=patch['context']
+                if patch.get('phase'):result['phase']=patch['phase']
+                if patch.get('next'):result['next']=patch['next']
+                if patch.get('next_call'):result['next_call']=patch['next_call']
         elif p['state']=='WAITING':
             result['next']='暂缓决定，尚未处理完本批；沿 next_call 等待，到期或新输入后重新规划。'
             result['next_call']=self.chat.continuation(p['session_id'])
@@ -470,25 +468,24 @@ class ChatTurns:
                 if not any(b['kind']=='text' for b in bubbles):
                     if args['expression_ids']:
                         raise TurnRejected('expression_mismatch','纯媒体表达不选择文字参考。')
-                elif hasattr(self.chat,'learning'):
-                    context=self.public(p).get('learned_language',{})
+                else:
+                    patch=self.chat.apps.plan_context(p)
+                    context=patch['context'] if patch else {}
                     if context.get('expression_decision',{}).get('state') in ('not_applicable','unavailable'):
                         # Paused/unavailable learning must not block ordinary
                         # chat when a host consistently submits an empty list.
                         if args['expression_ids']:raise TurnRejected('invalid_selection','本轮没有可选择的表达参考。')
                     else:
                         with timing.span('learning.inline_selection'):
-                            choice=self.chat.learning.call(grant,'select_chat_expressions',
-                                dict(session_id=sid,plan_id=p['id'],expression_ids=args['expression_ids']))
-                        if choice.get('error_code'):
-                            raise TurnRejected(choice['error_code'],choice['note'])
+                            refusal=self.chat.apps.select(grant,p,args['expression_ids'])
+                        if refusal:raise TurnRejected(*refusal)
                     p=self.load(p['id'],sid)
                     data=json.loads(p['payload'])
-            if any(b['kind']=='text' for b in bubbles) and hasattr(self.chat,'learning'):
-                prepared=self.public(p)
-                if prepared.get('learned_language',{}).get('selection_required'):
+            if any(b['kind']=='text' for b in bubbles):
+                patch=self.chat.apps.plan_context(p)
+                if patch and patch['context'].get('selection_required'):
                     raise TurnRejected('expression_selection_required','send_chat_reply 同时提交 expression_ids（[] 明确不用）和 bubbles；也兼容先调用选择工具。尚未发送。',
-                        next_call=prepared['next_call'],learned_language=prepared['learned_language'])
+                        next_call=patch['next_call'],learned_language=patch['context'])
             elif 'text' in data['expressions']:
                 # A mixed plan may ultimately use only a sticker/reaction. Keep
                 # the evidence of material already offered, but do not demand a
@@ -526,7 +523,9 @@ class ChatTurns:
                             elif b['kind']=='sticker':
                                 result,_=self.chat.media.call(grant,'send_chat_sticker',dict(session_id=sid,idempotency_key=key,sticker_id=b['sticker_id']),cancel)
                             elif owner:=self.chat.apps.expression_owner(b['kind']):
-                                result=owner.dispatch(grant,dict(session_id=sid,idempotency_key=key,**{k:v for k,v in b.items() if k!='kind'}),cancel)
+                                # 表达型插件：一个表达对应一个写入工具，工具名取自插件注册表。
+                                result=owner.dispatch(grant,next(iter(owner.tool_names)),
+                                    dict(session_id=sid,idempotency_key=key,**{k:v for k,v in b.items() if k!='kind'}),cancel)
                             else:
                                 result=self.chat.qq.send_bubble(grant,self.chat.row(sid),b,key,cancel)
                             item['state']=result.get('state','UNKNOWN');item['receipt']=result

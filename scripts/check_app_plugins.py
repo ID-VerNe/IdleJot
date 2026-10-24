@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT))
 
 from chatlocal import app_plugins                                  # noqa: E402
 from chatlocal.agent_tools import tool                             # noqa: E402
+from chatlocal.app_plugins import spec                             # noqa: E402
 from chatlocal.app_plugins.loader import build                     # noqa: E402
 from chatlocal.app_plugins.reactions import ChatReactions          # noqa: E402
 from chatlocal.mcp_access import CHAT_EXTRA_FLAGS, PERMISSION_FLAGS  # noqa: E402
@@ -42,7 +43,8 @@ class FakeAccess:
     """Only what the plugin protocol touches: one path and one connection."""
 
     def __init__(self, path):
-        self.path = str(path)
+        # Path, not str: the language feature derives sibling files from it.
+        self.path = Path(path)
 
     @contextmanager
     def connect(self):
@@ -79,7 +81,14 @@ def check_static_surface():
     assert app_plugins.TOOL_NAMES, 'no app plugin tools registered'
     missing = app_plugins.TOOL_NAMES - CHAT_TOOLS
     assert not missing, f'plugin tools missing from CHAT_TOOLS: {sorted(missing)}'
-    assert set(app_plugins.SCOPE_BY_TOOL) == app_plugins.TOOL_NAMES, 'SCOPE_BY_TOOL must cover every tool'
+    # 每块必须显式声明 scope/expression：缺键会在 spec 推导时 KeyError，但隐式
+    # 省略比显式 None 难 review——None 是「没有」的声明，省略是「忘了」。
+    for item in spec.PLUGINS:
+        assert 'scope' in item, f"{item['name']} must declare scope explicitly (None = no flag)"
+        assert 'expression' in item, f"{item['name']} must declare expression explicitly (None = direct dispatch)"
+        assert item['tools'], f"{item['name']} registers no tools"
+    scoped = {tool for item in spec.PLUGINS if item['scope'] for tool in item['tools']}
+    assert set(app_plugins.SCOPE_BY_TOOL) == scoped, 'SCOPE_BY_TOOL must cover exactly the scoped tools'
     assert set(app_plugins.SCOPE_FLAGS) == set(CHAT_EXTRA_FLAGS), (app_plugins.SCOPE_FLAGS, CHAT_EXTRA_FLAGS)
     for flag in app_plugins.SCOPE_FLAGS:
         assert flag in PERMISSION_FLAGS, f'{flag} not granted by PERMISSION_FLAGS'
@@ -107,6 +116,17 @@ def check_registry():
     assert apps.receive({'post_type': 'notice', 'notice_type': 'group_recall'}) is False
     assert apps.receive({'post_type': 'message', 'message_type': 'group'}) is False
     assert apps.receive({'post_type': 'request'}) is False
+    # language：四个工具同一 owner；无授权位、无表达（调用前自授权）；
+    # 唤醒事件名是线报名而不是插件名，注册表按键仍只有插件名。
+    language = apps.get('language')
+    assert language is not None, 'build() must instantiate the language plugin'
+    for tool_name in spec.LANGUAGE['tools']:
+        assert apps.tool_owner(tool_name) is language, f'{tool_name} must belong to language'
+    assert language.expression is None and language.scope_flag is None
+    assert language.wake_event == 'learning_ready'
+    assert language.wake_event != language.name, 'a differing wire event must be declared, not defaulted'
+    assert apps.expression_owner('reaction') is owner, 'language must not claim the reaction expression'
+    assert apps.brief('learning_ready') is None, 'a wake event is not a registry key'
     print('  ok  注册表：工具/表达/戳/提示路由，且不吃别人的事件')
 
 
@@ -131,25 +151,34 @@ def check_scope_and_disable():
 
 def check_host_has_no_name_branches():
     """Rule 3 of the protocol: the host never names a plugin."""
-    allowed = {'mcp_chat.py'}
+    # 兼容属性所在宿主，与功能模块自身（它本来就拥有这些名字）不在扫描范围。
+    allowed = {'mcp_chat.py', 'mcp_language_learning.py'}
+    literals = ("'chat_reactions'", '"chat_reactions"', "'react_to_chat_message'", '"react_to_chat_message"',
+                "'get_chat_learning'", '"get_chat_learning"', "'claim_chat_learning'", '"claim_chat_learning"',
+                "'submit_chat_learning'", '"submit_chat_learning"', "'select_chat_expressions'", '"select_chat_expressions"')
     offenders = []
     for path in sorted((ROOT / 'chatlocal').glob('*.py')):
+        if path.name in allowed:
+            continue
         text = path.read_text('utf-8')
-        for literal in ("'chat_reactions'", '"chat_reactions"', "'react_to_chat_message'", '"react_to_chat_message"'):
+        for literal in literals:
             if literal in text:
                 offenders.append(f'{path.name}: {literal}')
-    assert not offenders, ('插件名不该出现在宿主里（只允许 app_plugins/ 与 mcp_chat 的兼容属性）：\n  '
+    assert not offenders, ('插件名不该出现在宿主里（只允许 app_plugins/、功能模块与 mcp_chat 的兼容属性）：\n  '
                            + '\n  '.join(offenders))
     compat = (ROOT / 'chatlocal' / 'mcp_chat.py').read_text('utf-8')
     assert "def reactions(self)" in compat, 'the compatibility property disappeared without notice'
-    assert allowed == {'mcp_chat.py'}
+    assert "def learning(self)" in compat, 'the learning compatibility property disappeared without notice'
     print('  ok  宿主无插件名分支：chatlocal/*.py 里没有硬编码工具名或授权位')
 
 
 def check_removed_module():
     assert not (ROOT / 'chatlocal' / 'mcp_reactions.py').exists(), 'mcp_reactions.py should have moved'
     assert (ROOT / 'chatlocal' / 'app_plugins' / 'reactions.py').exists()
-    print('  ok  归属：reactions 在 app_plugins/ 下，旧路径已删除')
+    # language 的功能模块原地不动：七个语言门禁钉死它的路径，插件化的只有适配器。
+    assert (ROOT / 'chatlocal' / 'mcp_language_learning.py').exists(), 'the feature module must stay in place'
+    assert (ROOT / 'chatlocal' / 'app_plugins' / 'language.py').exists(), 'the adapter must live in app_plugins/'
+    print('  ok  归属：适配器在 app_plugins/ 下，功能模块路径未动')
 
 
 def main():

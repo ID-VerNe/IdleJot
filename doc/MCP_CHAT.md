@@ -138,11 +138,20 @@ MCP 这边的可选能力（工具 + 授权位 + 实时事件）走一套独立�
 （`water-group/daemon/plugins/`）**刻意不合并**：宿主不同、生命周期不同、授权模型不同。
 落地位置 `chatlocal/app_plugins/`：
 
-- `spec.py`：纯名字表（工具名、授权位、表达、是否 openWorld）。低层模块和 import 期常量只读它。
+- `spec.py`：纯名字表（`tools` 元组、授权位、表达、是否 openWorld、policy 文件名）。
+  `scope` / `expression` / `policy` 均可为 `None`：无授权位（沿用 chat 授权、逐次自校验）、
+  非表达型（计划无关工具直派）、开关在 DB 数据态而非 policy 文件。低层模块和 import 期
+  常量只读它。
 - `base.py`：`AppPlugin` 协议与 `AppPlugins` 注册表。宿主只认注册表，不认名字。
 - `loader.py`：`build(chat)` 实例化；单独一层是为了不让只读名字表的进程被拖进功能模块
   （热重载闭包会跟着函数体内的 import 走）。
 - `<功能>.py`：功能本身，协议方法只做转发。
+
+当前注册两个：**reactions**（消息表情回应，见 [MCP_REACTIONS.md](MCP_REACTIONS.md)）与
+**language**（实时语言学习，功能模块原地不动，见
+[MCP_LANGUAGE_LEARNING.md · 插件化归属](MCP_LANGUAGE_LEARNING.md#插件化归属issue-4-pd2b)）。
+两者共用同一套钩子；宿主的等待线报、计划上下文、工具边界交接都经描述子
+（`wake_signal` / `plan_context` / `handoff` / `durable`）取数据，不认插件的字段名和文案。
 
 新增一个 app 侧能力 = 在 `spec.py` 加一块 + 在 `app_plugins/` 加一个模块 + 在 `loader.py`
 注册一行。**不许**去 `mcp_chat` / `mcp_tools` 里加 `if name == ...`：

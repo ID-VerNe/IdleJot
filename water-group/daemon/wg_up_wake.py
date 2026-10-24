@@ -406,5 +406,10 @@ def app_plugins_line():
                 state = '已启用' if json.loads(policy.read_text('utf-8-sig')).get('enabled', True) else '停用'
             except (OSError, ValueError, TypeError):
                 state = '配置无效（app 会停用自己）'
-        parts.append(f"{plugin['name']} {state}（{plugin['tool']} / 授权位 {plugin['scope']} / 表达 {plugin['expression']}）")
+        # tools 是元组（一个插件可挂多个工具）；scope/expression 为 None 表示
+        # 没有独立授权位/不是表达型插件，开关在 DB 数据态里（如 language）。
+        tools = '、'.join(plugin['tools'])
+        scope = plugin['scope'] or '沿用 chat 授权'
+        expression = plugin['expression'] or '无'
+        parts.append(f"{plugin['name']} {state}（{tools} / 授权位 {scope} / 表达 {expression}）")
     return ' / '.join(parts) if parts else '（未注册）'

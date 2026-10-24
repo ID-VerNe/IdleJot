@@ -232,6 +232,48 @@ def test_static_reachable():
         check(f"{rel} 在 commands 闭包里", rel in closure, "运行时扫目录会让 check_hot_reload 红")
 
 
+def test_cross_protocol():
+    """两套协议拼在一起时不打架（issue #4 PE）。
+
+    daemon 的 ``#`` 指令插件与 app 的工具/事件插件各有宿主，刻意不合并；但
+    它们在同一个配置目录、同一个进程树里跑，名字撞了就是灾难：一个 ``#抽卡``
+    和同名工具会让模型与群友指同一件事却执行不同代码。
+    """
+    print("[两套协议]")
+    # 门禁自己装路径：CI 直接 `python scripts/xxx.py`，sys.path[0] 是 scripts/，
+    # 仓库根不在里面（本地靠 PYTHONPATH 才绿过一轮，是假绿）。
+    # append 而非 insert：daemon 目录保持高优先级，仓库根不会影子掉导入。
+    if str(ROOT) not in sys.path:
+        sys.path.append(str(ROOT))
+    from chatlocal import app_plugins  # 叶子包：只 import base + spec，无副作用
+
+    daemon_plugins = commands.PLUGINS.plugins()
+    daemon_names = {plugin.name for plugin in daemon_plugins}
+    daemon_keys = {command.name for plugin in daemon_plugins for command in plugin.commands}
+    app_names = {item["name"] for item in app_plugins.spec.PLUGINS}
+    app_tools = set(app_plugins.TOOL_NAMES)
+    app_scopes = set(app_plugins.SCOPE_FLAGS)
+
+    check("两套注册表都非空", bool(daemon_names) and bool(app_names),
+          f"daemon={sorted(daemon_names)} app={sorted(app_names)}")
+    check("插件名不重叠", not (daemon_names & app_names), str(sorted(daemon_names & app_names)))
+    check("指令名与工具名不重叠", not (daemon_keys & app_tools), str(sorted(daemon_keys & app_tools)))
+    check("app 授权位不占用配置顶层键", not (app_scopes & set(commands.DEFAULTS)),
+          str(sorted(app_scopes & set(commands.DEFAULTS))))
+
+    closure, unknown = wg_reload.Planner().closure("app")
+    check("app 闭包无动态 import", unknown is False, str(unknown))
+    app_dir = ROOT / "chatlocal" / "app_plugins"
+    files = sorted(app_dir.glob("*.py"))
+    check("app_plugins 目录有文件", len(files) >= 5, str(len(files)))
+    for path in files:
+        rel = path.relative_to(ROOT).as_posix()
+        check(f"{rel} 在 app 闭包里", rel in closure, "漂出闭包后改插件不会热重载")
+
+    print(f"  daemon 插件: {' / '.join(sorted(daemon_names))}（{len(daemon_keys)} 条指令）")
+    print(f"  app 插件   : {' / '.join(sorted(app_names))}（{len(app_tools)} 个工具）")
+
+
 def main():
     test_load_errors()
     test_config_names()
@@ -240,6 +282,7 @@ def main():
     test_lifecycle()
     test_duplicate()
     test_static_reachable()
+    test_cross_protocol()
     print()
     if FAILED:
         print(f"{len(FAILED)} 项失败: {', '.join(FAILED)}")

@@ -61,6 +61,7 @@ jobs:
             # Memory engine, personas and planning
             'check_memory_engine_imports.py',
             'check_group_memory.py',
+'check_group_notes.py',
             'check_sender_name.py',
             'check_text_truncation.py',
             # dossier.py 写入动词：载荷校验、超长拒绝、游标只在写入成功后推进（issue #6）
@@ -79,6 +80,8 @@ jobs:
             'check_reply_context.py',
             'check_reply_quote.py',
             'check_quote_visibility.py',
+            'check_image_visibility.py',
+            'check_alias_visibility.py',
             'check_reply_timing.py',
             'check_now_clock.py',
             'check_slash_commands.py',

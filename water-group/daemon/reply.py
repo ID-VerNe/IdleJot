@@ -40,6 +40,7 @@ sys.path.insert(0, str(HERE))
 
 import mcp_client  # noqa: E402
 import followup  # noqa: E402
+import wg_aliases  # noqa: E402  (别名指向渲染，issue #30)
 import winconsole  # noqa: E402
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_images  # noqa: E402
@@ -519,9 +520,14 @@ def list_wakes():
         # 截断了带 … 和 --show 指引。
         body, _, _ = wg_text.render_body(e.get("content"), wg_text.LIST_BODY_CHARS,
                                           e.get("id"))
-        print(f"id={e.get('id')} {stamp} [{mark}] [{reason}] {e.get('sender')}: "
+        # 人名指向与唤醒行同款（issue #30）。
+        gid = wg_aliases.group_of(e.get("conversation_id"))
+        tag = wg_aliases.sender_tag(e.get("sender"), gid)
+        hits = wg_aliases.body_hits(e.get("content"), gid, sender=e.get("sender"))
+        print(f"id={e.get('id')} {stamp} [{mark}] [{reason}] {e.get('sender')}{tag}: "
               f"{body}"
-              f"{('  ' + quotes) if quotes else ''}{('  ' + images) if images else ''}")
+              f"{('  ' + quotes) if quotes else ''}{('  ' + images) if images else ''}"
+              f"{''.join('  ' + h for h in hits)}")
         shown += 1
     if not shown:
         print("没有唤醒记录")
@@ -590,6 +596,8 @@ def recent_chatter(limit, around=None):
                 "ts": data.get("timestamp"),
                 "self": bool(data.get("is_self")),
                 "recalled": bool(data.get("recalled")),
+                # 群号：别名指向按群取覆盖行并集（issue #30）。
+                "conversation_id": data.get("conversation_id") or "",
                 # 引用原文：payload 里只有编号，父消息在同一会话的库里就查得到（issue #94）。
                 "quote": wg_quotes.render_payload(db, sid, data),
                 # 图片标记让 Agent 知道这条能看图，以及是否已经落盘（issue #27）。
@@ -627,6 +635,11 @@ def show_context(limit, around=None):
         # 上下文行同一份渲染口径（issue #32）：段占位不占额度，截断了说被切过。
         text, _, _ = wg_text.render_body(row["text"], wg_text.CONTEXT_BODY_CHARS,
                                          row["id"])
+        # 人名指向：闲聊里叫外号也要知道是谁（issue #30）。
+        gid = wg_aliases.group_of(row.get("conversation_id"))
+        tag = "" if row["self"] else wg_aliases.sender_tag(row["sender"], gid)
+        hits = [] if row["self"] else wg_aliases.body_hits(row["text"], gid,
+                                                           sender=row["sender"])
         marks = []
         if row["recalled"]:
             marks.append("撤回")
@@ -636,7 +649,8 @@ def show_context(limit, around=None):
             marks.append("回这条")
         tail = f"  <- {'、'.join(marks)}" if marks else ""
         quote = ("  " + row["quote"]) if row.get("quote") else ""
-        print(f"{row['id']} {stamp} {who}: {text}{quote}{('  ' + row['images']) if row.get('images') else ''}{tail}")
+        alias_tail = "".join("  " + h for h in hits)
+        print(f"{row['id']} {stamp} {who}{tag}: {text}{quote}{('  ' + row['images']) if row.get('images') else ''}{alias_tail}{tail}")
     return 0
 
 

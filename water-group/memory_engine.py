@@ -32,6 +32,7 @@ from .memory_profile import MemoryProfileMixin
 from .memory_store import (
     DEFAULT_DB_PATH,
     GENERIC_ALIASES,
+    GROUP_NOTE_L1_CAP,
     INTEREST_SLOTS,
     MEMORY_SLOTS,
     WG_HOME,
@@ -50,6 +51,7 @@ __all__ = [
     "MEMORY_SLOTS",
     "INTEREST_SLOTS",
     "GENERIC_ALIASES",
+    "GROUP_NOTE_L1_CAP",
 ]
 
 

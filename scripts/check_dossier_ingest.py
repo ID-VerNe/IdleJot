@@ -123,15 +123,16 @@ def apply_members(home, name, memories):
 
 
 def test_apply_keeps_group_boundary(home):
-    """第二次群内写入不得把新事实推进跨群主档（issue #5 写侧边界）。
+    """群内写入不得把群内事实推进跨群主档（issue #5 + #19 写侧边界）。
 
-    首次写入走的是「新档案 INSERT」分支，`memory_engine.py:1317-1333` 会把
-    key_memories 一并写进主档——那是既有行为，不在本门禁的断言范围（另记）。
-    这里钉的是**已存在档案**的追加写：主档必须留在第一次的样子。
+    两段各钉一处：
+    - 新建段：首次带 group_id 写走 INSERT 分支（issue #19 修，memory_dossier.py），
+      主档必须为空，群内事实只进覆盖行。
+    - 追加段：已存在档案的追加写走 UPDATE 分支（issue #5 保护），主档必须
+      留在新建时的样子，群内内容合并进覆盖行。
     """
+    # 新建段：INSERT 分支不得把群内事实写进跨群主档
     apply_members(home, "测试甲", ["事实A"])
-    apply_members(home, "测试甲", ["事实B"])
-
     db = memory(home)
     try:
         uid = db.execute(
@@ -145,9 +146,57 @@ def test_apply_keeps_group_boundary(home):
             (uid, GROUP)).fetchone()[0])
     finally:
         db.close()
-    assert "事实B" not in main, f"追加写不得进跨群主档（issue #5 写侧边界）：{main}"
+    assert main == [], f"新建档案带 group_id 不得写群内事实进主档（issue #19）：{main}"
+    assert "事实A" in overlay, overlay
+
+    # 追加段：UPDATE 分支不得把新事实推进主档，群内内容合并进覆盖行
+    apply_members(home, "测试甲", ["事实B"])
+    db = memory(home)
+    try:
+        main = json.loads(db.execute(
+            "SELECT key_memories FROM member_profiles WHERE user_id=?", (uid,)).fetchone()[0])
+        overlay = json.loads(db.execute(
+            "SELECT key_memories FROM member_group_memories WHERE user_id=? AND group_id=?",
+            (uid, GROUP)).fetchone()[0])
+    finally:
+        db.close()
+    assert main == [], f"追加写不得推进跨群主档（issue #5）：{main}"
     assert "事实B" in overlay, overlay
-    print("✓ 4. --apply 带 group_id 追加只写覆盖行，主档 key_memories 不动")
+    print("✓ 4. 带 group_id 新建主档空、追加主档不变；群内事实只落覆盖行")
+
+
+def test_consolidate_records_keep_group_boundary(home):
+    """consolidate_chat_memory records 路径带 group_id 不把群内事实写进主档（issue #19 分节 PB）。
+
+    records 路径此前调 `update_member_dossier` 不传 group_id，导致群内事实直落跨群主档。
+    PB 补了 `group_id=gid or None`；这里钉住：带 group_id 走 records 时主档必须为空，
+    群内事实只进覆盖行。
+    """
+    sys.path.insert(0, str(ROOT))
+    from water_group.memory_engine import MemoryEngine  # noqa: E402
+
+    engine = MemoryEngine(str(home / "data" / "group_memories.sqlite3"))
+    engine.consolidate_chat_memory(
+        group_id=GROUP,
+        records=[{"identifier": "测试丁", "key_memories": ["仅在丁群的事实"]}],
+    )
+
+    db = memory(home)
+    try:
+        uid = db.execute(
+            "SELECT user_id FROM member_profiles WHERE primary_name='测试丁'").fetchone()
+        assert uid, "profile row must exist"
+        uid = uid[0]
+        main = json.loads(db.execute(
+            "SELECT key_memories FROM member_profiles WHERE user_id=?", (uid,)).fetchone()[0])
+        overlay = json.loads(db.execute(
+            "SELECT key_memories FROM member_group_memories WHERE user_id=? AND group_id=?",
+            (uid, GROUP)).fetchone()[0])
+    finally:
+        db.close()
+    assert main == [], f"records 路径带 group_id 不得写群内事实进主档（issue #19 分节 PB）：{main}"
+    assert "仅在丁群的事实" in overlay, overlay
+    print("✓ 4b. consolidate records 带 group_id 只写覆盖行，主档 key_memories 为空")
 
 
 def test_apply_rejects_unknown_field(home):
@@ -198,10 +247,11 @@ def main():
         test_ingest_refuses_over_ceiling(home)
         test_through_moves_only_after_write(home)
         test_apply_keeps_group_boundary(home)
+        test_consolidate_records_keep_group_boundary(home)
         test_apply_rejects_unknown_field(home)
         test_dry_run_writes_nothing(home)
     print("=" * 72)
-    print("✓ dossier.py 写入动词 6 项门禁全部通过")
+    print("✓ dossier.py 写入动词 7 项门禁全部通过")
     print("=" * 72)
 
 

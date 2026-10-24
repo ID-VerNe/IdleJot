@@ -29,7 +29,10 @@ jobs:
     steps:
       # Pinned to an exact tag, same rule as setup-uv below. v5 runs on
       # Node.js 24, which clears the Node 20 deprecation annotation (#25).
+      # fetch-depth: 0 供 scripts/check_gate_change_review.py 用 merge-base 算 PR 改动集（issue #62）。
       - uses: actions/checkout@v5.1.0
+        with:
+          fetch-depth: 0
       # The repo is uv-managed (pyproject.toml + uv.lock); there is no
       # requirements/ tree. setup-uv caches on uv.lock by default.
       # NOTE: pin an exact tag - setup-uv publishes no bare major tag for
@@ -44,6 +47,12 @@ jobs:
       # 上面的 matrix.shard 与清单的 shards 由 scripts/check_gate_manifest.py 钉住。
       # 分片内部仍是串行执行（保持 AGENTS.md §2.6 的安静窗口），结果写进 job 摘要。
       - name: Regression suite (scripts/gates.json)
+        # PR 事件下把 base sha 与正文交给门禁：scripts/check_gate_change_review.py
+        # 用它算改动集并校验 `## 门禁改动` 段（issue #62）；push/workflow_dispatch
+        # 时两个变量为空串，该门禁自行 SKIP。run_gates.py 透传环境给子进程。
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: uv run --frozen python scripts/run_gates.py ci --shard ${{ matrix.shard }}
   checks:
     # 分支保护要求的必需上下文就是 `checks`（issue #58）。matrix 的检查名会变成

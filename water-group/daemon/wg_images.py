@@ -209,6 +209,10 @@ def labels(event, media=None):
 
     media 是 chat_inbox.media 列（顺序即 image_index）；消息段缺失时用它兜底，
     这样 reply.py --context 里的引用图也能显示。
+
+    发现顺序：段内扫描 → 索引反查 → media 兜底。索引反查（issue #35）补的是
+    「段里没有 image_index、但索引里有该事件图片行」的形状——旧数据或部分投递的
+    wg_events 行，没有这一步唤醒行就只剩 content 里的裸 [图片] 占位。
     """
     index_rows = load_index()
     found = []
@@ -220,6 +224,14 @@ def labels(event, media=None):
                           state=(segment.get("pixels") or {}).get("state") or "available",
                           local_path=segment.get("local_path")))
     if not found:
+        event_id = int(event.get("id") or 0)
+        for (row_eid, row_idx), row in sorted(index_rows.items()):
+            if row_eid != event_id:
+                continue
+            found.append(dict(index=row_idx, quote=row.get("quote_of"),
+                              state=row.get("state") or "deferred",
+                              local_path=row.get("local_path") or ""))
+    if not found:
         for position, item in enumerate(media or []):
             if item.get("kind") not in (None, "image", "gif", "sticker"):
                 continue
@@ -227,9 +239,8 @@ def labels(event, media=None):
                 continue
             found.append(dict(index=position, quote=item.get("quote_message_id"),
                               state="available", local_path=None))
-    event_id = int(event.get("id") or 0)
     for item in found:
-        row = index_rows.get((event_id, item["index"])) or {}
+        row = index_rows.get((int(event.get("id") or 0), item["index"])) or {}
         item["state"] = row.get("state") or item["state"]
         item["local_path"] = item.get("local_path") or row.get("local_path") or ""
         item["quote"] = item.get("quote") or row.get("quote_of")
@@ -237,16 +248,29 @@ def labels(event, media=None):
 
 
 def render(event, media=None):
-    """渲染成一行图片标记，例如 ``[图片 i=0 path=C:\\...\\12-0.jpg]``。"""
+    """渲染成一行图片标记，例如 ``[图片 i=0 path=C:\\...\\12-0.jpg]``。
+
+    「可补读」必须带上具体命令（issue #35）：裸「可补读」三个字不是可执行指引，
+    Agent 每次都要现场试错才能想起 look.py。同理，占位在、记录全无也要明说
+    「未登记」并给出命令——不靠不印表达失败。
+    """
     parts = []
+    event_id = int(event.get("id") or 0)
     for item in labels(event, media):
         suffix = f" 引自 {item['quote']}" if item.get("quote") else ""
+        hint = f"look.py --event {event_id} --index {item['index']}"
         if item.get("local_path"):
             parts.append(f"[图片 i={item['index']}{suffix} path={item['local_path']}]")
         elif item["state"] in ("deferred", "available", "", None):
-            parts.append(f"[图片 i={item['index']}{suffix} 可补读]")
+            parts.append(f"[图片 i={item['index']}{suffix} 可补读 {hint}]")
         elif item["state"] == "permission_denied":
             parts.append(f"[图片 i={item['index']}{suffix} 无权限]")
         else:
             parts.append(f"[图片 i={item['index']}{suffix} 未交付:{item['state']}]")
+    if not parts:
+        # content 里有占位 = 确有图片，但段、media、索引全无记录：给出补读命令，
+        # 不让唤醒行只剩一个裸 [图片]（issue #35）。
+        body = str(event.get("content") or "")
+        if "[图片]" in body or "[动画表情]" in body:
+            parts.append(f"[图片 未登记 look.py --event {event_id} 补读]")
     return "".join(parts)

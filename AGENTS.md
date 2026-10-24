@@ -22,7 +22,13 @@
 .venv/Scripts/python.exe water-group/daemon/reply.py --list            # 看谁 @ 了我
 .venv/Scripts/python.exe water-group/daemon/reply.py --context 30      # 回之前看群里在聊什么（含闲聊）
 .venv/Scripts/python.exe water-group/daemon/reply.py <id> "<正文>"      # 回一条，自动带原生引用；发完自动开追问窗口
+.venv/Scripts/python.exe water-group/daemon/reply.py --show <id>       # 读某条消息全文（wg_events 命中带引用展开；缺 id 明说原因）
+.venv/Scripts/python.exe water-group/daemon/look.py --event <id>       # 唤醒行图片标「可补读」时先落盘再读；--pick 看候选、--recent 看最近
 ```
+
+唤醒行里的图片标记三种形态：`path=…`（已落盘，直接读）、`可补读 look.py --event <id> --index <i>`
+（deferred，先跑命令再读）、`未登记`（无任何记录，命令照样能补读）。别对着裸 `[图片]` 说
+「看不到图」——先看标记尾缀（issue #35）。
 
 **时间基准（issue #95）**：`up.py --status` 首个非空行、`reply.py --list` / `--context`
 表头、`watch.py` 唤醒块首行、`followup.py --show` 首行都带

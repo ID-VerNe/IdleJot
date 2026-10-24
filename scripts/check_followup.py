@@ -69,7 +69,7 @@ def append(rows):
         data = dict(payload)
         data["conversation_id"] = f"111:group:{GROUP}"
         data["onebot_message_id"] = ONEBOT.get(event_id, str(7000 + event_id))
-        db.execute("INSERT INTO chat_inbox VALUES (?, ?, ?, ?)",
+        db.execute("INSERT INTO chat_inbox VALUES (?, ?, ?, ?, '[]')",
                    (event_id, SID, json.dumps(data, ensure_ascii=False), at))
     db.commit()
     db.close()
@@ -79,13 +79,14 @@ def build():
     db = sqlite3.connect(DB)
     db.execute("CREATE TABLE chat_sessions (id TEXT, conversation_id TEXT, active INTEGER)")
     db.execute("CREATE TABLE chat_inbox "
-               "(id INTEGER PRIMARY KEY, session_id TEXT, payload TEXT, at REAL NOT NULL)")
+               "(id INTEGER PRIMARY KEY, session_id TEXT, payload TEXT, at REAL NOT NULL,"
+               " media TEXT NOT NULL DEFAULT '[]')")
     db.execute("INSERT INTO chat_sessions VALUES (?, ?, 1)", (SID, f"111:group:{GROUP}"))
     db.execute("INSERT INTO chat_sessions VALUES ('dead-session', '100:group:999', 0)")
     foreign = dict(FOREIGN[1])
     foreign["conversation_id"] = "100:group:999"
     foreign["onebot_message_id"] = ONEBOT[FOREIGN[0]]
-    db.execute("INSERT INTO chat_inbox VALUES (?, ?, ?, ?)",
+    db.execute("INSERT INTO chat_inbox VALUES (?, ?, ?, ?, '[]')",
                (FOREIGN[0], "dead-session", json.dumps(foreign, ensure_ascii=False), FOREIGN[2]))
     db.commit()
     db.close()

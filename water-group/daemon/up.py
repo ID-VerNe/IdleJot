@@ -33,6 +33,7 @@ import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #4 PA0)
 import wg_images  # noqa: E402  (图片标记渲染，与 reply/look 同一份实现)
+import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
 from wg_paths import data_dir, logs_dir, state_dir
 STATE = state_dir()
 CONFIG = wg_config.CONFIG
@@ -964,8 +965,12 @@ def report(exclude_pids=None, resident_pid=None):
             stamp = wg_clock.clock_ms(e.get("timestamp"))
             state = wake_state(e, rows, ledger)
             images = wg_images.render(e)
+            # status 行与唤醒行同一份渲染口径（issue #32）：40 字额度按正文
+            # 算，段占位不占，截断了带 --show 指引。
+            body, _, _ = wg_text.render_body(e.get("content"), wg_text.STATUS_BODY_CHARS,
+                                              e.get("id"))
             print(f"  id={e.get('id')} {stamp} [{state}] [{wake_reason(e)}] "
-                  f"{e.get('sender')}: {(e.get('content') or '')[:40]}"
+                  f"{e.get('sender')}: {body}"
                   f"{('  ' + images) if images else ''}")
     else:
         print("最近唤醒  : 无")

@@ -44,9 +44,15 @@ FORWARD_REASONS = {
 
 
 def _fit(value, limit):
-    """显示用截断：折叠空白再按字数裁。截断只影响这一行，不回流到数据。"""
-    text = " ".join(str(value or "").split())
-    return text if len(text) <= limit else text[:limit] + "…"
+    """显示用截断：折叠空白再按字数裁。截断只影响这一行，不回流到数据。
+
+    截断本身走 `wg_text.render_fitted`（issue #32）：引用原文、转发摘要、
+    发送者名这三种短显示曾在这里手写 `text[:limit] + "…"`，是 daemon 侧
+    第五份截断口径。
+    """
+    import wg_text
+
+    return wg_text.render_fitted(value, limit)
 
 
 def _replies(payload):

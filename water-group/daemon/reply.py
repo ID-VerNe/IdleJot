@@ -18,6 +18,7 @@ Usage:
   reply.py <event_id> "<text>" [--intent "..."] [--no-quote] [--no-followup]
   reply.py --list
   reply.py --context 30 [--around <event_id>]
+  reply.py --show <event_id>      读这条消息的全文（行内截断后的补救路径）
 
 <text> 里的换行会拆成多条气泡（最多 3 条，首条挂引用）。想连发几句就分行写，
 不要拿斜杠把几句话串成一行——QQ 里换行会折叠，斜杠会读成文档。shell 双引号里
@@ -43,6 +44,7 @@ import winconsole  # noqa: E402
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_images  # noqa: E402
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
+import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
 
 ROOT = HERE.parents[1]
 from wg_paths import data_dir, state_dir
@@ -513,8 +515,12 @@ def list_wakes():
         stamp = wg_clock.clock_ms(e.get("timestamp"))
         images = wg_images.render(e)
         quotes = wg_quotes.render_event(e)
+        # 正文渲染与 watch 唤醒行同一份口径（issue #32）：段占位不占额度，
+        # 截断了带 … 和 --show 指引。
+        body, _, _ = wg_text.render_body(e.get("content"), wg_text.LIST_BODY_CHARS,
+                                          e.get("id"))
         print(f"id={e.get('id')} {stamp} [{mark}] [{reason}] {e.get('sender')}: "
-              f"{(e.get('content') or '')[:50]}"
+              f"{body}"
               f"{('  ' + quotes) if quotes else ''}{('  ' + images) if images else ''}")
         shown += 1
     if not shown:
@@ -618,9 +624,9 @@ def show_context(limit, around=None):
     for row in rows:
         stamp = wg_clock.clock_ms(row["ts"])
         who = "我" if row["self"] else (row["sender"] or "?")
-        text = row["text"]
-        if len(text) > 120:
-            text = text[:120] + "…"
+        # 上下文行同一份渲染口径（issue #32）：段占位不占额度，截断了说被切过。
+        text, _, _ = wg_text.render_body(row["text"], wg_text.CONTEXT_BODY_CHARS,
+                                         row["id"])
         marks = []
         if row["recalled"]:
             marks.append("撤回")
@@ -736,6 +742,8 @@ def main():
                         help="列出最近 N 条聊天（含闲聊），回之前先看群里在聊什么")
     parser.add_argument("--around", type=int, metavar="ID",
                         help="配合 --context：只看这条之前的部分")
+    parser.add_argument("--show", type=int, metavar="ID",
+                        help="按 id 读这条消息的全文（唤醒行/上下文行截断后的补救，issue #32）")
     args = parser.parse_args()
 
     # Line buffered even when piped: --wait parks in a child process, and if
@@ -746,6 +754,8 @@ def main():
 
     if args.context is not None:
         return show_context(args.context, args.around)
+    if args.show is not None:
+        return wg_text.show_event(args.show)
     if args.list:
         return list_wakes()
     if args.who:

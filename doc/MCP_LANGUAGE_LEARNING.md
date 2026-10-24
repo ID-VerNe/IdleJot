@@ -34,6 +34,28 @@
 
 材料展开和图片准备在学习锁外执行，沿用授权、取消和限额。学习结果保存后交接失败时，原 `state` 回执保持，`chat_error=handoff_unavailable` 表示聊天材料未交付，不代表学习未提交；不会返回失效的聊天链接或消息、图片。可按原 lease/result 幂等核对，已停止或撤权的会话仍拒绝后续访问。外部模型正在执行的学习请求不能中途抢占，只在领取与提交边界让出；这不是所有客户端固定两次模型请求的保证。
 
+## 插件化归属（issue #4 PD2b）
+
+语言学习是 app 侧第二个插件：适配器 `chatlocal/app_plugins/language.py`，功能模块
+`chatlocal/mcp_language_learning.py`（及四个叶子模块）**原地不动**——七个语言门禁钉死
+该路径，业务行为逐字不变。宿主（`mcp_chat` / `mcp_chat_wait` / `mcp_chat_turns` /
+`mcp_tools` / `mcp_chat_schemas`）只经 `chatlocal/app_plugins/base.py` 协议交互，不再
+import 功能模块、不再认它的工具名或事件名：
+
+- `spec.LANGUAGE` 声明四个工具、`scope=None`（沿用 chat 授权，库绑定逐次自校验）、
+  `expression=None`（计划无关工具在 `permission()` 前直派）、`policy=None`
+  （开关是 `language_libraries.enabled` 数据态，不是 policy 文件）。
+- 唤醒事件名 `learning_ready` 由适配器类属性 `wake_event` 声明；宿主经 `wake_signal`
+  描述子取 `{kind,ready,payload,next_call,note}`，wait 结果字段名与线报文案逐字不变。
+- 计划上下文与行内选择走 `plan_context` / `select` 描述子；`SELECTING_EXPRESSION`
+  阶段、`next` 文案与 `next_call` 形状由适配器给出，宿主只套控制流。
+- claim/submit 的工具边界交接走 `handoff` / `durable`：提交成功的阶段回执在交接取消或
+  失败时仍然成立（`chat_error=handoff_unavailable` 语义不变）。
+- `chat.learning` 是写穿属性（`chat.learning is chat.apps.get('language')`），本地 HTTP
+  界面（`mcp_routes` 的 overview/library/status/configure/manage）与门禁共用同一实例。
+- `scripts/check_app_plugins.py` 的宿主名扫描把四个学习工具名纳入白名单（只允许
+  `mcp_language_learning.py` 自身与 `mcp_chat.py` 的兼容属性）。
+
 `get_chat_learning` 接受 `session_id` 或 `conversation_id` 二选一。后者使用 `list_chat_groups` 返回的 `账号:group:群号`，可以直接读取已授权账号群的本地知识，不必先开聊天或连接实时事件；`records=true` 返回少量条目。读取不启用学习、不启动采集。每次仍验证当前凭据、账号群和日期范围。返回 `library_key` 明确所属库；任务领取也返回这个字段。
 
 升级不清空学习库、不累加迁移计数。旧 `pins`、`contexts` 表暂保留用于回退，但新代码不再读取或更新其中的单群限制。未完成任务仍按停止、撤权及重启边界取消，已落库知识继续保留。

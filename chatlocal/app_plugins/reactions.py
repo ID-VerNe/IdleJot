@@ -26,7 +26,8 @@ from ..onebot import OneBotError, OneBotUncertain
 from . import spec
 from .base import AppPlugin
 
-TOOL = spec.REACTIONS['tool']
+TOOLS = spec.REACTIONS['tools']
+TOOL = TOOLS[0]
 FLAG = spec.REACTIONS['scope']
 HINT = ('消息回应可单独完成本批参与，然后继续等待；有新内容才再发文字，不补发操作说明。'
         '结合人物卡、原消息和群内语气选择，也可不用；不逐条贴、不随机贴。'
@@ -480,7 +481,7 @@ class ChatReactions(AppPlugin):
         if not scope.get(self.scope_flag) or not self.enabled():return ()
         return (schema(tool,self.policy()['candidates']),)
 
-    def dispatch(self,grant,args,cancel):
+    def dispatch(self,grant,name,args,cancel):
         return self.request(grant,args,cancel)
 
     def deny(self,grant,target,row):

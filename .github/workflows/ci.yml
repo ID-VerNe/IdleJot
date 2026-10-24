@@ -61,7 +61,7 @@ jobs:
             # Memory engine, personas and planning
             'check_memory_engine_imports.py',
             'check_group_memory.py',
-'check_group_notes.py',
+            'check_group_notes.py',
             'check_sender_name.py',
             'check_text_truncation.py',
             # dossier.py 写入动词：载荷校验、超长拒绝、游标只在写入成功后推进（issue #6）

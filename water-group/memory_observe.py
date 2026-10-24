@@ -14,6 +14,7 @@ from .memory_commands import known_names, parse_command
 # safe here: importing `water_group.memory_engine` already requires the repo root
 # on sys.path, which is what makes `chatlocal` importable in the first place.
 from chatlocal.text_limits import EVENT_TEXT_CHARS, clip
+from chatlocal.name_guard import clean_sender_name
 
 
 class MemoryObserveMixin:
@@ -104,6 +105,9 @@ class MemoryObserveMixin:
 
     def handle_explicit_command(self, sender_id, sender_name, group_id, text):
         """Processes an explicit banter command, updating DB and compact profiles."""
+        # issue #39: guard sender_name (see extract_interaction) before it can
+        # reach a profile primary_name/aliases write.
+        sender_name = clean_sender_name(sender_name, sender_id)
         cmd = self.parse_explicit_command(text)
         if not cmd.get("is_command"):
             return None
@@ -222,6 +226,11 @@ class MemoryObserveMixin:
         if not text or not sender_id:
             return None
 
+        # issue #39: sender_name may be QQ quote-bubble UI text (``<X>回应了你的
+        # 消息：<Y>``). Never write that string into primary_name/aliases --
+        # fall back to the QQ number so the member stays recognisable.
+        sender_name = clean_sender_name(sender_name, sender_id)
+
         # Update / bind profile with sender info
         profile = self.find_profile(sender_id)
         if not profile:
@@ -335,6 +344,9 @@ class MemoryObserveMixin:
                 or (m.get("sender", {}).get("nickname") if isinstance(m.get("sender"), dict) else m.get("sender"))
                 or ""
             ).strip()
+            # issue #39: guard the upstream name before the direct save_profile
+            # below can write bubble UI text into primary_name.
+            sender_name = clean_sender_name(sender_name, sender_id)
             text = str(m.get("content") or m.get("text") or m.get("message") or "").strip()
             if not text:
                 continue

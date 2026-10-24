@@ -352,6 +352,11 @@ uv run python scripts/check_module_size.py
 #     停用即降级（工具消失 + 授权位清空）；私聊自动关掉自己；不吃别人的事件；
 #     `chatlocal/*.py` 里不得再出现插件名硬编码（宿主只认注册表）
 uv run python scripts/check_app_plugins.py
+
+# 28. 发信人名形态校验（issue #39）：QQ 引用气泡文案（`<X>回应了你的消息：<Y>`）
+#     不得进 chat_inbox.payload.sender，也不得进档案 aliases/primary_name；
+#     入库侧与建档侧共用 chatlocal/name_guard.py 单一清洗
+uv run python scripts/check_sender_name.py
 ```
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

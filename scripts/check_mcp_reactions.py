@@ -401,7 +401,7 @@ def main():
                     # synthetic and expired records remain untrusted.
                     original=deepcopy(json.loads(own['payload']))
                     accepted=len(tools.chat.reactions.context(tools.chat.row(sid))['items'])
-                    for i,mutation in enumerate(({'synthetic':True},{'reaction_epoch':'old'},
+                    for i,mutation in enumerate(({'synthetic':True},{'app_epochs':{'reactions':'old'}},
                             {'sender_id':'333'},{'send_request':{'operation_id':'unknown'}},{'recalled':True})):
                         with access.connect() as db:db.execute('UPDATE chat_inbox SET payload=? WHERE id=?',(json.dumps(original|mutation),ownid))
                         tools.chat.receive(dict(post_type='notice',notice_type='group_msg_emoji_like',sub_type='add',self_id=111,group_id=222,

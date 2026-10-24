@@ -379,7 +379,7 @@ class ChatReactions(AppPlugin):
         if not found:
             self.log.info('reaction_notice ignored=target_not_cached');return
         target=json.loads(found['payload'])
-        if target.get('reaction_epoch')!=self.epoch or target.get('recalled') or target.get('synthetic'):
+        if (target.get('app_epochs') or {}).get(self.name)!=self.epoch or target.get('recalled') or target.get('synthetic'):
             self.log.info('reaction_notice ignored=target_expired_or_virtual');return
         source=target.get('source')
         if source!='onebot_websocket' and not (source=='send_receipt' and self.receipt_target(row,target)):

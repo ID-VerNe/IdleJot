@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+from wg_daemon import logger
 from wg_paths import data_dir, logs_dir, state_dir
 STATE_DIR = state_dir()
 LOG = logs_dir() / "db_keeper.log"
@@ -23,13 +24,8 @@ TARGETS = [data_dir() / "mcp-access.sqlite3", data_dir() / "chats.sqlite3"]
 RETRY = 30
 
 
-def log(line):
-    try:
-        LOG.parent.mkdir(parents=True, exist_ok=True)
-        with open(LOG, "a", encoding="utf-8") as fh:
-            fh.write(f"{time.strftime('%m-%d %H:%M:%S')} {line}\n")
-    except OSError:
-        pass
+# issue #11 PB: 日志助手收口到 wg_daemon
+log = logger(LOG)
 
 
 def open_one(path):

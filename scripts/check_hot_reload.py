@@ -27,6 +27,7 @@ os.environ["WATER_GROUP_HOME"] = str(TMP)
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
 import reload  # noqa: E402
+import wg_daemon  # noqa: E402  (issue #11 PB: JSON 助手搬到 wg_daemon)
 
 
 class FakeProc:
@@ -254,7 +255,7 @@ def check_mailbox_dry_run():
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(request), encoding="utf-8")
     reloader.tick({"commands": FakeProc("commands")}, lambda name: spawned.append(name))
-    result = reload._read_json(reload._result_path(request["nonce"]))
+    result = wg_daemon.read_json(reload._result_path(request["nonce"]))
     assert isinstance(result, dict), result
     assert result["ok"] is True and result["targets"] == ["commands"], result
     assert not spawned, spawned

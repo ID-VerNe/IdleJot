@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from wg_daemon import logger
 from wg_paths import logs_dir
 
 # The watchdog runs without a console, so any console child it spawns (powershell,
@@ -73,13 +74,8 @@ def onebot_token():
         return ""
 
 
-def log(line):
-    try:
-        LOG.parent.mkdir(parents=True, exist_ok=True)
-        with open(LOG, "a", encoding="utf-8") as fh:
-            fh.write(f"[watchdog] {time.strftime('%m-%d %H:%M:%S')} {line}\n")
-    except OSError:
-        pass
+# issue #11 PB: 日志助手收口到 wg_daemon，[watchdog] 前缀经 tag 参数保留
+log = logger(LOG, tag="watchdog")
 
 
 def port_open():

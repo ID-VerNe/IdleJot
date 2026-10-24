@@ -28,6 +28,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from wg_daemon import logger
 from wg_paths import logs_dir
 
 BASE_URL = ""
@@ -74,13 +75,8 @@ CACHE_MAX = 128  # 缓存条目上限：跨天换键的条目不会命中，不�
 _PROVINCE_TAIL = re.compile(r"(省|市|自治区|特别行政区)$")
 
 
-def log(line):
-    try:
-        LOG.parent.mkdir(parents=True, exist_ok=True)
-        with open(LOG, "a", encoding="utf-8") as fh:
-            fh.write(f"{time.strftime('%m-%d %H:%M:%S')} {line}\n")
-    except OSError:
-        pass  # 日志写不出去不该让指令失败
+# issue #11 PB: 日志助手收口到 wg_daemon（写失败吞掉的语义不变）
+log = logger(LOG)
 
 
 class SixtyError(Exception):

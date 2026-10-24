@@ -32,6 +32,7 @@ import session
 import wg_images
 
 ROOT = Path(__file__).resolve().parents[2]
+from wg_daemon import beater, logger
 from wg_paths import logs_dir, state_dir
 STATE_DIR = state_dir()
 ACK = STATE_DIR / "wg_ack.txt"
@@ -51,19 +52,9 @@ def read_ack():
         return 0
 
 
-def log(line):
-    try:
-        with open(LOG, "a", encoding="utf-8") as fh:
-            fh.write(f"{time.strftime('%m-%d %H:%M:%S')} {line}\n")
-    except OSError:
-        pass
-
-
-def beat():
-    try:
-        HEARTBEAT.write_text(str(int(time.time())), encoding="utf-8")
-    except OSError:
-        pass
+# issue #11 PB: 日志/心跳助手收口到 wg_daemon（旧本件缺 mkdir，现在恒建父目录）
+log = logger(LOG)
+beat = beater(HEARTBEAT)
 
 
 def load_seen():

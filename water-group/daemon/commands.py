@@ -39,6 +39,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收口)
 import reload as wg_reload  # noqa: E402  (热重载合作退出检查点，不 spawn)
+from wg_daemon import beater, logger, pid_alive
 from wg_paths import logs_dir, state_dir
 STATE_DIR = state_dir()
 LOG = logs_dir() / "wg_commands.log"
@@ -73,13 +74,9 @@ DEFAULTS = {
     "groups": set(),
 }
 
-def log(line):
-    try:
-        LOG.parent.mkdir(parents=True, exist_ok=True)
-        with open(LOG, "a", encoding="utf-8") as fh:
-            fh.write(f"{time.strftime('%m-%d %H:%M:%S')} {line}\n")
-    except OSError:
-        pass
+# issue #11 PB: 日志/心跳助手收口到 wg_daemon
+log = logger(LOG)
+beat = beater(HEARTBEAT)
 
 
 # 插件在 import 期装配（issue #4 PA）：契约在 plugins/base.py，注册表在
@@ -114,37 +111,8 @@ FETCH_ERRORS = PLUGINS.error_types()
 BIND_HINT = plugins.BIND_HINT
 
 
-def beat():
-    try:
-        HEARTBEAT.parent.mkdir(parents=True, exist_ok=True)
-        HEARTBEAT.write_text(str(int(time.time())), encoding="utf-8")
-    except OSError:
-        pass
-
-
-def pid_alive(pid):
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        try:
-            import ctypes
-
-            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
-            if handle:
-                ctypes.windll.kernel32.CloseHandle(handle)
-                return True
-            return False
-        except Exception:  # noqa: BLE001  探测失败按死处理，让锁可被接管
-            return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
+# issue #11 PB: pid_alive 收口到 wg_daemon（判活以更严格的 reload 版为基准：
+# GetExitCodeProcess == STILL_ACTIVE，句柄未关的退出进程不再误判活）
 
 
 def acquire_lock():

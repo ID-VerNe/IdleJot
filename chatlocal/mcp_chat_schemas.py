@@ -83,7 +83,14 @@ def schemas(tool):
                   session_id=dict(type='string', description='当前持续聊天会话编号（可选，用于推导群号）'),
                   records=dict(type='array', items=dict(type='object'), description='批量群友画像提炼列表，每项包含 identifier, key_memories, interests, traits, tone_style, event(quote, context, tags) 等'),
                   events=dict(type='array', items=dict(type='object'), description='独立群事件与八卦流水列表，每项包含 identifier, quote, context, tags 等'),
-                  summary=dict(type='string', description='本次对话整体话题总结或阶段性沉淀摘要')),
+                  summary=dict(type='string', description='本次对话整体话题总结或阶段性沉淀摘要'),
+                  notes=dict(type='array', items=dict(type='object'), description='群级结构化术语（黑话、店名、场地、群内约定），每项包含 term（术语/简称）, value（指向的含义）, kind（可选，术语类别，默认 glossary）')),
+             []),
+        tool('query_group_notes', '查询本群的结构化群级术语（黑话、店名简称、活动场地、群内约定等）。当群友提到某个黑话/简称、或你记得“记一下”过但想不起指向，用此工具按术语查回。group_id 可用 session_id 自动推导。',
+             dict(group_id=dict(type='string', description='目标群号（可选，若提供 session_id 可自动推导）'),
+                  session_id=dict(type='string', description='当前持续聊天会话编号（可选，用于推导群号）'),
+                  query=dict(type='string', description='要检索的术语或含义关键词（可选）；不填返回本群最近更新的术语'),
+                  limit=dict(type='integer', minimum=1, maximum=50, default=20, description='返回条数上限')),
              []),
     ]
     next(s for s in rows if s['name']=='send_chat_message')['parameters']['properties']['plan_id']=dict(type='string',minLength=32,maxLength=32,description='plan_chat_reply 返回的 READY 计划；缺少时拒绝发送。')

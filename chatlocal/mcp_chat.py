@@ -47,7 +47,7 @@ def load_water_group_config():
 
 
 CHAT_TOOLS = {'start_chat_session', 'get_chat_session', 'list_chat_sessions', 'read_chat_forward',
-              'wait_chat_messages', 'send_chat_message', 'stop_chat_session', 'list_chat_groups', 'list_chat_friends', 'list_chat_personas', 'query_member_dossier', 'update_member_dossier', 'consolidate_chat_memory'} | TURN_TOOLS | LEARNING_TOOLS | APP_TOOL_NAMES
+              'wait_chat_messages', 'send_chat_message', 'stop_chat_session', 'list_chat_groups', 'list_chat_friends', 'list_chat_personas', 'query_member_dossier', 'update_member_dossier', 'consolidate_chat_memory', 'query_group_notes'} | TURN_TOOLS | LEARNING_TOOLS | APP_TOOL_NAMES
 CHAT_INSTRUCTIONS = '''这是用户明确开启的持续聊天，不设总时长；直到用户停止、权限失效或客户端退出。
 开始即在当前机器人账号与授权会话内边聊边学，保留之前明确暂停的偏好；只学习本次实时他人消息，不读历史或更换模型目的地。好友私聊使用 ACCOUNT:direct:QQ，群聊使用 ACCOUNT:group:GROUP；不发送临时会话。
 统一循环：wait 收到消息先做 Planner；silence 仅结束本轮发言决定，确认处理进度后继续 wait，绝不退出水群。Planner 的 WAITING 只是暂缓决定，不确认本批完成；沿 next_call 等待，到期或新输入时程序重新交付可规划批次。wait 返回 learning_ready 时领取一个阶段；claim 返回 task 时，用下一次实际模型调用完成并沿 task.submit_call 提交。claim/submit 附 updated_chat 时直接沿 next_call 先聊天；未领取任务或已提交且无附带聊天时回 wait。每次只推进一个阶段，不连续领取，无需用户另给学习口令。
@@ -716,6 +716,7 @@ class MCPChat(ChatWaitMixin):
         if name=='query_member_dossier':return self.query_member_dossier(grant,args)
         if name=='update_member_dossier':return self.update_member_dossier(grant,args)
         if name=='consolidate_chat_memory':return self.consolidate_chat_memory(grant,args)
+        if name=='query_group_notes':return self.query_group_notes(grant,args)
         raise ValueError('未知持续聊天操作。')
 
     def query_member_dossier(self, grant, args):
@@ -773,7 +774,26 @@ class MCPChat(ChatWaitMixin):
             events=args.get('events'),
             messages=args.get('messages'),
             summary=args.get('summary'),
+            notes=args.get('notes'),
         )
+
+    def query_group_notes(self, grant, args):
+        self.permission(grant)
+        from water_group.memory_engine import get_memory_engine
+        engine = get_memory_engine()
+        gid = args.get('group_id')
+        if not gid and args.get('session_id'):
+            try:
+                row = self.row(args['session_id'], grant['id'])
+                gid = row['conversation_id'].split(':')[-1]
+            except Exception:
+                pass
+        notes = engine.query_group_notes(
+            str(gid) if gid else '',
+            query=args.get('query'),
+            limit=args.get('limit', 20),
+        )
+        return {"group_id": str(gid) if gid else None, "notes": notes}
 
 
 

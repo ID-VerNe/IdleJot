@@ -31,6 +31,12 @@ DEFAULT_DB_PATH = Path(
 MEMORY_SLOTS = 24
 INTEREST_SLOTS = 16
 
+# Cap on how many high-frequency group notes get injected into an L1 context
+# batch. Group glossaries must not crowd out member dossiers: injection is a
+# budgeted snippet, not a full dump (issue #31). The read tool stays the
+# authoritative interface for the full set.
+GROUP_NOTE_L1_CAP = 5
+
 # 泛称不是名字。让「领导」「群友」参与子串匹配，等于任何两个字都能撞上档案：
 # 一个包含别名但不等于别名的短语，不得命中该别名的档案。
 GENERIC_ALIASES = ("领导", "群友")
@@ -107,6 +113,18 @@ class MemoryStoreMixin:
                     ON member_group_memories(group_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_group_memories_user
                     ON member_group_memories(user_id, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS group_notes (
+                    group_id        TEXT NOT NULL,
+                    term            TEXT NOT NULL,
+                    kind            TEXT NOT NULL DEFAULT 'glossary',
+                    value           TEXT NOT NULL DEFAULT '',
+                    updated_at      REAL NOT NULL,
+                    source_event_id INTEGER,
+                    PRIMARY KEY (group_id, term)
+                );
+                CREATE INDEX IF NOT EXISTS idx_group_notes_group
+                    ON group_notes(group_id, updated_at DESC);
                 """
             )
             # Idempotent column add for rollback backup (SQLite has no IF NOT EXISTS for ALTER).

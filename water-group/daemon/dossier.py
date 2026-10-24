@@ -14,6 +14,13 @@ Usage:
   dossier.py --check            exit 0 when a refresh is due, 3 when it is not
   dossier.py --dump [N]         print the material, one JSON object per line
   dossier.py --mark             record everything up to now as summarised
+  dossier.py --ingest FILE      write one summary into the group timeline
+  dossier.py --apply FILE.json  write a batch of member dossiers / events
+
+`--ingest` and `--apply` exist so a refresh does not need a hand-written script
+per batch: the payload is data, the plumbing lives here (issue #6). Both take `-`
+for stdin, accept `--through` to advance the cursor in the same call, and refuse
+to write when the payload cannot be applied cleanly.
 
 The caller is expected to turn `--dump` into `consolidate_chat_memory` records and
 then call `--mark`. Marking without summarising just loses the material, so it is
@@ -250,6 +257,179 @@ def cmd_mark(through=None):
     return 0
 
 
+def engine():
+    """In-process engine, same route as `--digest` (`:202`).
+
+    Going through MCP would need a minted grant and a running stack; a
+    consolidation pass is exactly the moment when neither is guaranteed. The
+    price is one import (~300ms), paid only by the two writing verbs.
+    """
+    sys.path.insert(0, str(ROOT))
+    from water_group.memory_engine import get_memory_engine
+    return get_memory_engine()
+
+
+def event_ceiling():
+    """One memory-event field's ceiling, taken from its single home (issue #90)."""
+    sys.path.insert(0, str(ROOT))
+    from chatlocal.text_limits import EVENT_TEXT_CHARS
+    return EVENT_TEXT_CHARS
+
+
+def resolve_group(explicit=None, payload_group=None):
+    """`--group` > payload > the active session's conversation tail.
+
+    Same derivation `cmd_digest` uses, so a caller never has to learn a second
+    rule for "which group am I writing to".
+    """
+    for candidate in (explicit, payload_group):
+        value = str(candidate or "").strip()
+        if value:
+            return value
+    _, conversation = active_session()
+    return conversation.split(":")[-1] if conversation else ""
+
+
+def read_payload(source):
+    """Read a payload verbatim; `-` means stdin. Raises OSError / ValueError."""
+    if source == "-":
+        return sys.stdin.read()
+    return Path(source).read_text(encoding="utf-8")
+
+
+def cmd_ingest(source, group, through=None, dry_run=False):
+    """One summary → one group-level event, then optionally advance the cursor.
+
+    The ceiling is refused, not silently applied: a summary that loses its tail
+    is the #90 bug class, and the CLI is the right place to ask for a split
+    because the caller still has the original text in hand.
+    """
+    try:
+        text = read_payload(source).strip()
+    except OSError as exc:
+        print(f"cannot read {source}: {exc}", file=sys.stderr)
+        return 2
+    if not text:
+        print("empty payload", file=sys.stderr)
+        return 2
+    gid = resolve_group(group)
+    if not gid:
+        print("no group id: pass --group, or bind a session first", file=sys.stderr)
+        return 2
+    ceiling = event_ceiling()
+    if len(text) > ceiling:
+        print(f"payload {len(text)} chars exceeds {ceiling}; split it into batches",
+              file=sys.stderr)
+        return 2
+    if dry_run:
+        print(f"would ingest chars={len(text)} group={gid} through={through or '-'}")
+        return 0
+    result = engine().consolidate_chat_memory(group_id=gid, summary=text)
+    events = result.get("recorded_events_count", 0)
+    print(f"ingested chars={len(text)} events={events} group={gid}")
+    if through:
+        # Only after a successful write: marking first is how material gets lost.
+        return cmd_mark(through)
+    return 0
+
+
+MEMBER_FIELDS = {
+    "identifier", "key_memories", "traits", "aliases", "interests",
+    "tone_style", "role", "primary_name", "overwrite", "event",
+}
+
+
+def plan_apply(payload, group):
+    """Validate a payload. Returns (group_id, members, events, summary, errors)."""
+    errors = []
+    if not isinstance(payload, dict):
+        return "", [], [], None, ["payload must be a JSON object"]
+    gid = resolve_group(group, payload.get("group_id"))
+    members = payload.get("members") or []
+    events = payload.get("events") or []
+    summary = payload.get("summary")
+    if not gid:
+        errors.append("no group id: pass --group, or put group_id in the payload")
+    if not isinstance(members, list):
+        errors.append("members must be a list")
+        members = []
+    for index, item in enumerate(members):
+        if not isinstance(item, dict):
+            errors.append(f"members[{index}] must be an object")
+            continue
+        if not str(item.get("identifier") or "").strip():
+            errors.append(f"members[{index}] needs identifier")
+        unknown = set(item) - MEMBER_FIELDS
+        if unknown:
+            # Fail closed: a typo in a field name would otherwise look like a
+            # successful write that changed nothing.
+            errors.append(f"members[{index}] has unknown fields: {sorted(unknown)}")
+    if not isinstance(events, list):
+        errors.append("events must be a list")
+        events = []
+    if summary is not None and len(str(summary)) > event_ceiling():
+        errors.append(f"summary exceeds {event_ceiling()} chars; split it")
+    return gid, members, events, summary, errors
+
+
+def cmd_apply(source, group, dry_run=False):
+    """Batch member dossiers (+ optional events / summary) from a JSON payload.
+
+    Members go straight to `update_member_dossier` with an explicit `group_id`:
+    the `records` path inside `consolidate_chat_memory` drops the group id
+    (`memory_engine.py:1411-1421`), which would land group-scoped facts in the
+    cross-group row and break the #5 write boundary.
+    """
+    try:
+        payload = json.loads(read_payload(source))
+    except OSError as exc:
+        print(f"cannot read {source}: {exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"payload is not valid JSON: {exc}", file=sys.stderr)
+        return 2
+    gid, members, events, summary, errors = plan_apply(payload, group)
+    if errors:
+        for line in errors:
+            print(line, file=sys.stderr)
+        return 2
+    if dry_run:
+        names = [str(item.get("identifier")) for item in members]
+        print(f"would apply group={gid} members={len(names)} events={len(events)} "
+              f"summary={bool(summary)}")
+        for name in names:
+            print(f"  member {name}")
+        return 0
+    mem = engine()
+    failed = 0
+    for item in members:
+        fields = dict(item)
+        event = fields.pop("event", None)
+        result = mem.update_member_dossier(group_id=gid, **fields)
+        if not result.get("success"):
+            failed += 1
+            print(f"member FAIL {item.get('identifier')}: {result.get('error')}",
+                  file=sys.stderr)
+            continue
+        print(f"member ok {result.get('primary_name')} scope={result.get('memory_scope')}")
+        if isinstance(event, dict) and event.get("quote"):
+            mem.record_event(
+                user_id=result["user_id"],
+                group_id=gid,
+                quote=event.get("quote", ""),
+                context=event.get("context", ""),
+                source=event.get("source", "consolidation"),
+                tags=event.get("tags") or [],
+            )
+    if events or summary:
+        result = mem.consolidate_chat_memory(group_id=gid, events=events, summary=summary)
+        print(f"events={result.get('recorded_events_count', 0)} group={gid}")
+    if failed:
+        print(f"{failed} member(s) failed", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="在没人 @ 的时候沉淀群友画像")
     parser.add_argument("--check", action="store_true", help="该提炼了吗")
@@ -258,7 +438,14 @@ def main():
                         help="输出待提炼素材（text 为完整正文，不截断），可限制条数")
     parser.add_argument("--mark", action="store_true", help="标记到当前最新消息")
     parser.add_argument("--through", type=int, metavar="ID",
-                        help="配合 --mark：只推进到这批素材的最后一条，便于分批处理积压")
+                        help="配合 --mark / --ingest：只推进到这批素材的最后一条，便于分批处理积压")
+    parser.add_argument("--ingest", metavar="FILE",
+                        help="把一段正文作为群级沉淀入库；- 读 stdin")
+    parser.add_argument("--apply", metavar="JSON",
+                        help="按 JSON 载荷批量写画像/事件；- 读 stdin")
+    parser.add_argument("--group", metavar="ID",
+                        help="群号；缺省取活动会话或载荷里的 group_id")
+    parser.add_argument("--dry-run", action="store_true", help="只校验并打印计划，不写库")
     args = parser.parse_args()
 
     winconsole.ensure_utf8_stdio()
@@ -266,13 +453,17 @@ def main():
     cfg = settings()
     if args.mark:
         return cmd_mark(args.through)
+    if args.ingest is not None:
+        return cmd_ingest(args.ingest, args.group, args.through, args.dry_run)
+    if args.apply is not None:
+        return cmd_apply(args.apply, args.group, args.dry_run)
     if args.digest:
         return cmd_digest()
     if args.dump is not None:
         return cmd_dump(cfg, args.dump or cfg["max_material"])
     if args.check:
         return cmd_check(cfg)
-    parser.error("需要 --check / --dump / --mark 之一")
+    parser.error("需要 --check / --dump / --mark / --digest / --ingest / --apply 之一")
 
 
 if __name__ == "__main__":

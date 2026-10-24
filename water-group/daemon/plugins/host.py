@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from plugins.base import Plugin, Settings
+from plugins.base import Plugin, PluginError, Settings
 
 try:
     import user_store
@@ -70,23 +70,36 @@ def resolve_credentials(ctx: dict[str, Any], settings: Settings, user_id: str,
 
 
 class CommandsHost:
-    """``commands`` 进程的宿主面：只有日志，没有主动发送与独立存储。
+    """``commands`` 进程的宿主面：日志 + 主动发送（issue #4 PC）。
 
-    主动发送走 handler 返回值（宿主统一挂引用、统一发群），插件自己发消息会绕过
-    冷却/去重/失败回滚，那些都是宿主职责。
+    主动发送走 ``sender``——插件不碰 ``http_url``/``token``，也绕不过宿主的引用、
+    编码与失败处理。``settings_provider`` / ``sender`` 由 ``commands`` 用**延迟
+    绑定**传进来：``load_all`` 在 import 期跑，那时 ``send_group_msg`` 还没定义。
     """
 
     name = "commands"
     capabilities = CAPABILITIES
 
-    def __init__(self, log=None) -> None:
+    def __init__(self, log=None, settings_provider=None, sender=None) -> None:
         self._log = log or (lambda message: None)
+        self._settings = settings_provider or (lambda: {})
+        self._sender = sender
 
     def log(self, message: str) -> None:
         self._log(message)
 
-    def reply(self, ctx: Mapping, payload: Any) -> None:
-        raise NotImplementedError("commands 宿主不支持主动 reply，请用返回值")
+    def settings(self) -> Mapping:
+        return self._settings()
+
+    def send(self, group_id: str, payload: Any) -> None:
+        if self._sender is None:
+            raise PluginError("commands 宿主没有发送通道")
+        self._sender(self.settings(), str(group_id), payload)
+
+    def notify(self, group_id: str, qq: str, text: str) -> None:
+        """@ + 文本的形状只写这一处（旧 ``commands.notify_login`` 的落点）。"""
+        self.send(group_id, [{"type": "at", "data": {"qq": str(qq)}},
+                             {"type": "text", "data": {"text": " " + str(text)}}])
 
     def store(self, plugin: str, name: str) -> Any:
         raise NotImplementedError("commands 宿主不提供独立存储")

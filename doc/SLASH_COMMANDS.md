@@ -252,6 +252,13 @@ retcode 翻译，以及 #55 的设备侧行为（`platform=2` + 完整 `ext_fiel
 （`renew()` / `mark_invalid()`，半个月换一次票、失效后 24h 最多提醒一次）。
 方案里的 `#切换uid` 由 `#绑定` 等价覆盖，不再单独提供。
 
+**归属（issue #4 PC）**：四条指令与轮询线程由 `plugins/miyoushe_plugin.py` 注册
+（`requires` 含 `send`），`commands.py` 只剩传输与仲裁。协议侧三个结论：
+二维码回复用 handler 返回 `{"text","image"}`（不需要新协议）、`#解绑` 的两步
+确认留在 `qr_login.unbind`（不需要新协议）、轮询线程走 `Plugin.start/stop`
+（`start_all`/`stop_all` 调用，`load()` 里不起线程）。`qr_login` 模块坏掉时
+四条指令仍在 `#帮助`，`#登录` 回「暂不可用」——由插件内部的降级构造保证。
+
 ### 流程
 
 ```

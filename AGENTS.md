@@ -71,7 +71,7 @@
 判据看 `~/.water-group/logs/wg_commands.log` 的启动行：
 
 ```
-commands start, prefix='#' keywords=[...] groups=[...] handlers=<N> plugins=miyoushe:17,sixty:14
+commands start, prefix='#' keywords=[...] groups=[...] handlers=<N> plugins=miyoushe:21,sixty:14
 ```
 
 这行**时间早于提交时间** = 进程还是旧代码，此时新指令会被当未知指令**静默丢弃**

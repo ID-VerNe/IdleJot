@@ -7,6 +7,7 @@
 """
 import base64
 import json
+import subprocess
 import sys
 import tempfile
 import time
@@ -829,6 +830,35 @@ def test_settings(_tmp):
           == {"enabled": True, "daily_limit": 5, "session_ttl": 300})
 
 
+def test_degraded_login(_tmp):
+    """qr_login 导入失败时旧行为等价：四条指令仍在、回「暂不可用」（issue #4 PC）。
+
+    子进程跑：``sys.modules['qr_login'] = None`` 让 import 直接失败，比 reload
+    干净——不会把半改的模块状态留在本进程里。
+    """
+    daemon = str(ROOT / "water-group" / "daemon")
+    code = (
+        "import sys\n"
+        "sys.modules['qr_login'] = None\n"
+        f"sys.path.insert(0, {daemon!r})\n"
+        "import commands\n"
+        "assert commands.PLUGINS.load_errors == {}, commands.PLUGINS.load_errors\n"
+        "keys = ['登录', '登录状态', '绑定', '解绑']\n"
+        "assert all(k in commands.HANDLERS for k in keys), sorted(commands.HANDLERS)\n"
+        "settings = commands.settings_from({})\n"
+        "out = commands.resolve_reply('登录', settings, "
+        "{'user_id': '1', 'group_id': '1'}, '')\n"
+        "print('REPLY:' + str(out))\n"
+        "print('HELP:' + ('OK' if all('#' + k in commands.help_text(settings) for k in keys) else 'MISSING'))\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=120)
+    check("降级：子进程正常退出", proc.returncode == 0, (proc.stderr or "")[-400:])
+    check("降级：#登录 回「暂不可用」", "REPLY:登录功能暂不可用" in (proc.stdout or ""),
+          (proc.stdout or "")[-200:])
+    check("降级：四条指令仍在 #帮助", "HELP:OK" in (proc.stdout or ""), (proc.stdout or "")[-200:])
+
+
 def main():
     with tempfile.TemporaryDirectory() as tmp_name:
         tmp = Path(tmp_name)
@@ -858,7 +888,7 @@ def main():
                                test_renew, test_mark_invalid, test_ck_invalid_notify,
                                test_status_and_unbind, test_commands_privacy,
                                test_commands_login_replies, test_commands_dispatch_unbind_cooldown,
-                                test_settings):
+                                test_settings, test_degraded_login):
                         fn(tmp)
             finally:
                 qr_login.HOSTS = real_hosts

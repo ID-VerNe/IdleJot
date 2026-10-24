@@ -26,7 +26,7 @@ API_VERSION = 1
 
 # 宿主能力名。插件声明需要的，宿主持有的取交集校验。
 CAP_COMMANDS = "commands"      # 能注册 # 指令（commands 宿主）
-CAP_SEND = "send"              # 能主动发消息
+CAP_SEND = "send"              # 能主动发群消息（扫码结果回推一类）
 CAP_STORE = "store"            # 有独立的持久化命名空间
 CAP_WAKE = "wake"              # 能触发 Agent 唤醒（app / collector 宿主）
 CAP_TOOLS = "tools"            # 能注册 MCP 工具（app 宿主）
@@ -98,6 +98,11 @@ class Hooks:
     note_error: Callable[[Ctx, Settings, BaseException], str | None] | None = None
     # 取数前的顺带动作（续期一类），不得阻塞
     on_resolved: Callable[[str, Mapping], None] | None = None
+    # 多步确认未完成的指令名：这些指令豁免冷却，否则第二步被 5s 闸门静默丢弃
+    # （issue #66 的 #解绑 就是这么踩的）
+    pending: Callable[[str], frozenset[str]] | None = None
+    # 回复没发出去时的回滚（撤销会话 / 退还额度），ctx 带 key/user_id/group_id
+    on_send_failed: Callable[[Ctx, Settings], None] | None = None
     # --status 里这一行插件的附加说明
     status: Callable[[Settings], str] | None = None
 
@@ -155,14 +160,27 @@ class Plugin:
 
 
 class Host(Protocol):
-    """宿主能力面。每个进程实现一份，插件只依赖这里，不依赖具体进程。"""
+    """宿主能力面。每个进程实现一份，插件只依赖这里，不依赖具体进程。
+
+    ``settings()`` / ``send()`` / ``notify()`` 是 PC 补的（issue #4）：前两轮只有
+    ``log``，插件拿不到最新配置、也不能主动发消息。三个方法都只做**传输与寻址**，
+    不带域语义——``send`` 的 payload 就是 handler 的返回值（``str`` 或
+    ``{"text","image"}``），怎么变成 OneBot 段是宿主的事。
+    """
 
     name: str
     capabilities: frozenset[str]
 
     def log(self, message: str) -> None: ...
 
-    def reply(self, ctx: Ctx, payload: Reply) -> None: ...
+    def settings(self) -> Settings:
+        """当前设置（热重载后的最新值）。"""
+
+    def send(self, group_id: str, payload: Reply) -> None:
+        """主动发到群。``payload`` 与 handler 返回值同形状。"""
+
+    def notify(self, group_id: str, qq: str, text: str) -> None:
+        """@ 某人 + 文本，发到群里（扫码结果回推用）。"""
 
     def store(self, plugin: str, name: str) -> Any: ...
 

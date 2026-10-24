@@ -201,15 +201,12 @@ check("help_text: 动态 handler 也列出来", "#体力" in text and "#公告" 
 check("help_text: 内置帮助关键词也列出来", "#帮助" in text)
 check("help_text: 扫码登录指令始终列出", "#登录" in text and "#解绑" in text)
 _real_handlers = commands.HANDLERS
-_real_login = commands.LOGIN_DESCS
 commands.HANDLERS = {}
-commands.LOGIN_DESCS = {}
 try:
     check("help_text: 无配置无 handler 时的兜底文案",
           commands.help_text(dict(S, commands={}, help_keywords=[])) == "暂无可用指令")
 finally:
     commands.HANDLERS = _real_handlers
-    commands.LOGIN_DESCS = _real_login
 
 # ---- build_message：与 message_sender 同形状 -----------------------------------
 segs = commands.build_message("pong", 55)

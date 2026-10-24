@@ -30,6 +30,8 @@ class Registry:
         self._owners: dict[str, str] = {}
         self._commands: dict[str, Command] = {}
         self.load_errors: dict[str, str] = {}
+        # 由 load_all 填：start_all/stop_all 用它把宿主交给插件（issue #4 PC）。
+        self.host = None
 
     # ---- 写侧 ---------------------------------------------------------------
     def reset(self) -> None:
@@ -37,6 +39,7 @@ class Registry:
         self._owners.clear()
         self._commands.clear()
         self.load_errors.clear()
+        self.host = None
 
     def register(self, plugin: Plugin, capabilities: Iterable[str] | None = None) -> Plugin:
         """注册一个插件。任何冲突都在写入前抛错，不留半注册状态。"""
@@ -61,6 +64,26 @@ class Registry:
     def note_error(self, name: str, exc: BaseException) -> None:
         """记一条加载失败。名字保留下来，``--status`` 才知道该期待谁。"""
         self.load_errors[name] = f"{type(exc).__name__}: {exc}"
+
+    def start_all(self) -> None:
+        """宿主装配完成后启动插件（后台线程/轮询，issue #4 PC）。
+
+        **不在 ``load()`` 里起线程**：``load()`` 在 import 期跑，那时还没有设置，
+        也没有发送通道。失败只记一行——一个插件的线程起不来，不该拖垮指令守护。
+        """
+        for plugin in self._plugins.values():
+            try:
+                plugin.start(self.host)
+            except Exception as exc:  # noqa: BLE001
+                self.note_error(f"{plugin.name} (start)", exc)
+
+    def stop_all(self) -> None:
+        """与 ``start_all`` 对称。逆序停，后起的先停。"""
+        for plugin in reversed(tuple(self._plugins.values())):
+            try:
+                plugin.stop()
+            except Exception as exc:  # noqa: BLE001
+                self.note_error(f"{plugin.name} (stop)", exc)
 
     # ---- 读侧 ---------------------------------------------------------------
     def get(self, name: str) -> Plugin | None:

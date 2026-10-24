@@ -32,8 +32,9 @@
 .venv/Scripts/python.exe water-group/daemon/listen.py --timeout 300
 ```
 
-只活一轮：退出码 0 = 有活（`WAKE` / `DOSSIER_DUE`），**回完必须立刻重挂**。
+只活一轮：退出码 0 = 有活（`WAKE` / `DOSSIER_DUE`），**退出末行的 `RESTART:` 就是重挂命令**（照抄）。
 忘了挂不是「安静」而是「失聪」——消息照样进 `~/.water-group/state/wg_events.jsonl`，但没人叫醒你。
+`reply.py` 发送成功后默认续挂监听 240s（`--no-wait` 关闭），正常回消息不必手动重挂。
 
 ## 2. 回复
 
@@ -114,7 +115,7 @@ tail -20 ~/.water-group/logs/napcat-watchdog.log
 
 ### 6.1 白名单（只有这些可以亲手做）
 
-- `listen.py --timeout`、`reply.py --list` / `--context` / `--who` / `<id> "<正文>"` / `--wait`
+- `listen.py --timeout`、`reply.py --list` / `--context` / `--who` / `<id> "<正文>"`（发送后默认续挂，`--wait` / `--no-wait` 可调）
 - `up.py --status`（只读探活）
 - 追问窗口内接话、按花名 @ 人、连发 @ 的 `--also` 记账
 - `tail` 一行日志判断「要不要转交」：只读、秒回，**不得扩展成多步排查**

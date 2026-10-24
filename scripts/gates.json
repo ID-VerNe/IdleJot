@@ -7,6 +7,7 @@
     {"name": "check_path_hygiene.py", "why": "路径卫生：运行时数据不许从仓库根推导（防 #14 复发）"},
     {"name": "check_no_console_child.py", "why": "子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发）"},
     {"name": "check_listen_passthrough.py", "why": "唤醒内容不被 listen.py 吞掉（#91）"},
+    {"name": "check_listener_rehang.py", "why": "监听空窗：退出必带重挂指令、回复默认续挂、过期唤醒不静默（#69）"},
     {"name": "check_issue_16_audit_fixes.py", "why": "#16 审计缺陷回归：store 异常类型、grants 排序、MCP 响应解析、会话活性"},
     {"name": "check_daemon_entries.py", "why": "daemon 入口冒烟：以 python <script> 方式启动每个入口，验证函数内延迟导入可达"},
     {"name": "check_stop_stack.py", "why": "一键停栈完整性：孤儿清扫、自杀防护、只读探针不被误杀、端口兜底"},

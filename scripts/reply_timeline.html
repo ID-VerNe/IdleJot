@@ -1,0 +1,83 @@
+<div id="tulpa-reply-timeline">
+  <style>
+    #tulpa-reply-timeline { color:var(--foreground); }
+    #tulpa-reply-timeline .timeline-header { display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding-right:90px; }
+    #tulpa-reply-timeline .timeline-header h3 { margin:0; }
+    #tulpa-reply-timeline .timeline-header label { flex:1; min-width:190px; }
+    #tulpa-reply-timeline .axis { position:relative; height:30px; margin-top:16px; border-bottom:1px solid var(--border); }
+    #tulpa-reply-timeline .tick { position:absolute; transform:translateX(-50%); white-space:nowrap; }
+    #tulpa-reply-timeline .lane { margin:12px 0; }
+    #tulpa-reply-timeline .lane-label { display:flex; gap:12px; justify-content:space-between; margin-bottom:5px; }
+    #tulpa-reply-timeline .track { height:14px; background:var(--muted); position:relative; }
+    #tulpa-reply-timeline .mark { height:100%; position:absolute; min-width:2px; }
+    #tulpa-reply-timeline .legend { display:flex; gap:16px; flex-wrap:wrap; margin-top:14px; }
+    #tulpa-reply-timeline .swatch { display:inline-block; width:12px; height:12px; margin-right:6px; }
+    #tulpa-reply-timeline .host { background:var(--muted-foreground); opacity:.5; }
+    #tulpa-reply-timeline .model_wait { background:var(--viz-series-2); }
+    #tulpa-reply-timeline .model_stream { background:var(--viz-series-5); }
+    #tulpa-reply-timeline .bridge { background:var(--viz-series-6); }
+    #tulpa-reply-timeline .tool { background:var(--viz-series-1); }
+    #tulpa-reply-timeline .send { background:var(--viz-series-3); }
+    #tulpa-reply-timeline .wait { background:var(--viz-series-4); }
+    #tulpa-reply-timeline .timeline-meta { display:flex; gap:14px; flex-wrap:wrap; margin-top:12px; }
+    #tulpa-reply-timeline details { margin-top:16px; }
+    #tulpa-reply-timeline .detail-row { display:flex; justify-content:space-between; gap:12px; padding:4px 0; }
+    #tulpa-reply-timeline .ending { margin-top:12px; text-align:right; }
+    @media(max-width:440px) { #tulpa-reply-timeline .timeline-header { padding-right:0; } }
+  </style>
+  <div class="timeline-header"><h3>回复耗时时间轴</h3><label class="form-label">实际回复<select class="form-select" id="tulpa-timeline-select" aria-label="选择回复记录"></select></label></div>
+  <div class="timeline-meta text-small text-muted" id="tulpa-timeline-meta"></div>
+  <div class="axis text-small tabular-nums" id="tulpa-timeline-axis" aria-label="从批次生成开始的秒数"></div>
+  <div id="tulpa-timeline-lanes" role="img" aria-label="各阶段按真实开始时刻和持续时间对齐的时间轴"></div>
+  <div class="ending tabular-nums" id="tulpa-timeline-ending" aria-live="polite"></div>
+  <div class="legend text-small"><span><i class="swatch model_wait"></i>等待首 token</span><span><i class="swatch model_stream"></i>模型输出</span><span><i class="swatch bridge"></i>宿主工具往返</span><span><i class="swatch tool"></i>Tulpa 工具</span><span><i class="swatch send"></i>发送处理</span><span><i class="swatch wait"></i>主动等待</span><span><i class="swatch host"></i>调度／未归类</span></div>
+  <details id="tulpa-timeline-details"><summary>发送内部各阶段（包含关系，不能相加）</summary><div id="tulpa-timeline-detail-rows"></div></details>
+  <script type="application/json" id="tulpa-timeline-data">@@DATA@@</script>
+  <script>
+    (() => {
+      const root=document.getElementById('tulpa-reply-timeline');
+      const data=JSON.parse(root.querySelector('#tulpa-timeline-data').textContent);
+      const select=root.querySelector('#tulpa-timeline-select');
+      const saved=window.openai?.widgetState?.modelContent?.replyTime;
+      data.forEach((item,i)=>{const o=document.createElement('option');o.value=i;o.textContent=item.label;select.append(o);});
+      const fmt=n=>n>0&&n<.01?(n*1000).toFixed(1)+' 毫秒':n.toFixed(2)+' 秒';
+      function draw() {
+        const d=data[Number(select.value)];
+        if(!d)return;
+        const axis=root.querySelector('#tulpa-timeline-axis');axis.replaceChildren();
+        for(let i=0;i<=4;i++){
+          const tick=document.createElement('span');tick.className='tick';tick.style.left=(i*25)+'%';
+          tick.textContent=(d.total*i/4).toFixed(1)+(i===4?' 秒':'');
+          if(i===0)tick.style.transform='none';if(i===4)tick.style.transform='translateX(-100%)';axis.append(tick);
+        }
+        const lanes=root.querySelector('#tulpa-timeline-lanes');lanes.replaceChildren();
+        lanes.setAttribute('aria-label',d.stages.map(s=>s.label+' '+fmt(s.end-s.start)).join('；'));
+        const groups=new Map();
+        d.stages.forEach(s=>{const key=s.label;let g=groups.get(key);if(!g){g={label:s.label,kind:s.kind,segments:[]};groups.set(key,g);}g.segments.push(s);});
+        const order={model_wait:0,model_stream:1,bridge:2,tool:3,send:4,wait:5,host:6};
+        Array.from(groups.values()).sort((a,b)=>(order[a.kind]??9)-(order[b.kind]??9)).forEach(g=>{
+          const lane=document.createElement('div');lane.className='lane';
+          const label=document.createElement('div');label.className='lane-label';
+          const name=document.createElement('span');name.textContent=g.label+(g.segments.length>1?' ×'+g.segments.length:'');
+          const elapsed=g.segments.reduce((n,s)=>n+s.end-s.start,0);
+          const value=document.createElement('span');value.className='tabular-nums';value.textContent=fmt(elapsed)+(g.kind==='model_wait'?' · '+(elapsed/d.total*100).toFixed(1)+'%':'');
+          label.append(name,value);
+          const track=document.createElement('div');track.className='track';
+          g.segments.forEach(s=>{const mark=document.createElement('div');mark.className='mark '+s.kind;
+            mark.style.left=(100*s.start/d.total)+'%';mark.style.width=(100*(s.end-s.start)/d.total)+'%';
+            mark.setAttribute('data-tooltip',s.label+' · '+fmt(s.start)+' → '+fmt(s.end));track.append(mark);});
+          lane.append(label,track);lanes.append(lane);
+        });
+        root.querySelector('#tulpa-timeline-meta').textContent=d.source+' · 起点：可读批次生成';
+        root.querySelector('#tulpa-timeline-ending').textContent='首条回执 '+fmt(d.first)+'　全部完成 '+fmt(d.total);
+        const details=root.querySelector('#tulpa-timeline-details');details.hidden=!d.details.length;
+        const detailRows=root.querySelector('#tulpa-timeline-detail-rows');detailRows.replaceChildren();
+        d.details.forEach(s=>{const row=document.createElement('div');row.className='detail-row text-small';const n=document.createElement('span');n.textContent=s.label;const v=document.createElement('span');v.className='tabular-nums';v.textContent=fmt(s.seconds);row.append(n,v);detailRows.append(row);});
+      }
+      select.value=String(Math.max(0,data.findIndex(d=>d.label===saved)));
+      select.addEventListener('change',()=>{draw();window.openai?.setWidgetState({modelContent:{replyTime:data[Number(select.value)].label}})?.catch(()=>{});});
+      window.addEventListener('openai:set_globals',e=>{const name=e.detail?.globals?.widgetState?.modelContent?.replyTime;const i=data.findIndex(d=>d.label===name);if(i>=0){select.value=String(i);draw();}});
+      draw();
+    })();
+  </script>
+</div>

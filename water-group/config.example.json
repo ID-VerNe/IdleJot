@@ -1,0 +1,86 @@
+{
+  "onebot_http_url": "http://127.0.0.1:43000",
+  "onebot_ws_url": "ws://127.0.0.1:43001",
+  "onebot_token": "YOUR_ONEBOT_TOKEN_HERE",
+  "self_account": "YOUR_QQ_ACCOUNT",
+  "self_names": ["小鲸鱼", "鲸鱼"],
+  "default_persona": "little_whale",
+  "default_participation": "natural",
+  "default_trigger_mode": "mention_only",
+  "default_reply_addressing": "quote",
+  "qq_args": [],
+  "dossier": {
+    "idle_minutes": 20,
+    "min_messages": 25,
+    "burst_messages": 80,
+    "max_material": 60
+  },
+  "followup": {
+    "enabled": true,
+    "max_messages": 10,
+    "idle_seconds": 180
+  },
+  "pending_reply": {
+    "max_age_seconds": 7200
+  },
+  "reload": {
+    "watch": false,
+    "interval": 2.0,
+    "debounce": 1.5,
+    "cooldown": 10,
+    "verify_timeout": 30,
+    "defer_when_busy": true
+  },
+  "slash_commands": {
+    "enabled": false,
+    "prefix": "#",
+    "help_keywords": ["帮助", "命令"],
+    "cooldown_seconds": 5,
+    "ignore_at_self": true,
+    "unknown_reply": "",
+    "commands": {
+      "ping": {
+        "desc": "连通性测试",
+        "reply": "pong"
+      }
+    },
+    "miyoushe": {
+      "ck": [],
+      "uid": "",
+      "admin_qq": [],
+      "qr_login": {
+        "enabled": true,
+        "daily_limit": 5,
+        "session_ttl": 300
+      }
+    },
+    "sixty": {
+      "enabled": false,
+      "base_url": "",
+      "timeout": 6,
+      "max_items": 5,
+      "default_city": "",
+      "allow": ["简报", "热搜", "天气", "预报", "历史", "摸鱼", "运势", "行情", "豆瓣", "科技", "KFC", "笑话", "答案", "一言"]
+    }
+  },
+  "groups": {
+    "123456789": {
+      "name": "示例交流群",
+      "persona": "little_whale",
+      "participation": "natural",
+      "trigger_mode": "mention_only",
+      "enabled": true,
+      "member_mappings": {
+        "10001": {
+          "name": "张三",
+          "card": "示例名片-老张",
+          "aliases": ["老张", "张总"],
+          "role": "管理员",
+          "tone_style": "幽默风趣",
+          "interests": ["游戏", "动漫"],
+          "desc": "本群活跃老群友，说话搞笑"
+        }
+      }
+    }
+  }
+}

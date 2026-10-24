@@ -1,0 +1,49 @@
+.env
+.env.*
+!.env.example
+.venv/
+.cache/
+.tmp/
+data/
+imports/
+exports/
+tools/
+research/upstream/
+__pycache__/
+*.pyc
+*.db
+*.db-*
+*.sqlite*
+*.log
+config.local.*
+reports/
+node_modules/
+*.dmp
+*.bundle
+*.patch
+*.zip
+*.7z
+*.bak
+*.pem
+*.key
+# Desktop build outputs and unpacked review/release packages (never publish data).
+/release/
+/build/
+/instances/
+
+# Water-group local configurations and sensitive runtime data
+config.json
+water-group/config.json
+water-group/status.json
+water-group/logs/
+# Private persona cards (name them freely; they are gitignored by convention below)
+water-group/personas/*.local.md
+~/.water-group/personas/
+
+# WorkBuddy workspace memory: real member QQ numbers, never publish
+.workbuddy/
+
+# Local issue/PR archive exported before the remote rebuild: contains raw
+# issue bodies with personal data, never publish.
+issue-archive/
+

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Publication gate for the commit message itself (same token source as pre-push).
+root=$(git rev-parse --show-toplevel) || exit 1
+cd "$root" || exit 1
+if [ -x .venv/Scripts/python.exe ]; then PY=.venv/Scripts/python.exe; else PY=python; fi
+exec "$PY" scripts/check_publication.py --require-private --text "$1"

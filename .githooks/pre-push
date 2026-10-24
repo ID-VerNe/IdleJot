@@ -1,0 +1,8 @@
+#!/bin/sh
+# Publication gate: nothing leaves this machine with personal data in it.
+# Covers tracked files (private store tokens, credentials, paths, images)
+# and commit identities/messages. See scripts/check_publication.py.
+root=$(git rev-parse --show-toplevel) || exit 1
+cd "$root" || exit 1
+if [ -x .venv/Scripts/python.exe ]; then PY=.venv/Scripts/python.exe; else PY=python; fi
+exec "$PY" scripts/check_publication.py --require-private --history

@@ -1,0 +1,9 @@
+# Preserve upstream license/build-notice formatting.
+desktop/licenses/* -whitespace
+# Keep distributed prompt provenance stable across platforms.
+water-group/personas/* text eol=lf
+# Linux launchers must also survive archives produced on Windows.
+*.sh text eol=lf
+# Git hooks run through sh: a CRLF shebang breaks them on Windows checkouts.
+.githooks/* text eol=lf
+tulpa text eol=lf

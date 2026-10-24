@@ -66,6 +66,9 @@ jobs:
             'check_text_truncation.py',
             # dossier.py 写入动词：载荷校验、超长拒绝、游标只在写入成功后推进（issue #6）
             'check_dossier_ingest.py',
+            # 跨群主档污染审计/清理/还原：只读审计、只剔覆盖行已持有条目、
+            # 群内并集不变、备份可还原、dry-run 零写入（issue #34 PA）
+            'check_pollution_scrub.py',
             # 私有目录巡检：tmp/ 禁脚本、bin+archive 必须登记、drafts 发完即删（issue #6）
             'check_tmp_hygiene.py',
             # One backend start must write one startup banner (issue #97)

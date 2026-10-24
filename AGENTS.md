@@ -364,6 +364,13 @@ uv run python scripts/check_module_size.py
 #     停用即降级（工具消失 + 授权位清空）；私聊自动关掉自己；不吃别人的事件；
 #     `chatlocal/*.py` 里不得再出现插件名硬编码（宿主只认注册表）
 uv run python scripts/check_app_plugins.py
+
+# 28. 跨群主档污染审计/清理/还原（issue #34）：--audit-pollution 纯只读且数值
+#     与手工 SQL 一致；--scrub-pollution 只剔覆盖行已持有的条目（仅主档条目、
+#     无覆盖行群友、越 scope 群友一律不动）；清理后本群 _memory_view 并集逐条
+#     不变、无 group_id 查询不再泄漏群内事实；原主档列表入 key_memories_backup，
+#     --restore-pollution 原样还原并清槽；两个写动词都有 --dry-run 且零写入
+uv run python scripts/check_pollution_scrub.py
 ```
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

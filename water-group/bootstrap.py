@@ -33,6 +33,7 @@ if __package__ in (None, ""):
 sys.path.insert(0, str(Path(__file__).resolve().parent / "daemon"))
 import winconsole  # noqa: E402  (探针开窗抑制，一次收口)
 from wg_config import config_path  # noqa: E402  (config.json 路径单一规则，issue #51)
+from wg_up_wake import login_info  # noqa: E402  (登录态探针，与 --status 同一实现，issue #50)
 from wg_paths import logs_dir, personas_dir, state_dir
 
 NAPCAT_DIR = ROOT_DIR / "tools" / "napcat-shell"
@@ -229,6 +230,33 @@ def wait_napcat_ports(seconds=12):
         if is_port_open(43000) and is_port_open(43001):
             return True
     return False
+
+
+def wait_napcat_login(seconds=30):
+    """端口就绪之后再确认登录态：端口在从来不是登录态在（issue #50）。
+
+    get_login_info 是唯一能区分「桥活着」与「账号登上去了」的探针——端口由
+    NapCat 的 node sidecar 占着，QQ 主进程登不上世（扫码被拒、同账号冲突）时
+    端口照样在。这里与 up.py --status 用同一个实现（wg_up_wake.login_info），
+    判定标准不许有第二份。
+    """
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if login_info():
+            return True
+        time.sleep(2)
+    return False
+
+
+def ports_up_login_missing():
+    """端口起来了但登录态没确认时的统一说辞（issue #50）。
+
+    三种启动路径（直接注入 / bat / bat 宽限）共用：文案必须指向可动作的下一步
+    ——扫码或冲突端，以及能看到 Login Error 的日志。
+    """
+    return ("端口已就绪但登录态未确认（可能需要扫码，或同账号冲突/授权被拒；"
+            "看 ~/.water-group/logs/napcat.log 的 Login Error，"
+            "排查步骤见 doc/NAPCAT_TROUBLESHOOTING.md）")
 
 
 LAUNCHER_OLD_SWITCH = "--enable-logging"
@@ -549,13 +577,26 @@ def ensure_napcat():
     to a QR code nobody could scan (50x Login Error ErrCode:3 in issue #50), and
     nothing on this path said why. The account is now checked before anything is
     spawned: no account, no injection, and the note names what to restore.
+
+    issue #50: "在线" used to mean nothing but two bound ports. The node sidecar
+    keeps 43000/43001 while the QQ main behind it never gets past the login
+    screen, so the early exit reported a healthy chain through 99 Login Error
+    lines and the watchdog log showed `launch -> True 在线`. Both the early exit
+    and every post-injection return now ask get_login_info first.
     """
     # 一次 ensure 只认自己这次拉起的：进来先清掉上一轮，跳过注入的提前返回
     # （「在线」/ 守护接管）就不会把旧 pid 报成本次注入（issue #46）。
     global LAST_LAUNCH
     LAST_LAUNCH = None
     if is_port_open(43000) and is_port_open(43001):
-        return True, "在线"
+        # 端口在≠登录态在：QQ 登不上世时 sidecar 仍然占着端口。三问登录态
+        # （15s，与 wg_up_stack.ensure_napcat 的早退同一节奏），都不答才算失败。
+        for _ in range(3):
+            if login_info():
+                return True, "在线"
+            time.sleep(5)
+        return False, ("端口在但 OneBot 无响应（登录态未确认，可能正在重连或登录被拒；"
+                       "看 ~/.water-group/logs/napcat.log 的 Login Error）")
 
     # 文件不在时先从模板重建，让「占位符状态」可见；ensure_config 幂等，
     # 文件在时零动作。少了这一步，配置丢失后会一路静默（issue #51）。
@@ -579,9 +620,11 @@ def ensure_napcat():
     if qq_exe and not force_bat:
         print(f"[启动] 直接注入 NapCat (QQ: {qq_exe})...")
         launch_napcat_direct(qq_exe, account)
-        if wait_napcat_ports():
-            return True, "启动成功（直接注入）"
-        return False, "注入超时，请检查 ~/.water-group/logs/napcat.log 或是否需要扫码 (WebUI: http://127.0.0.1:46099)"
+        if not wait_napcat_ports():
+            return False, "注入超时，请检查 ~/.water-group/logs/napcat.log 或是否需要扫码 (WebUI: http://127.0.0.1:46099)"
+        if not wait_napcat_login():
+            return False, ports_up_login_missing()
+        return True, "启动成功（直接注入）"
 
     bat_path = NAPCAT_DIR / "launcher-user.bat"
     if not bat_path.exists():
@@ -595,11 +638,15 @@ def ensure_napcat():
     launcher = start_process_detached(cmd, cwd=str(NAPCAT_DIR), log_name="napcat.log")
     _record_launch(launcher, account, "bat")
     if wait_napcat_ports():
+        if not wait_napcat_login():
+            return False, ports_up_login_missing()
         return True, "启动成功（bat 降级）"
     # A still-running launcher is booting QQ, not failing: never inject a
     # second instance behind its back, just give the boot a longer window.
     if launcher.poll() is None:
         if wait_napcat_ports(18):
+            if not wait_napcat_login():
+                return False, ports_up_login_missing()
             return True, "启动成功（bat 降级）"
         return False, "启动超时，请检查 NapCat 日志或是否需要扫码 (WebUI: http://127.0.0.1:46099)"
     return False, "启动器已退出且端口未就绪，请检查 ~/.water-group/logs/napcat.log"

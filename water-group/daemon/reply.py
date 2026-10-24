@@ -14,8 +14,13 @@ Every successful send also opens a follow-up window (追问窗口插件，issue 
 the group can keep talking for a while afterwards and watch.py still wakes on it,
 so a reply does not fall on deaf ears the moment it lands. --no-followup turns that off.
 
+Sending also re-hangs the listener by default (issue #69): after SENT this process
+parks in listen.py for up to --wait seconds and relays whatever it finds, so the
+gap between "replied" and "listening again" is milliseconds rather than a whole
+agent turn. --no-wait returns right after sending instead.
+
 Usage:
-  reply.py <event_id> "<text>" [--intent "..."] [--no-quote] [--no-followup]
+  reply.py <event_id> "<text>" [--intent "..."] [--no-quote] [--no-followup] [--no-wait]
   reply.py --list
   reply.py --context 30 [--around <event_id>]
   reply.py --show <event_id>      读这条消息的全文（行内截断后的补救路径）
@@ -58,6 +63,9 @@ DB = Path(os.environ.get("IDLEJOT_WG_DB") or os.environ.get("TULPA_WG_DB", data_
 
 RETRY_SLEEP = 3
 SOURCE_WAIT = 30
+# 发送成功后原地续挂监听的默认时长（issue #69）。监听只活一轮，回完消息到
+# 下一次挂上之间的空窗正是 @ 丢失的地方；把它做成默认值而不是可选项。
+DEFAULT_WAIT = 240
 # 多条气泡之间的间隔。计划通道按 bubble_min_seconds 算（默认 1.2s 起，随上一条
 # 长度增加）；OneBot 直发这条路径不经过那套策略，用同一个下限保持手感一致。
 BUBBLE_GAP = 1.2
@@ -727,11 +735,13 @@ def open_followup(event_id, group_id="", wanted=True, not_before=None):
 def wait_for_next(seconds):
     """Park in the listener loop right after sending, and pass its output through.
 
-    Re-hanging by hand leaves a window between the send and the next listen.py
-    in which @-mentions land in the file with nobody watching. That window is a
-    whole agent turn -- tens of seconds -- and it is exactly where a burst gets
-    lost. Starting the loop here, in the process that just sent, closes it to a
-    few hundred milliseconds.
+    This is the default after a successful send (issue #69). Re-hanging by hand
+    leaves a window between the send and the next listen.py in which @-mentions
+    land in the file with nobody watching. That window is a whole agent turn --
+    tens of seconds -- and it is exactly where a burst gets lost. Because the
+    loss depends on the agent remembering, it failed three times in one evening
+    (2026-10-24); a safe default cannot depend on memory. --no-wait opts out for
+    the one case where the caller is about to do something else.
 
     `--cycles 1 --no-digest` bounds it: listen.py otherwise loops forever, and a
     tool call that never returns cannot be told apart from a hang. The digest
@@ -766,8 +776,11 @@ def main():
                         help="在正文前面 @ 某人，可重复")
     parser.add_argument("--also", type=int, action="append", default=[], metavar="ID",
                         help="同一条回复顺带算作回了这些消息（连发的 @ 用一条答完）")
-    parser.add_argument("--wait", type=int, default=0, metavar="秒",
-                        help="发完就地等下一条唤醒，不用退出后另外重挂监听")
+    parser.add_argument("--wait", type=int, default=DEFAULT_WAIT, metavar="秒",
+                        help="发完就地等下一条唤醒，不用退出后另外重挂监听（默认 "
+                             f"{DEFAULT_WAIT}s，0 等同于 --no-wait）")
+    parser.add_argument("--no-wait", action="store_true",
+                        help="发完直接返回，不原地等下一次唤醒（关闭默认续挂）")
     parser.add_argument("--no-followup", action="store_true",
                         help="这次不开追问窗口（默认回复后会继续听群里聊一阵）")
     parser.add_argument("--force", action="store_true",
@@ -782,6 +795,10 @@ def main():
     parser.add_argument("--show", type=int, metavar="ID",
                         help="按 id 读这条消息的全文（唤醒行/上下文行截断后的补救，issue #32）")
     args = parser.parse_args()
+    # 显式关闭优先于任何 --wait 取值：`--no-wait` 是「我马上还要做别的事」的
+    # 出口，被一个默认值盖过去就等于没有出口（issue #69）。
+    if args.no_wait:
+        args.wait = 0
 
     # Line buffered even when piped: --wait parks in a child process, and if
     # the caller's timeout kills the group mid-wait, block buffering throws

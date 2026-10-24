@@ -9,7 +9,9 @@ daemon 不直连库。两个用途各读一张视图：
 - `alias_index_exact`：精确等值查找（`sender_tag`）。单字真名和泛称都保留——
   显示名就是那个字符串，不是猜测（issue #54）；
 - `alias_index`：子串扫描（`body_hits`）。单字名和泛称挡掉——它们几乎在任何
-  句子里都能命中，会制造假指向（issue #30 的原始约束只针对这里）。
+  句子里都能命中，会制造假指向（issue #30 的原始约束只针对这里）；纯数字
+  别名（建档时写进 aliases 的 QQ 号）同样挡掉——正文里一串数字不代表有人在
+  叫这个外号，@ 段渲染出的号码更是指向信息不是正文（issue #52）。
 
 别名表按进程缓存一次：CLI 一命一进程，一批唤醒行共用一份，不会读到半新半旧
 的中间态。
@@ -18,6 +20,7 @@ daemon 不直连库。两个用途各读一张视图：
 唤醒链路——与 `reply.dossier_matches` 同一兜底姿势。认错人比不认严重得多，
 没有数据就不指。
 """
+import re
 import sys
 from pathlib import Path
 
@@ -28,6 +31,9 @@ if str(ROOT) not in sys.path:
 
 SENDER_ALIAS_CHARS = 2   # 发送者后最多附几个档案外号，多了把唤醒行撑散
 BODY_HITS = 3            # 一条正文最多指出几个外号指向
+# @ 段渲染出的 `@<qq>` 是指向信息不是正文（issue #52）：位数口径与
+# wg_text.PLACEHOLDERS 的 `@\d{5,}` 保持一致。
+AT_MENTION_RE = re.compile(r"@\d{5,}")
 _CACHE = {}
 
 
@@ -91,8 +97,12 @@ def body_hits(body, group_id=None, limit=BODY_HITS, sender=""):
 
     长的名字先匹配（「时之锁」优先于「时之」），同一个人只指一次；发送者自己
     的名字不指——那一行本来就是他说的话。没有命中就没有输出，不猜。
+
+    issue #52 两条防自指：扫描前剥掉 `@<数字>`（@ 段是指向信息不是正文，与
+    `wg_text.PLACEHOLDERS` 的 `@\\d{5,}` 同一口径）；纯数字别名（QQ 号）不
+    参与正文命中。`@<显示名>` 命中别名视为真实提及，保留。
     """
-    text = str(body or "")
+    text = AT_MENTION_RE.sub("", str(body or ""))
     if not text:
         return []
     table = alias_map(group_id)
@@ -102,9 +112,10 @@ def body_hits(body, group_id=None, limit=BODY_HITS, sender=""):
         uid, primary = table[alias]
         if uid in seen_uids or alias == mine:
             continue
-        if alias in text:
-            seen_uids.add(uid)
-            hits.append(f"↪ 外号「{alias}」= {primary}({uid})")
-            if len(hits) >= limit:
-                break
+        if alias.isdigit() or alias not in text:
+            continue
+        seen_uids.add(uid)
+        hits.append(f"↪ 外号「{alias}」= {primary}({uid})")
+        if len(hits) >= limit:
+            break
     return hits

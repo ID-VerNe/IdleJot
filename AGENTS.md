@@ -342,12 +342,13 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 59 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
 | 60 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
 | 61 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
-| 62 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
-| 63 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
-| 64 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
-| 65 | `reply` | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
+| 62 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
+| 63 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
+| 64 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
+| 65 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
+| 66 | `reply` | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
 
-共 65 个 CI 门禁，分 5 个分片（`static` 13、`runtime` 15、`mcp` 14、`storage` 8、`reply` 15）；`manual` 15、`stale` 3、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
+共 66 个 CI 门禁，分 5 个分片（`static` 13、`runtime` 15、`mcp` 14、`storage` 8、`reply` 16）；`manual` 15、`stale` 3、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
 <!-- gates:ci:end -->
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

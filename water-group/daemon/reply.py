@@ -63,9 +63,16 @@ DB = Path(os.environ.get("IDLEJOT_WG_DB") or os.environ.get("TULPA_WG_DB", data_
 
 RETRY_SLEEP = 3
 SOURCE_WAIT = 30
+# 宿主（Agent 工具调用）的常见默认超时，公开出来给门禁断言（issue #79）。
+AGENT_TOOL_TIMEOUT = 120
+# 发送 + 记账 + 起子进程的余量：实测是秒级，30s 是保守上限，剩下的时间才是等待。
+SEND_BUDGET = 30
 # 发送成功后原地续挂监听的默认时长（issue #69）。监听只活一轮，回完消息到
 # 下一次挂上之间的空窗正是 @ 丢失的地方；把它做成默认值而不是可选项。
-DEFAULT_WAIT = 240
+# 取值由宿主超时减去预算算出（issue #79）：默认调用必须在调用方失去耐心之前
+# 自己返回并打印 NO_WORK，否则「消除几十秒空窗」会以「无限长空窗」收场——
+# 被截断时子监听和父进程一起死，而这条路径上不会留下任何提示。
+DEFAULT_WAIT = AGENT_TOOL_TIMEOUT - SEND_BUDGET
 # 多条气泡之间的间隔。计划通道按 bubble_min_seconds 算（默认 1.2s 起，随上一条
 # 长度增加）；OneBot 直发这条路径不经过那套策略，用同一个下限保持手感一致。
 BUBBLE_GAP = 1.2
@@ -743,6 +750,15 @@ def wait_for_next(seconds):
     (2026-10-24); a safe default cannot depend on memory. --no-wait opts out for
     the one case where the caller is about to do something else.
 
+    The wait has to fit inside the caller's patience (issue #79). DEFAULT_WAIT is
+    AGENT_TOOL_TIMEOUT minus SEND_BUDGET, and the bound is printed before the
+    wait starts: a host timeout shorter than that kills this process and the
+    child listener together, on a path that prints nothing at all. Surviving as
+    an orphan is not an option -- watch.py advances its cursor as soon as it
+    prints a wake (watch.py:188), so a listener nobody reads would consume the
+    wake and lose it, and `reply.py` would refuse to hang a new one because
+    up.listener_pids() still matches the orphan.
+
     `--cycles 1 --no-digest` bounds it: listen.py otherwise loops forever, and a
     tool call that never returns cannot be told apart from a hang. The digest
     pass is skipped because it takes tens of seconds on a backlog, which would
@@ -759,6 +775,17 @@ def wait_for_next(seconds):
         print("已有监听在跑，不再重复挂")
         return 0
     print(f"等下一次唤醒（最多 {seconds}s）…", flush=True)
+    # 边界必须写在等待之前（issue #79）。调用被宿主超时截断时，父进程和它起的
+    # 子监听在同一个进程组里会一起被杀；run_passthrough 只在子进程正常返回后才把
+    # 输出写回来，所以那条路径上「被杀了」和「还在等」在 Agent 眼里长得一模一样。
+    # 秒数、合计值和两个出口写在眼前，是这里唯一来得及说的话。
+    print(f"本次调用合计约 {seconds + SEND_BUDGET}s（发送 + 等待）；你自己的工具超时"
+          f"短于此值，子监听会跟着被杀且不留提示"
+          f"（要更短：--wait {max(seconds // 2, 1)}；立即返回：--no-wait）", flush=True)
+    if seconds >= AGENT_TOOL_TIMEOUT:
+        print(f"WARN: --wait {seconds}s 已达到或超过常见工具调用超时 "
+              f"{AGENT_TOOL_TIMEOUT}s，很可能在拿到 WAKE 之前被截断", flush=True)
+
     cmd = [sys.executable, str(HERE / "listen.py"), "--timeout", str(seconds),
            "--cycles", "1", "--no-digest"]
     # Without this the child gets a console window of its own, and a fresh

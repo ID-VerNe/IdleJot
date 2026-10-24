@@ -4,17 +4,24 @@
 之后没有任何东西保证下一次挂上：Agent 回消息、读图、写 issue 的几十秒里，
 @ 落进文件而没人看。三次都是用户主动问「是不是没挂上」才发现的。
 
-这条门禁钉四个契约，任何一处退回旧行为都红：
+这条门禁钉七个契约，任何一处退回旧行为都红：
 
 1. `listen.py` 的每种退出（WAKE / NO_WORK / WATCH_FAILED）都以一行
    `RESTART: <python> water-group/daemon/listen.py --timeout N` 收尾，且短等待
    （`reply.py --wait 6` 这类）不透传成新的常驻周期——重挂回到 300s。
-2. `reply.py` 发送成功后默认就地续挂（`--wait` 默认 240，`--no-wait` 关闭），
-   已有监听时不重复 spawn。
+2. `reply.py` 发送成功后默认就地续挂（`--wait` 默认 = 宿主工具超时减发送余量，
+   `--no-wait` 关闭），已有监听时不重复 spawn。
 3. `watch.py` 超时块把「因过期被丢弃的未回唤醒」计数并列出 id，不再与
    「从没来过」长得一模一样。
 4. 冷启动（游标归零）仍不翻历史积压：那是 `check_pending_reply.py` 钉住的
    既有契约，过期统计不得把它变成新的唤醒源。
+5. 默认等待必须明显短于宿主的常见工具调用超时
+   （`DEFAULT_WAIT + SEND_BUDGET <= AGENT_TOOL_TIMEOUT`）：调用被截断时父进程
+   和子监听同组同死，而且那条路径上一个字都不打印（issue #79）。
+6. 等待开始前把这条边界印出来：实际秒数、合计值、两个出口（`--wait` 更小 /
+   `--no-wait`）；显式取值超限时另给 `WARN`。
+7. 续挂不许留下孤儿监听：`watch.py` 打完唤醒块立刻推进游标，没人读的监听会把
+   唤醒吃掉，`up.listener_pids()` 还会把孤儿当成「已有监听在跑」拒绝重挂。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -184,12 +191,98 @@ def 冷启动不翻历史积压():
 
 @case
 def 发送后默认续挂():
+    """默认续挂必须存在，且 `--help` 自述的是**实际**默认值（issue #79 追评）。
+
+    这里曾经写死 `"默认 240s"`，于是「默认续挂存在」被绑成了「默认值等于 240」：
+    改默认值就得改门禁，门禁从契约变成绊脚石。现在读常量拼断言串，数值边界交给
+    `默认等待短于宿主超时` 那条——两件事各管一头。
+    """
     proc = subprocess.run([sys.executable, str(DAEMON / "reply.py"), "--help"],
                           cwd=str(ROOT), capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=60,
                           env=dict(os.environ, PYTHONUTF8="1"))
     out = proc.stdout or ""
-    return proc.returncode == 0 and "--no-wait" in out and "默认 240s" in out
+    return (proc.returncode == 0 and "--no-wait" in out and reply.DEFAULT_WAIT > 0
+            and f"默认 {reply.DEFAULT_WAIT}s" in out)
+
+
+@case
+def 默认等待短于宿主超时():
+    """默认调用必须在宿主失去耐心之前自己返回（issue #79 候选 4）。
+
+    截断路径上父进程与子监听同组同死，且 `run_passthrough` 只在子进程正常返回后
+    才回写输出——Agent 看到的最后一行是「等下一次唤醒…」，分不清是被杀还是还在
+    等。所以默认值要留出发送余量：不是「小于宿主超时」，而是「加上发送仍有余」。
+    谁把 `DEFAULT_WAIT` 调大，或者把宿主超时估小，都在这里红。
+    """
+    return (0 < reply.DEFAULT_WAIT
+            and reply.DEFAULT_WAIT + reply.SEND_BUDGET <= reply.AGENT_TOOL_TIMEOUT)
+
+
+@case
+def 等待前说清被杀边界():
+    """等待开始前的输出必须给出可据以改参的东西（issue #79 候选 2）。
+
+    这条路径上唯一来得及说的话就是等待之前那几行：一旦被截断，之后不会再有任何
+    输出。所以断言不是「有提示」，而是「提示里有实际秒数、合计值和两个出口」；
+    显式把 `--wait` 开到宿主超时以上时，还要多一行 `WARN` 点名后果。
+    """
+    originals = (up.listener_pids, reply.winconsole.run_passthrough)
+    up.listener_pids = lambda *args, **kwargs: []
+    reply.winconsole.run_passthrough = lambda *args, **kwargs: 0
+
+    def capture(seconds):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            reply.wait_for_next(seconds)
+        return buf.getvalue()
+
+    # 用显式的 60 而不是 DEFAULT_WAIT 当正常样本：默认值是否合规由
+    # `默认等待短于宿主超时` 管，这条只管「提示在不在、内容够不够改参」，
+    # 否则两个契约会一起红、分不清坏在哪。
+    too_long = max(reply.AGENT_TOOL_TIMEOUT, 60) + 60
+    try:
+        normal = capture(60)
+        over = capture(too_long)
+    finally:
+        up.listener_pids, reply.winconsole.run_passthrough = originals
+
+    return ("最多 60s" in normal
+            and f"约 {60 + reply.SEND_BUDGET}s" in normal
+            and "被杀" in normal and "--no-wait" in normal
+            and "WARN" not in normal
+            and "WARN" in over and f"{too_long}s" in over)
+
+
+@case
+def 续挂不许留下孤儿子进程():
+    """`--wait` 的子监听必须和父进程同生共死（issue #79 候选 3 的反向断言）。
+
+    候选 3 是「让子监听在父进程被杀后活下来」。它看着能救回监听，实际更坏：
+    `watch.py` 打完唤醒块立刻推进游标（watch.py:188），管道已断的监听会把唤醒
+    消费掉而没人读到；`reply.py` 的 `up.listener_pids()` 还会把孤儿当成「已有监听
+    在跑」而拒绝重挂。两条都是静默失败——所以这里钉住这条路径不许出现
+    `start_new_session` / `creationflags` / `DETACHED_PROCESS`，也钉住它确实还有
+    那一次 `run_passthrough` 调用，免得上面的断言在空集合上白绿。
+    """
+    tree = ast.parse((DAEMON / "reply.py").read_text(encoding="utf-8"))
+    func = next((node for node in ast.walk(tree)
+                 if isinstance(node, ast.FunctionDef) and node.name == "wait_for_next"),
+                None)
+    if func is None:
+        return False
+    escaped = False
+    calls = 0
+    for node in ast.walk(func):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "run_passthrough"):
+            calls += 1
+            names = {kw.arg for kw in node.keywords if kw.arg}
+            if names & {"start_new_session", "creationflags", "process_group"}:
+                escaped = True
+        if isinstance(node, ast.Attribute) and "DETACH" in node.attr:
+            escaped = True
+    return calls == 1 and not escaped
 
 
 @case

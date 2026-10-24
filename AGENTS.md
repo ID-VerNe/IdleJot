@@ -326,7 +326,12 @@ uv run python scripts/check_quote_visibility.py
 #     watch 唤醒块 / followup --show 都必须带当前时刻，且与 time.time() 对得上
 uv run python scripts/check_now_clock.py
 
-# 23. 模块体量红线（issue #11）：单文件 >1000 行或单类 >800 行即 fail，
+# 23. 沉淀写入动词（issue #6）：--ingest 落一条 source=summary 事件；超 12000 字
+#     exit 2 且不写库；--through 只在写入成功后推进游标；--apply 带 group_id 追加
+#     只写覆盖行（#5 边界）；未知字段 fail-closed；--dry-run 零写入
+uv run python scripts/check_dossier_ingest.py
+
+# 24. 模块体量红线（issue #11）：单文件 >1000 行或单类 >800 行即 fail，
 #     700+ 行进提示带；豁免名单逐条注明由哪个分节消除，清空即拆分完成
 uv run python scripts/check_module_size.py
 ```

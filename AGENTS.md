@@ -330,6 +330,10 @@ uv run python scripts/check_now_clock.py
 #     exit 2 且不写库；--through 只在写入成功后推进游标；--apply 带 group_id 追加
 #     只写覆盖行（#5 边界）；未知字段 fail-closed；--dry-run 零写入
 uv run python scripts/check_dossier_ingest.py
+
+# 24. 转发体唤醒（issue #9）：合并转发里的 @ 与关键词必须参与 wake_reason；
+#     首层/嵌套两层、不可得时不猜、节点 100/字符 4000 封顶、# 指令闸门优先
+uv run python scripts/check_forward_wake.py
 ```
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

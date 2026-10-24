@@ -294,38 +294,7 @@ jsonschema==4.26.0
 
 ## 8. 测试门禁映射
 
-| 门禁脚本 | 覆盖 | Phase 0/2/3 |
-|---|---|---|
-| `check_group_memory.py` | 记忆引擎 + MCP 读写 | 全程 |
-| `check_mcp_chat_turns.py` | 轮次/引用/竞争 | 全程 |
-| `check_plan_recovery.py` | stale 重规划 | 全程 |
-| `check_anti_habituation.py` | 口癖多样性 | 全程 |
-| `check_mcp_chat_output.py` | 输出截断/游标/ACK | 全程 |
-| `check_bootstrap_health.py` | 启动健康/代理隔离 | 全程 |
-| `check_water_group_import.py` | 模块桥接 | 全程 |
-| `check_wake_ledger.py` | 连发 @ 不丢 | 全程 |
-| `check_followup.py` | 追问窗口 + `#` 指令闸门（#70） | 全程 |
-| `check_mcp_chat.py` | MCP 聊天契约 | 全程 |
-| `check_mcp.py` | MCP 协议层 | 全程 |
-| `check_mcp_onebot.py` | OneBot 契约 | 全程 |
-| `check_memory_engine_imports.py` | `water_group` shim 单实例/水群模块身份（动 shim 或 `sync_*` 时必跑） | 全程 |
-| `check_reply_timing.py` | `reply_timing` 时序/密钥排除/轮换 | 全程 |
-| `check_reply_context.py` | `reply.py --context` 群聊上下文 | 全程 |
-| `check_reply_quote.py` | OneBot mention/引用预检 | 全程 |
-| `check_mcp_qq_extensions.py` | QQ 扩展 | 若保留 |
-| `check_mcp_reactions.py` | 表情回应 | 若保留 |
-| `check_mcp_sticker_library.py` | 表情包库 | 若保留 |
-| `check_mcp_chat_media.py` | 媒体 | 若保留 |
-| `check_mcp_language_*.py` | 边聊边学 | 若保留 |
-| `check_publication.py` | 敏感信息扫描 | commit 前 |
-| `check_stop_stack.py` | 一键停栈完整性（孤儿清扫 / 自杀防护 / 端口兜底 / 死锁清理 / 壳不复制逻辑） | 全程 |
-| `check_path_hygiene.py` | 路径卫生（运行时数据不许从仓库根推导，防 issue #14 复发） | 全程 |
-| `check_no_console_child.py` | 子进程不开控制台窗口（运行时树 spawn 必须带 `creationflags`；flag 只在两个 helper 模块里拼写，防 issue #39 复发） | 全程 |
-| `check_issue_16_audit_fixes.py` | #16 审计缺陷回归（store 异常类型 / grants 排序 / MCP 响应解析 / 会话活性） | 全程 |
-| `check_watchdog_token.py` | watchdog 探针现读 OneBot token（轮换 config.json 后探针必须跟随，防 #17 复发） | 全程 |
-| `check_watchdog_halt.py` | watchdog halt 可恢复：连续 boot timeout 后冷却重置再试（不许永久停机），halt 写 `state/napcat_halt.json`、恢复即清（防 #45 复发） | 全程 |
-| `check_collector_self_echo.py` | collector 不落盘自身回显（唤醒流只留群友消息；游标/去重仍按整批推进，防 #28 复发） | 全程 |
-| `check_qr_login.py` | 每用户扫码登录（passport 双流 / 凭据兜底解析 / DPAPI 往返 / 限流 / P0 隐私不回退全局 CK，issue #6） | 全程 |
+门禁清单已收口到 [`scripts/gates.json`](../scripts/gates.json)（issue #59）：`ci` 档的顺序就是 CI 执行顺序，`manual` / `stale` / `dead` / `support` 各档理由写在同一个文件里，`scripts/check_gate_manifest.py` 钉住磁盘、清单与 AGENTS §5.1 三者一致。原 Phase 0/2/3 门禁映射表已并入清单的 `why`，不再维护第二份表格。
 
 删除的测试（无对应能力）：`check_chat_browser*`、`check_desktop.py`、`check_linux_suite.py`、`check_terminal_tui.py`、`check_group_admin.py`、`check_wechat_*`、`antigravity_*`、`check_antigravity_reply_timing.py`、`check_watch_sync.py`（测 `Store` 内部，随 WGStore 替换删除）、`check_reply_agent.py`/`check_reply_copilot.py`/`check_reply_history.py`（依赖 `agent`/`replies`/`tulpa` 产品链，均在删除集）。
 

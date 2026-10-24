@@ -265,144 +265,86 @@ Agent 必须且仅能通过标准化 MCP 工具维护群友记忆，**严禁自�
 在向仓库推送或交付任何改动前，必须依次执行（**安静窗口单独按序运行**）并通过以下门禁。
 
 ### 5.1 水群与 MCP 聊天核心门禁
+
+门禁清单只有一个事实来源：[`scripts/gates.json`](scripts/gates.json)。每个 `scripts/check_*.py` 恰好归入 `ci` / `manual` / `stale` / `dead` / `support` 之一（档位语义见 §5.2）；`ci` 的顺序就是 CI 执行顺序，单门禁参数（如 `check_publication.py --history`）也写在清单里。`scripts/check_gate_manifest.py` 断言磁盘、清单与本节的生成段三者一致，**新增门禁只改清单**：
+
 ```bash
-# 1. 动态记忆引擎、MCP读写工具与两层存储测试 (12项核心门禁)
-uv run python scripts/check_group_memory.py
-
-# 1b. 群级结构化术语（黑话/店名/场地/群内约定）读写闭环（issue #31）：
-#     group_notes 建表与 (group_id, term) 主键；consolidate notes 写入后按 term 读回；
-#     重复写走 upsert 不加行；跨群隔离；L1 注入封顶 GROUP_NOTE_L1_CAP；
-#     MCP query_group_notes 工具声明
-uv run python scripts/check_group_notes.py
-
-# 2. 一键后台启动健康检查与代理隔离测试
-uv run python scripts/check_bootstrap_health.py
-
-# 3. 根目录 Python 模块化兼容桥接测试
-uv run python scripts/check_water_group_import.py
-
-# 4. 反语癖固化与多样性提示词注入测试
-uv run python scripts/check_anti_habituation.py
-
-# 5. 状态机拒绝 (stale) 与重规划健全性测试
-uv run python scripts/check_plan_recovery.py
-
-# 6. MCP 聊天输出稳健性测试 (输出截断、游标与ACK校验)
-uv run python scripts/check_mcp_chat_output.py
-
-# 7. 对话轮次生命周期与原生引用测试 (19项高并发与防竞争检查)
-uv run python scripts/check_mcp_chat_turns.py
-
-# 8. 发布代码敏感信息与泄露扫描 (工作区 Markdown 链接完整性 + 必需文档清单)
-uv run python scripts/check_publication.py
-
-# 9. daemon 入口冒烟 (以 `python <script>` 方式启动每个入口，验证函数内延迟导入可达)
-uv run python scripts/check_daemon_entries.py
-
-# 10. 一键停栈完整性 (孤儿清扫 / 自杀防护 / 只读探针不被误杀 / 端口兜底)
-uv run python scripts/check_stop_stack.py
-
-# 11. 路径卫生 (运行时数据不许从仓库根推导；防 issue #14 复发)
-uv run python scripts/check_path_hygiene.py
-
-# 12. issue #16 审计缺陷回归 (store 异常类型 / grants 排序 / MCP 响应解析 / 会话活性)
-uv run python scripts/check_issue_16_audit_fixes.py
-
-# 13. watchdog 探针现读 OneBot token（轮换 config.json 后探针必须跟随，防 #17 复发）
-uv run python scripts/check_watchdog_token.py
-
-# 14. collector 不落盘自身回显（唤醒流只留群友消息，防 #28 复发）
-uv run python scripts/check_collector_self_echo.py
-
-# 15. 子进程不开控制台窗口（运行时树 spawn 必须带 creationflags，防 #39 复发）
-uv run python scripts/check_no_console_child.py
-
-# 16. NapCat 启动顺序：直接注入优先，注入失败不降级到 .bat（防 #39 的 cmd 黑框复发）
-uv run python scripts/check_napcat_launch_order.py
-
-# 16b. 配置缺失 fail-loud（issue #51）：wg_config.problems() 逐项点名（缺失/非法
-#      JSON/self_account 占位符/onebot_token 缺失，env 覆盖不计）；bootstrap.
-#      ensure_napcat() 账号为空拒绝注入且零进程；watch.require_wake_identity()
-#      缺 self_account 返回 1（永远唤不醒的监听比没有监听更糟）；up.report()
-#      消费 config_problems 且门面同一对象
-uv run python scripts/check_config_fail_loud.py
-
-# 17. 60s 资讯层契约：信封判 code、天气参数是 query、城市后缀归一化、allow 闸门（issue #53）
-uv run python scripts/check_sixty.py
-
-# 18. 全栈热重载（issue #58）：闭包覆盖 fail-closed、target 映射、语法错整批拒绝、
-#     debounce 合并、请求单飞、watchdog deferred、db_keeper 先起新再停旧、
-#     quarantine 熔断、端口未释放不 spawn、CLI 无 subprocess
-uv run python scripts/check_hot_reload.py
-
-# 19. 长文本截断契约（issue #90）：取数层不截断、summary 完整落库、
-#     超限写入带 truncated/original_length、旧库幂等迁移
-uv run python scripts/check_text_truncation.py
-
-# 20. app.log 唯一性（issue #97）：一次后端启动只写一份启动/停止横幅，
-#     MCP 线程 INFO 不再冒泡成第二份、WARNING 带 [mcp] 仍可见、过滤器不残留
-uv run python scripts/check_app_log_once.py
-
-# 21. 引用原文可见性（issue #94）：带 reply 段的消息必有 referenced_messages 且 state 明确；
-#     唤醒行/--context 印原文或明说「未解析 / 不在本地缓存」，不靠不印表达失败
-uv run python scripts/check_quote_visibility.py
-
-# 22. 「现在」锚点（issue #95）：status 首行 / --list / --context 表头 /
-#     watch 唤醒块 / followup --show 都必须带当前时刻，且与 time.time() 对得上
-uv run python scripts/check_now_clock.py
-
-# 23. 沉淀写入动词（issue #6）：--ingest 落一条 source=summary 事件；超 12000 字
-#     exit 2 且不写库；--through 只在写入成功后推进游标；--apply 带 group_id 追加
-#     只写覆盖行（#5 边界）；未知字段 fail-closed；--dry-run 零写入
-uv run python scripts/check_dossier_ingest.py
-
-# 24. 私有目录巡检（issue #6）：tmp/ 顶层禁 .py/.md/.ps1（它是 TEMP 的重定向目标）；
-#     bin/ 与 archive/ 的脚本必须在对应 INDEX.md 登记；drafts/ 非空只警告；
-#     archive/ 条目缩水只报告。无数据根时自动跑 A/B 自检，不空转
-uv run python scripts/check_tmp_hygiene.py
-
-# 25. 转发体唤醒（issue #9）：合并转发里的 @ 与关键词必须参与 wake_reason；
-#     首层/嵌套两层、不可得时不猜、节点 100/字符 4000 封顶、# 指令闸门优先
-uv run python scripts/check_forward_wake.py
-
-# 26. 模块体量红线（issue #11）：单文件 >1000 行或单类 >800 行即 fail，
-#     700+ 行进提示带；豁免名单逐条注明由哪个分节消除，清空即拆分完成
-uv run python scripts/check_module_size.py
-
-# 27. app 侧插件协议（issue #4 PD）：工具名/授权位/表达三张静态表与宿主常量一致；
-#     停用即降级（工具消失 + 授权位清空）；私聊自动关掉自己；不吃别人的事件；
-#     `chatlocal/*.py` 里不得再出现插件名硬编码（宿主只认注册表）
-uv run python scripts/check_app_plugins.py
-
-# 28. 跨群主档污染审计/清理/还原（issue #34）：--audit-pollution 纯只读且数值
-#     与手工 SQL 一致；--scrub-pollution 只剔覆盖行已持有的条目（仅主档条目、
-#     无覆盖行群友、越 scope 群友一律不动）；清理后本群 _memory_view 并集逐条
-#     不变、无 group_id 查询不再泄漏群内事实；原主档列表入 key_memories_backup，
-#     --restore-pollution 原样还原并清槽；两个写动词都有 --dry-run 且零写入
-uv run python scripts/check_pollution_scrub.py
-
-# 29. 发信人名形态校验（issue #39）：QQ 引用气泡文案（`<X>回应了你的消息：<Y>`）
-#     不得进 chat_inbox.payload.sender，也不得进档案 aliases/primary_name；
-#     入库侧与建档侧共用 chatlocal/name_guard.py 单一清洗
-uv run python scripts/check_sender_name.py
-
-# 30. watchdog halt 可恢复（issue #45）：连续 boot timeout 后必须冷却再试
-#     （计数重置，不许永久停机）；halt 期间写 state/napcat_halt.json
-#     （kind/fails/first_fail_at/halted_at/reason），恢复后立即清除
-uv run python scripts/check_watchdog_halt.py
-
-# 31. up.py 门面完整性（issue #37）：wg_up_probe/wake/stack 里每个公开定义都必须
-#     能从 `up` 拿到、且是同一对象（否则补丁打门面等于打空）；三模块之间不许同名
-#     定义；up.py 自己只许定义 report/main/strip_proxy/python_exe；底层模块不得
-#     反向 import 门面或上层
-uv run python scripts/check_up_facade.py
-
-# 32. 注入实例身份识别（issue #46）：启动时把 launcher pid/启动时刻记进
-#     state/napcat_launch.json；下一轮按 ParentProcessId + 创建时间找回实例，
-#     孙代 QQ 命令行无 -q 也判得出；启动即死时明确说「无实例」而不是静默 killed 0；
-#     --stop 计数取「收前只读计数」与「直接收掉」的较大者，不再整树收净却报 0
-uv run python scripts/check_watchdog_launch_identity.py
+uv run python scripts/run_gates.py ci                  # 按 CI 顺序跑完全部门禁（CI 同一入口）
+uv run python scripts/run_gates.py --list              # 看档位计数与 ci 顺序
+uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写下面这段
 ```
+
+<!-- gates:ci:begin -->
+> 本节由 `scripts/check_gate_manifest.py --write` 从 `scripts/gates.json` 生成，**不要手改**；顺序即 CI 执行顺序。
+
+| # | 门禁 | 防什么 |
+|---|---|---|
+| 1 | `check_publication.py --history` | 发布门禁：凭证、个人路径、私有库 token、图片白名单与未知二进制 fail-closed；--history 另扫 commit 身份与文案 |
+| 2 | `check_gate_manifest.py` | 元门禁：磁盘 check_*.py、本清单与 AGENTS §5.1 生成段三者零漂移 |
+| 3 | `check_path_hygiene.py` | 路径卫生：运行时数据不许从仓库根推导（防 #14 复发） |
+| 4 | `check_no_console_child.py` | 子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发） |
+| 5 | `check_listen_passthrough.py` | 唤醒内容不被 listen.py 吞掉（#91） |
+| 6 | `check_issue_16_audit_fixes.py` | #16 审计缺陷回归：store 异常类型、grants 排序、MCP 响应解析、会话活性 |
+| 7 | `check_daemon_entries.py` | daemon 入口冒烟：以 python <script> 方式启动每个入口，验证函数内延迟导入可达 |
+| 8 | `check_stop_stack.py` | 一键停栈完整性：孤儿清扫、自杀防护、只读探针不被误杀、端口兜底 |
+| 9 | `check_bootstrap_health.py` | 一键后台启动的健康检查与代理隔离 |
+| 10 | `check_napcat_launch_order.py` | NapCat 启动顺序：直接注入优先，注入失败不降级到 .bat（防 #39 黑框复发） |
+| 11 | `check_config_fail_loud.py` | 配置缺失 fail-loud：注入前拒绝、监听拒绝启动、--status 说出缺什么（#51） |
+| 12 | `check_water_group_import.py` | water_group 桥接 shim：单实例、模块身份唯一 |
+| 13 | `check_mcp.py` | MCP 协议层契约：真实 MCP HTTP + 隔离源夹具，从不发 QQ 消息 |
+| 14 | `check_mcp_onebot.py` | OneBot 设置到工具可见性再到 HTTP notice 读取（隔离夹具） |
+| 15 | `check_mcp_chat_output.py` | 轮询输出截断、游标与版本刷新语义 |
+| 16 | `check_mcp_chat_turns.py` | 对话轮次生命周期与原生引用（19 项并发与防竞争检查） |
+| 17 | `check_mcp_reactions.py` | 表情回应 dry-run：真实 MCP HTTP + loopback OneBot |
+| 18 | `check_mcp_language_learning.py` | 实时边聊边学契约（合成夹具，无模型调用） |
+| 19 | `check_mcp_language_integration.py` | 语言学习跨层集成（真实 MCP wire + 合成 WS） |
+| 20 | `check_mcp_multi_group_learning.py` | 一套凭证两群库的隔离与持久化 |
+| 21 | `check_mcp_jargon_matching.py` | 群友黑话再发现：仅 peer、合成批次 |
+| 22 | `check_mcp_jargon_pipeline.py` | 黑话流水线各阶段独立校验 |
+| 23 | `check_mcp_expression_evidence.py` | 表达证据 vs 机器人政策回归 |
+| 24 | `check_memory_engine_imports.py` | 水群模块单实例身份（动 shim 或 sync_* 时必跑） |
+| 25 | `check_group_memory.py` | 记忆引擎、MCP 读写工具与两层存储 |
+| 26 | `check_group_notes.py` | 群级结构化术语读写闭环（#31） |
+| 27 | `check_sender_name.py` | 发信人名形态：QQ 引用气泡文案不得进 sender 或 aliases（#39） |
+| 28 | `check_text_truncation.py` | 长文本截断契约（#90） |
+| 29 | `check_dossier_ingest.py` | dossier 写入动词：--ingest / --through / --apply / --dry-run（#6） |
+| 30 | `check_pollution_scrub.py` | 跨群主档污染审计、清理与还原（#34） |
+| 31 | `check_tmp_hygiene.py` | 私有目录巡检：tmp/ 禁脚本、bin 与 archive 须登记（#6） |
+| 32 | `check_app_log_once.py` | app.log 一次后端启动只写一份横幅（#97） |
+| 33 | `check_anti_habituation.py` | 反语癖固化与多样性提示词注入 |
+| 34 | `check_plan_recovery.py` | stale 拒绝后的重规划（plan_id 为 None 也不崩） |
+| 35 | `check_wake_ledger.py` | 已回判定：一条回复不得把后续 @ 洗成已回 |
+| 36 | `check_forward_wake.py` | 合并转发里的 @ 与关键词参与唤醒（#9） |
+| 37 | `check_followup.py` | 追问窗口：回复之后还能听见群里说什么 |
+| 38 | `check_pending_reply.py` | 待回时效：超时唤醒不再算待回 |
+| 39 | `check_reply_context.py` | reply.py --context 回之前看得到群聊上下文 |
+| 40 | `check_reply_quote.py` | OneBot mention 与引用预检 |
+| 41 | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
+| 42 | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
+| 43 | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
+| 44 | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
+| 45 | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
+| 46 | `check_slash_commands.py` | # 指令守护纯逻辑：过滤、冷却、去重、帮助 |
+| 47 | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
+| 48 | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
+| 49 | `check_plugin_registry.py` | 插件注册表（#4 PA 与 PB） |
+| 50 | `check_app_plugins.py` | app 侧插件协议：静态表、停用即降级、无插件名硬编码（#4 PD） |
+| 51 | `check_qr_login.py` | 每用户扫码登录：passport 双流、DPAPI、限流、隐私（#6） |
+| 52 | `check_log_encoding.py` | 控制台与日志编码两层钉死（#4） |
+| 53 | `check_watchdog_token.py` | watchdog 探针现读 OneBot token（防 #17 复发） |
+| 54 | `check_watchdog_halt.py` | watchdog halt 可恢复：冷却重试，不许永久停机（#45） |
+| 55 | `check_watchdog_launch_identity.py` | 注入实例按启动记录认领，--stop 计数不再漏报（#46） |
+| 56 | `check_collector_self_echo.py` | collector 不落盘自身回显（防 #28 复发） |
+| 57 | `check_module_size.py` | 模块体量红线：文件超 1000 行或类超 800 行即 fail（#11） |
+| 58 | `check_up_facade.py` | up.py 门面完整性：公开定义必须能从门面拿到且同一对象（#37） |
+| 59 | `check_napcat_onebot_contract.py` | NapCat 风格 WebSocket 帧契约 |
+| 60 | `check_napcat_qq_probe.py` | NapCat 探针契约：假消息 + loopback HTTP |
+| 61 | `check_qq_account_diagnostics.py` | QQ 账号诊断：目录夹具、失败分类、隐私 |
+| 62 | `check_upgrade.py` | 升级用真实 SQLite/WAL 夹具 |
+| 63 | `check_hot_reload.py` | 全栈热重载：闭包覆盖、target 映射、debounce、quarantine、不 spawn（#58） |
+
+共 63 个 CI 门禁；`manual` 13、`stale` 3、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
+<!-- gates:ci:end -->
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂
 `uv run python scripts/check_console_window.py --minutes 30`（命中直接打印 pid + 窗口类），
@@ -410,13 +352,16 @@ uv run python scripts/check_watchdog_launch_identity.py
 两组必须命中，用来证明探针没瞎、并且这台机器还能复现 DETACHED 的 bug；`hidden` /
 `nowindow-grandchild` 两组必须 0 命中。只跑后两组等于没做对照 —— 一个 0 命中什么都证明不了。
 
-### 5.2 仓库级回归门禁
-```bash
-# MCP 协议层契约
-uv run python scripts/check_mcp.py
-```
+### 5.2 不在 CI 跑的门禁（档位说明）
 
-完整 25 门禁清单与顺序见 `doc/WATER_GROUP_ONLY_PLAN.md` §8。`scripts/` 已按 issue #22 清掉桌面壳遗留的死脚本（模块级 import 无法解析者，含传递闭包共 62 个），现存的每个脚本自身 import 都能解析。新增脚本必须是活门禁：要么进 §5.1/§5.2，要么进 CI 清单，否则按死代码处理。
+`ci` 之外的四档理由逐条写在 [`scripts/gates.json`](scripts/gates.json)：
+
+- `manual`：需要真实桌面会话（`check_console_window.py`）、真实 MCP/OneBot 重集成（`check_mcp_chat.py` 等）或外部模型（`check_mcp_chat_materials_clients.py`），本机按需跑；
+- `stale`：本机当前为红、原因已定位并带跟进 issue 号，修好前不进 CI（不许用「人工跑」掩盖红门禁）；
+- `dead`：被测能力已删除，待删队列，删完即出列；
+- `support`：被门禁 import 的共享模块（如 `check_fixture_support.py`），本身不是门禁。
+
+`scripts/` 已按 issue #22 清掉桌面壳遗留的死脚本（模块级 import 无法解析者，含传递闭包共 62 个），issue #59 又删掉 9 个被测能力已删的脚本。新增脚本必须是活门禁或共享基建：进清单某一档，否则按死代码处理。
 
 **红门禁归因纪律**：失败时先用 git worktree pristine HEAD 对照——若同族失败则为既有环境问题（沙箱 WAL 竞态等，见审计报告第 3 节），记录在案，不要盲目"修复"。
 

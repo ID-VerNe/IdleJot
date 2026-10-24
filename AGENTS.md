@@ -325,6 +325,10 @@ uv run python scripts/check_quote_visibility.py
 # 22. 「现在」锚点（issue #95）：status 首行 / --list / --context 表头 /
 #     watch 唤醒块 / followup --show 都必须带当前时刻，且与 time.time() 对得上
 uv run python scripts/check_now_clock.py
+
+# 23. 模块体量红线（issue #11）：单文件 >1000 行或单类 >800 行即 fail，
+#     700+ 行进提示带；豁免名单逐条注明由哪个分节消除，清空即拆分完成
+uv run python scripts/check_module_size.py
 ```
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

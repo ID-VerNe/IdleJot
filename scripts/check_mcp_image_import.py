@@ -191,7 +191,8 @@ def main():
 
                     animated = call('import_chat_image', session_id=sid, data_base64=encoded)
                     assert not animated.isError and animated.structuredContent['total_frames'] == 3
-                    assert len([p for p in animated.content if p.type=='image']) == 3
+                    # 默认只交付单帧；frames='all' 才补采样帧（见 mcp_media_pixels）。
+                    assert len([p for p in animated.content if p.type=='image']) == 1
                     gif_id = animated.structuredContent['sticker_id']
                     second = start('111:group:223', 'upload-second-group')
                     assert call('read_chat_sticker', session_id=second, sticker_id=gif_id).isError

@@ -8,31 +8,26 @@ from . import reply_timing as timing
 
 IMAGE_DELIVERY_NOTE='本次已返回实际像素，不代表模型看懂。清晰度不足才用 prefer_original 补原图；若完全看不到图片，不原样重读或用原图升级重试，应说明客户端图片接入限制并继续可处理部分。真实读取失败仍可按入口重试。'
 import base64
-import binascii
 import hashlib
-import http.client
-import io
-import ipaddress
 import json
 import os
 import re
-import socket
 import sqlite3
-import ssl
 import threading
 import time
 import uuid
-from pathlib import Path
-from urllib.parse import urljoin, urlsplit
-
-from mcp import types
-from PIL import Image, UnidentifiedImageError
-import dns.exception
-import dns.message
-import dns.query
-import dns.resolver
 
 from .mcp_actions import dump
+from .mcp_media_pixels import pixels
+from .mcp_media_transport import (
+    MAX_BASE64_LENGTH,
+    MAX_BYTES,
+    download,
+    image_ref,
+    public_addresses,
+    remote_target,
+    uploaded_bytes,
+)
 from .mcp_schemas import idempotency_key, session_id
 from .message_sender import SendError, SendUncertain
 from .onebot import OneBotError, OneBotUncertain
@@ -46,8 +41,6 @@ MEDIA_TOOLS = {
     'send_chat_sticker': 'chat_sticker_send', 'collect_chat_sticker': 'chat_sticker_collect',
 }
 MEDIA_WRITES = {'import_chat_image', 'send_chat_sticker', 'collect_chat_sticker', 'note_chat_sticker'}
-MAX_BYTES = 6 * 1024 * 1024
-MAX_BASE64_LENGTH = 4 * ((MAX_BYTES + 2) // 3)
 CACHE_BYTES = 128 * 1024 * 1024
 
 
@@ -79,191 +72,6 @@ def schemas(tool, scope):
              dict(**asset, **key, **notes, save_local=dict(type='boolean',default=True),save_qq=dict(type='boolean',default=True)), ['session_id', 'sticker_id', 'idempotency_key']),
     ]
     return [r for r in rows if scope.get(MEDIA_TOOLS[r['name']])]
-
-
-def image_ref(data):
-    """Private bounded adapter references; never returned directly through MCP."""
-    result = {}
-    if isinstance(data.get('url'), str) and len(data['url']) <= 4096:
-        result['url'] = data['url']
-    file = data.get('file')
-    if isinstance(file,str) and file.startswith(('https://','http://')) and len(file)<=4096:
-        result.setdefault('url',file)
-    if isinstance(file, str) and re.fullmatch(r'[A-Za-z0-9_{}.-]{1,180}', file) and '..' not in file:
-        result['file'] = file
-    elif isinstance(file,str) and len(file)<=2048 and (Path(file).is_absolute() or file.startswith('file:')):
-        result['local_file']=file
-    encoded=data.get('base64')
-    if isinstance(file,str) and file.startswith('base64://'):encoded=file[9:]
-    if isinstance(encoded,str) and len(encoded)<=(MAX_BYTES+2)//3*4:result['base64']=encoded
-    for key in ('path','local_file'):
-        if isinstance(data.get(key),str) and len(data[key])<=2048:result['local_file']=data[key]
-    if type(data.get('timestamp')) in (int,float):result['timestamp']=data['timestamp']
-    return result
-
-
-def remote_target(url, *, trusted_file=False):
-    parts = urlsplit(url)
-    host = (parts.hostname or '').lower()
-    try:public_ip=trusted_file and ipaddress.ip_address(host).is_global
-    except ValueError:public_ip=False
-    domains=('qq.com','qq.com.cn','qpic.cn','gtimg.com','gtimg.cn')+ (('qcloud.com','myqcloud.com') if trusted_file else ())
-    if (parts.scheme not in ('http', 'https') or parts.username or parts.password or
-        (parts.port not in (None, 80, 443) and not (trusted_file and 0<parts.port<65536)) or parts.fragment or
-        not (public_ip or any(host == d or host.endswith('.'+d) for d in domains))):
-        raise ValueError('图片来源不是允许的 QQ 图片服务。')
-    return parts
-
-
-@timing.stage('image.dns')
-def public_addresses(host, port, *, deadline=None):
-    deadline=min(deadline or float('inf'),time.monotonic()+2)
-    try:
-        literal=ipaddress.ip_address(host)
-    except ValueError:literal=None
-    addresses=[str(literal)] if literal else []
-    if not literal:
-        try:
-            # dnspython reads configured DNS servers and bounds the wire query;
-            # socket.getaddrinfo cannot enforce a per-call timeout.
-            with timing.span('image.dns.system_lookup'):
-                resolver=dns.resolver.Resolver()
-                answers=resolver.resolve_name(host,lifetime=min(.7,max(0,deadline-time.monotonic())),search=False)
-                addresses=list(answers.addresses())
-        except (dns.exception.DNSException,OSError):pass
-    fake=ipaddress.ip_network('198.18.0.0/15')
-    fake_detected=bool(addresses) and all(ipaddress.ip_address(a) in fake for a in addresses)
-    timing.note(dns_system_record_count=len(addresses),dns_fake_ip_detected=fake_detected)
-    if not addresses or fake_detected:
-        try:
-            remaining=deadline-time.monotonic()
-            if remaining<=0:raise ValueError('DNS budget exhausted')
-            # Public resolver bootstrap, not a CDN address. Numeric transport
-            # avoids recursively resolving the fallback hostname; TLS still
-            # verifies dns.alidns.com. dnspython enforces one absolute expiry.
-            with timing.span('image.dns.tls_query'):
-                response=dns.query.tls(dns.message.make_query(host,'A'),'223.5.5.5',
-                    server_hostname='dns.alidns.com',timeout=remaining,verify=True)
-            answer=dns.resolver.Answer(dns.name.from_text(host),dns.rdatatype.A,dns.rdataclass.IN,response)
-            if answer.rrset is None:raise ValueError('No DNS addresses')
-            addresses=[a.address for a in answer]
-            timing.note(dns_tls_record_count=len(addresses))
-        except (dns.exception.DNSException,OSError,ValueError):
-            raise ValueError('图片 DNS 解析未在短预算内完成，或安全备用解析不可用。') from None
-    if time.monotonic()>deadline:raise ValueError('图片 DNS 解析预算已耗尽。')
-    if not addresses or any(not ipaddress.ip_address(a).is_global for a in addresses):
-        raise ValueError('图片地址指向非公网，已拒绝。')
-    addresses.sort(key=lambda a:':' in a)
-    return [(socket.AF_INET6 if ':' in a else socket.AF_INET,socket.SOCK_STREAM,6,'',
-             (a,port,0,0) if ':' in a else (a,port)) for a in addresses]
-
-
-@timing.stage('image.download')
-def download(url, cancel, *, max_bytes=MAX_BYTES, trusted_file=False):
-    """DNS pinned per hop, no proxy, no local networks even after redirects."""
-    deadline = time.monotonic()+25
-    try:
-        for _ in range(5):
-            parts = remote_target(url,trusted_file=trusted_file)
-            port = parts.port or (443 if parts.scheme == 'https' else 80)
-            records = public_addresses(parts.hostname, port, deadline=deadline)
-            if cancel.is_set() or time.monotonic() >= deadline:
-                raise ValueError('图片读取已取消或超时。')
-            family, socktype, proto, _, address = records[0]
-            sock = socket.socket(family, socktype, proto)
-            conn = http.client.HTTPConnection(parts.hostname, port, timeout=5)
-            try:
-                sock.settimeout(min(5, max(.1, deadline-time.monotonic())))
-                with timing.span('image.tcp_connect'):
-                    sock.connect(address)
-                if parts.scheme == 'https':
-                    with timing.span('image.tls'):
-                        sock = ssl.create_default_context().wrap_socket(sock, server_hostname=parts.hostname)
-                conn.sock = sock
-                path = parts.path or '/'
-                if parts.query:path += '?'+parts.query
-                with timing.span('image.response_headers'):
-                    conn.request('GET', path, headers={'User-Agent':'Tulpa/0.5', 'Accept':'*/*', 'Accept-Encoding':'identity'})
-                    response = conn.getresponse()
-                if response.status in (301,302,303,307,308):
-                    url = urljoin(url, response.getheader('Location') or '')
-                    continue
-                if response.status != 200:raise ValueError('QQ 图片暂不可用或地址已过期。')
-                if int(response.getheader('Content-Length') or 0) > max_bytes:
-                    timing.note(image_error='byte_limit')
-                    raise ValueError('媒体超过本次读取的大小上限。')
-                raw = bytearray()
-                with timing.span('image.download_body'):
-                    while True:
-                        if cancel.is_set() or time.monotonic() >= deadline:
-                            raise ValueError('图片读取已取消或超时。')
-                        chunk = response.read(min(65536, max_bytes+1-len(raw)))
-                        if not chunk:break
-                        raw.extend(chunk)
-                        if len(raw)>max_bytes:
-                            timing.note(image_error='byte_limit')
-                            raise ValueError('媒体超过本次读取的大小上限。')
-                return bytes(raw)
-            finally:
-                conn.close();sock.close()
-        raise ValueError('图片重定向次数过多。')
-    except (OSError, http.client.HTTPException):
-        raise ValueError('QQ 图片下载失败；可稍后重试，消息接收不受影响。') from None
-
-
-@timing.stage('image.decode_encode')
-def pixels(raw,*,validate_only=False,frames='one'):
-    """解码为交付像素；默认只取一帧，frames='all' 才给 3 个采样帧。
-
-    群聊里绝大多数动图只需要看一帧就能理解；每多一帧都是重复的 token 成本，
-    所以默认帧数从 3 降到 1，只有明确要求看动作时才补采样。
-    """
-    timing.note(image_bytes=len(raw) if raw else 0)
-    if not raw or len(raw)>MAX_BYTES:
-        timing.note(image_error='empty_or_byte_limit')
-        raise ValueError('图片为空或超过单张 6 MiB 上限。')
-    try:
-        with Image.open(io.BytesIO(raw)) as im:
-            if im.format not in ('PNG','JPEG','GIF','WEBP'):raise ValueError('暂不支持这种图片格式。')
-            total = getattr(im, 'n_frames', 1)
-            timing.note(image_dimensions=list(im.size), total_frames=total)
-            if total>300 or im.width*im.height*total>80000000 or im.width*im.height>12000000:
-                timing.note(image_error='dimensions_or_frame_limit')
-                raise ValueError('图片尺寸或动画帧数过大，未处理。')
-            size, fmt = list(im.size), im.format
-            im.verify()
-        if validate_only:return
-        if frames=='all':
-            indices = sorted({0, total//2, total-1})
-        else:
-            indices = [total//2 if total>1 else 0]
-        images, kept = [], []
-        with Image.open(io.BytesIO(raw)) as im:
-            for index in indices:
-                im.seek(index)
-                frame = im.convert('RGBA');frame.thumbnail((1280,1280))
-                background = Image.new('RGB', frame.size, 'white');background.paste(frame, mask=frame.getchannel('A'))
-                out = io.BytesIO();background.save(out, 'JPEG', quality=82)
-                kept.append(index)
-                images.append(types.ImageContent(type='image', mimeType='image/jpeg', data=base64.b64encode(out.getvalue()).decode('ascii')))
-        timing.note(image_dimensions=size, total_frames=total, returned_frames=len(images),
-                    returned_base64_chars=sum(len(frame.data) for frame in images))
-        return dict(format=fmt, dimensions=size, total_frames=total, frame_indices=kept), images
-    except (UnidentifiedImageError, OSError, SyntaxError, Image.DecompressionBombError, EOFError):
-        raise ValueError('图片损坏或未完整下载；不会影响持续聊天和普通工具。') from None
-
-
-def uploaded_bytes(encoded):
-    """Decode a bounded inline image, never a filesystem or remote reference."""
-    if not isinstance(encoded, str) or not 4 <= len(encoded) <= MAX_BASE64_LENGTH:
-        raise ValueError('图片为空或超过单张 6 MiB 上限。')
-    try:
-        raw = base64.b64decode(encoded, validate=True)
-    except (binascii.Error, ValueError):
-        raise ValueError('data_base64 必须是图片原始字节的纯 Base64，不接受路径、URL 或 data: 前缀。') from None
-    if not raw or len(raw) > MAX_BYTES:
-        raise ValueError('图片为空或超过单张 6 MiB 上限。')
-    return raw
 
 
 def clean(value, limit=200):

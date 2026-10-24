@@ -16,12 +16,14 @@ from .app_plugins.loader import build as build_app_plugins
 from .mcp_access import AccessDenied
 from .mcp_chat_hints import DOSSIER_REMINDER
 from .mcp_chat_limits import WAIT_TIMEOUT_SECONDS
-from .mcp_schemas import SESSION_ID_DESCRIPTION, event_id, idempotency_key, session_id
+from .mcp_chat_schemas import schemas  # noqa: F401  (issue #11 PC: facade re-export)
+from .mcp_chat_wait import ChatWaitMixin
+from .mcp_schemas import event_id, idempotency_key, session_id
 from .onebot_events import EventReceiver
 from .onebot_segments import at as at_segment, message_id, qq as qq_id, reply as reply_segment
 from . import mcp_chat_prompts as prompts
-from .mcp_chat_turns import ChatTurns, TOOLS as TURN_TOOLS, schema as turn_schemas
-from .mcp_language_learning import ChatLearning, TOOLS as LEARNING_TOOLS, schemas as learning_schemas
+from .mcp_chat_turns import ChatTurns, TOOLS as TURN_TOOLS
+from .mcp_language_learning import ChatLearning, TOOLS as LEARNING_TOOLS
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _WATER_GROUP_CONFIG_CACHE = {'mtime': 0, 'path': None, 'data': {}}
 
@@ -63,92 +65,11 @@ context 仅包含本会话开始接收后的最近事件，初次可能为空。
 Tulpa 只保存会话和等待消息，不调用内置模型、不替外部客户端启动推理。宿主中止任务后需在新对话用 get_chat_session 接续，不能声称仍有模型在后台聊天。'''
 
 
-def schemas(tool):
-    # 转发节点上限只认 MAX_NODES：常量在 PA 提到 100 后 schema 仍写 50，
-    # 显式重读被压成两页、next_call 的 limit=100 还会被自己的 schema 拒绝（issue #8 分节 PD）。
-    from .mcp_chat_details import MAX_NODES
-    sid = dict(session_id=session_id(SESSION_ID_DESCRIPTION))
-    key = dict(idempotency_key=idempotency_key())
-    rows = [
-        tool('list_chat_personas', '实时扫描持续群聊人格目录，返回当前可用人格数量 count、名称、id、全文及读取问题。每次新开群聊前调用，文件新增、修改、删除立即生效，无需重启。将选中的 id 传给 start_chat_session.persona_preset；不会开启聊天。', {}, []),
-        tool('list_chat_groups', '从 OneBot 列出当前连接允许持续聊天的 QQ 群，返回准确 conversation_id；无需导入历史聊天。',
-             dict(offset=dict(type='integer',minimum=0,default=0)), []),
-        tool('list_chat_friends', '列出本连接授权的已核对 QQ 好友会话，使用 ACCOUNT:direct:QQ 开始私聊；不包含临时会话。',
-             dict(offset=dict(type='integer',minimum=0,default=0)), []),
-        tool('start_chat_session', '用户要求在指定授权 QQ 群或已核对好友私聊持续聊天时开启并自动边聊边学，仅当前账号和群，沿用此前暂停偏好，不读历史。先 list_chat_sessions 查同目标；同人格用 get_chat_session(compact) 接续。明确换人格时停止旧会话再用新编号开始。没有可接续会话时 list_chat_personas 查询最新人格，再用其 id 作为 persona_preset；也可填写自定义 persona。新会话保存人格快照，同连接同会话同人格已运行时接续。返回后直接持续执行 next_call/wait；silence 不结束循环，learning_ready 推进一个阶段后按 next_call 先聊天或回 wait，无需用户另给学习指令。需要持续聊天和发送权限。',
-             dict(conversation_id=dict(type='string', maxLength=120), persona=dict(type='string', maxLength=6000),
-                  response_format=dict(type='string',enum=['compact','full'],default='compact',description='默认完整交付人格/规则一次；full 保留完整排查结构。'),
-                  persona_preset=dict(type='string', maxLength=255, description='list_chat_personas 返回的 id，即 Markdown 文件名去掉 .md；支持中文。不要凭旧列表猜测。'),
-                  participation=dict(type='string', enum=['quiet','natural','active','mention_only'], default='natural'), **key),
-             ['conversation_id','idempotency_key']),
-        tool('get_chat_session', '读取持续聊天上下文和进度；恢复时沿用 recovery 参数直接获取精简结果，full 可读取完整人格和协议。不会启动模型或自动发送。',
-             dict(**sid,response_format=dict(type='string',enum=['compact','full'],default='full'),
-                  known_prompt_version=dict(type='string',maxLength=120)), ['session_id']),
-        tool('list_chat_sessions', '列出本连接的持续聊天会话，用于接续或停止。', {}, []),
-        tool('read_chat_forward', '分页读取当前已读事件的直接转发或引用原文内转发。优先使用已有内容；仅未完成项沿 read_call/next_call 原样读取，引用位置使用返回的 reply_index。节点内图片用父 event_id 和 image_index；unrecoverable_truncation 表示处理上限之外无法继续。',
-             dict(**sid,event_id=dict(type='integer',minimum=1),forward_index=dict(type='integer',minimum=0,maximum=99,default=0),
-                  reply_index=dict(type='integer',minimum=0,maximum=7,description='仅引用内转发填写；沿返回调用复制引用位置，forward_index 为引用原文中的段位置。'),
-                  offset=dict(type='integer',minimum=0,maximum=MAX_NODES,default=0),limit=dict(type='integer',minimum=1,maximum=MAX_NODES,default=MAX_NODES)),
-             ['session_id','event_id']),
-        tool('wait_chat_messages', '统一等待群消息或可执行的 learning_ready。消息优先；潜水/silence 也要确认上批并继续等待。learning_ready 时领取一个阶段；claim 返回 task 时独立模型调用后沿 task.submit_call 提交。claim/submit 附 updated_chat 时沿 next_call 先聊天；未领取任务或已提交且无附带聊天时回本工具。idle/冷却/预算暂停继续等待，不结束、不忙轮询。确认上批用 acknowledge_through_id。无需用户手动领取任务。',
-             dict(**sid, acknowledge_through_id=dict(type='integer', minimum=0), note=dict(type='string', maxLength=1500),
-                  known_prompt_version=dict(type='string', maxLength=120),
-                  response_format=dict(type='string',enum=['compact','full'],default='compact',description='默认只返回动态参与信息；完整人格和规则由 start/get 提供。排查时可选 full。'),
-                  timeout_seconds=dict(type='number', minimum=1, maximum=180, default=WAIT_TIMEOUT_SECONDS),
-                  minimum_wait_seconds=dict(type='number',minimum=0,maximum=30,default=0,description='通常沿用 recovery.next_call；重试前在程序内等待，避免旧批次立即返回造成忙等。可被停止或取消打断，不超过 timeout_seconds。'),
-                  quiet_seconds=dict(type='number', minimum=0, maximum=5, default=2),
-                  limit=dict(type='integer', minimum=1, maximum=50, default=30),
-                  mention_only=dict(type='boolean', default=False, description='设为 true 时，仅在收到明确 @ 机器人账号或引用机器人的消息时才唤醒返回；普通群友闲聊在后台保持静默等待并维护上下文窗口，极大节省 Token。'),
-                  auto_images=dict(type='string', enum=['candidates','all','none'], default='candidates',
-                      description='图片自动投递策略：默认 candidates 只预热 @ 我那条消息自身图与其引用图（每批最多2张），其余给元数据用 read_chat_image 补读；all 沿用旧的全量（每批最多8张）；none 完全不自动交付像素。'),
-                  followup_turns=dict(type='integer', minimum=0, maximum=10, default=3, description='在被 @ 唤醒后，允许在没有再次显式 @ 的情况下连贯接续互动的消息轮数上限，默认 3 轮。兼顾对话连贯性与 Token 消耗控制。'),
-                  followup_seconds=dict(type='number', minimum=5, maximum=180, default=60, description='被 @ 唤醒后保持活跃对话窗口的最长静默超时秒数，默认 60 秒。超过此时间未有人继续说话则自动休眠。')), ['session_id']),
-        tool('send_chat_message', '在持续群聊中发言，默认普通文本。可分别指定回应事件、显示原生引用和原生 @；近距离且对象明确时不挂标记，话题交错时按需引用，确需点名才 @。分成多条通常仅首条挂标记，后续省略。每次核对授权、目标、停止状态和幂等编号；已授权后直接发送。',
-             dict(**sid, **key, text=dict(type='string', minLength=1, maxLength=4000, description='实际正文，CQ 样式文字保持普通文本，不要手写 CQ 或 @昵称冒充消息段。'),
-                  reply_to_event_id=event_id('get_chat_session.context / wait_chat_messages.messages 中已读取消息的 id；不是 M 编号、onebot_message_id 或 read_through_id。仅选择回应目标，默认不显示引用。'),
-                  quote=dict(type='boolean', default=False, description='需要消除指代歧义时才设 true，且必须指定 reply_to_event_id；不会自动 @ 原作者。'),
-                  mention_user_ids=dict(type='array', maxItems=5, uniqueItems=True, default=[],
-                                        items=dict(type='string', pattern='^[1-9][0-9]{0,19}$'),
-                                        description='确实需要点名的群成员 QQ 号，如消息 sender_id；发送前核对成员身份。不接受昵称或 all，和引用独立。')),
-             ['session_id','text','idempotency_key']),
-        tool('stop_chat_session', '立即停止本连接的持续聊天并唤醒等待者，取消尚未派发的回复；不撤销其他工具权限。已经交给 QQ 的消息无法撤回。重复停止安全。', sid, ['session_id']),
-        tool('query_member_dossier', '查询指定群友的小本本记忆与专属档案（包括外号、XP喜好、说话习惯与群内历史八卦）。返回的核心记忆是跨群主档与本群快照的并集；若上一份记忆被覆盖，会一并返回 key_memories_backup。在群友发问“你还记得我吗”、“我喜欢什么”、“你小本本记了啥”或需要精确调侃时调用。',
-             dict(identifier=dict(type='string', description='群友 QQ 号、群名片、昵称或外号（如“群友A”、“群友B”）'),
-                  group_id=dict(type='string', description='当前群号（可选，用于过滤群内专属八卦事件）'),
-                  session_id=dict(type='string', description='当前持续聊天会话编号（可选，自动推导群号）')),
-             ['identifier']),
-        tool('update_member_dossier', '更新或补充指定群友的小本本记忆与画像档案（包括核心记忆、性格特征、外号、XP喜好、角色身份等）。用于在聊天中捕捉到群友新狠料、明确偏好或被纠正称谓时，原生写入持久化记忆，无需直接操作底层数据库。',
-             dict(identifier=dict(type='string', description='群友 QQ 号、群名片、昵称或既有外号'),
-                  group_id=dict(type='string', description='当前群号（可选，用于写入群专属记忆；缺省时尝试从 session_id 推导）'),
-                  session_id=dict(type='string', description='当前持续聊天会话编号（可选，用于推导群号）'),
-                  key_memories=dict(type='array', items=dict(type='string'), description='需要记录或追加的核心记忆/黑料/事件（如“重度二次元”、“沉迷三国杀”等）'),
-                  interests=dict(type='array', items=dict(type='string'), description='群友喜好/游戏/XP领域列表'),
-                  traits=dict(type='object', description='结构化特征槽位，如 {"role": "群友角色", "trope": "反差"}'),
-                  aliases=dict(type='array', items=dict(type='string'), description='新增外号/别名列表'),
-                  tone_style=dict(type='string', description='说话口吻与风格偏好描述'),
-                  role=dict(type='string', description='在群内的角色身份（如“群主”、“管理员”、“活跃群友”）'),
-                  primary_name=dict(type='string', description='规范化主名称（可选）'),
-                  overwrite=dict(type='boolean', default=False, description='是否覆盖既有字段，默认 false 为智能追加合并。带 group_id 时只覆盖本群快照，跨群主档记忆不受影响；覆盖导致条目减少时，上一份记忆写入 key_memories_backup')),
-             ['identifier']),
-        tool('consolidate_chat_memory', '批量整合与沉淀群聊记忆。将近期对话中提取的多位群友事件、性格变化、最新梗与话题摘要一次性结构化提炼归档至持久化记忆库，免去零散调用与数据库脚本操作。',
-             dict(group_id=dict(type='string', description='目标群号（可选，若提供 session_id 可自动推导）'),
-                  session_id=dict(type='string', description='当前持续聊天会话编号（可选，用于推导群号）'),
-                  records=dict(type='array', items=dict(type='object'), description='批量群友画像提炼列表，每项包含 identifier, key_memories, interests, traits, tone_style, event(quote, context, tags) 等'),
-                  events=dict(type='array', items=dict(type='object'), description='独立群事件与八卦流水列表，每项包含 identifier, quote, context, tags 等'),
-                  summary=dict(type='string', description='本次对话整体话题总结或阶段性沉淀摘要')),
-             []),
-    ]
-    next(s for s in rows if s['name']=='send_chat_message')['parameters']['properties']['plan_id']=dict(type='string',minLength=32,maxLength=32,description='plan_chat_reply 返回的 READY 计划；缺少时拒绝发送。')
-    next(s for s in rows if s['name']=='send_chat_message')['parameters']['properties']['expression_ids']=dict(type='array',maxItems=5,uniqueItems=True,
-        items=dict(type='string',minLength=32,maxLength=32),description='可随正文一起提交表达选择；[] 明确不用，兼容单独选择工具。')
-    return rows + turn_schemas(tool) + learning_schemas(tool)
-
-
 class ChatStopped(ValueError):
     pass
 
 
-class MCPChat:
+class MCPChat(ChatWaitMixin):
     def __init__(self, access, actions):
         self.access, self.store, self.actions = access, access.store, actions
         self.lock = threading.RLock()
@@ -704,225 +625,6 @@ class MCPChat:
         self.receiver.stop()
 
     @timing.stage('chat.wait')
-    def wait(self, grant, args, cancel, *, allow_learning=True):
-        sid=args['session_id'];gid=grant['id']
-        grant,row=self.validate(sid,gid,active=False)
-        if not row['active']:return dict(event='stopped',session=self.public(row),messages=[])
-        self.receiver.start()
-        with self.lock:
-            if sid in self.waiters:raise ValueError('此会话已有 Agent 在等待；请接续原会话，不要并行回复同一个群。')
-            if len(self.waiters)>=8:raise ValueError('同时等待的群已达8个；普通工具仍可使用。')
-            event=threading.Event();self.events[sid]=event;self.waiters.add(sid)
-        try:
-            grant,row=self.validate(sid,gid)
-            ack=args.get('acknowledge_through_id')
-            if ack is not None:
-                if not 0<=ack<=row['offered']:raise ValueError('只能确认已返回的消息进度，请使用 read_through_id。')
-                if ack>=row['cursor']:
-                    with self.access.connect() as db:
-                        # A deferred decision is not an ACK, including when an
-                        # older client reuses the batch's original continuation.
-                        db.execute('BEGIN IMMEDIATE')
-                        if db.execute("SELECT 1 FROM chat_turn_plans WHERE session_id=? AND state='WAITING'",(sid,)).fetchone():
-                            ack=row['cursor']
-                        db.execute('UPDATE chat_sessions SET cursor=?,note=?,updated=? WHERE id=? AND active=1',
-                                   (ack,args.get('note',row['note']),time.time(),sid))
-                row=self.row(sid,gid)
-            elif 'note' in args:raise ValueError('保存话题说明时请同时确认已处理的消息进度。')
-            end=time.monotonic()+args.get('timeout_seconds',WAIT_TIMEOUT_SECONDS)
-            planned_wait=self.turns.remaining_wait(sid)
-            if planned_wait:end=min(end,time.monotonic()+planned_wait)
-            earliest=min(end,time.monotonic()+args.get('minimum_wait_seconds',0))
-            quiet=args.get('quiet_seconds',self.turns.policy()['quiet_seconds']);last_max=None;changed_at=time.monotonic();heartbeat=0
-            collecting_since=time.monotonic()
-            limit=args.get('limit',30);echoes=0
-            mention_only=bool(args.get('mention_only') or row.get('participation')=='mention_only')
-            account=row['conversation_id'].split(':')[0]
-            followup_turns=args.get('followup_turns', 3)
-            followup_seconds=args.get('followup_seconds', 60)
-            dialogue_window=self.dialogue_windows.setdefault(sid, {'active_until': 0, 'remaining_followups': 0})
-            with self.access.connect() as db:
-                last_turn=db.execute("SELECT payload FROM chat_turn_plans WHERE session_id=? ORDER BY created DESC LIMIT 1",(sid,)).fetchone()
-                if last_turn:
-                    try:
-                        if json.loads(last_turn['payload']).get('action')=='silence':
-                            dialogue_window['remaining_followups']=0
-                    except Exception:pass
-            while True:
-                if cancel.is_set():return dict(event='cancelled',messages=[],note='仅取消此次等待；会话未停止，原进度可接续。')
-                try:grant,row=self.validate(sid,gid)
-                except ChatStopped:return dict(event='stopped' if not self.row(sid)['active'] else 'service_offline',session=self.public(self.row(sid)),messages=[])
-                if time.monotonic()-heartbeat>=10:
-                    self.touch(sid);heartbeat=time.monotonic()
-                with self.access.connect() as db:
-                    pending=db.execute('SELECT * FROM chat_inbox WHERE session_id=? AND id>? ORDER BY id LIMIT ?',
-                                       (sid,row['cursor'],limit+1)).fetchall()
-                consumed=self.consume_sent_echoes(row,pending)
-                if consumed:
-                    echoes+=consumed
-                    continue
-                newest=pending[-1]['id'] if pending else row['cursor']
-                wake_kind,notices=self.apps.wake(row)
-                newest=(newest,notices[-1]['notice_id'] if notices else 0)
-                if newest!=last_max:last_max=newest;changed_at=time.monotonic()
-                now=time.monotonic()
-
-                has_mention=False
-                is_in_dialogue=False
-                if mention_only:
-                    allow_learning=False
-                    if pending:
-                        with self.access.connect() as db:
-                            own_rows=db.execute("SELECT message_id FROM chat_inbox WHERE session_id=? AND coalesce(json_extract(payload,'$.is_self'),0)=1 ORDER BY id DESC LIMIT 50",(sid,)).fetchall()
-                            own_ids={str(r[0]) for r in own_rows}
-                        cfg = load_water_group_config()
-                        gid_str = row['conversation_id'].split(':')[-1]
-                        group_cfg = cfg.get('groups', {}).get(gid_str, {})
-                        names = []
-                        cfg_names = cfg.get('self_names')
-                        if isinstance(cfg_names, list):
-                            names.extend(str(n) for n in cfg_names if n)
-                        grp_names = group_cfg.get('self_names') or group_cfg.get('wake_words')
-                        if isinstance(grp_names, list):
-                            names.extend(str(n) for n in grp_names if n)
-                        p_name = row.get('persona_name')
-                        if p_name and p_name != '自定义人格':
-                            names.append(p_name)
-                            for part in p_name.split():
-                                if part:
-                                    names.append(part)
-                        keywords = {k.casefold() for k in names if k}
-                        if account:
-                            keywords.add(account.casefold())
-                        cfg_account = str(cfg.get('self_account') or '')
-                        if cfg_account and not cfg_account.startswith('YOUR_'):
-                            keywords.add(cfg_account.casefold())
-                        kw_list = [k for k in keywords if k]
-                        for r in pending:
-                            payload = json.loads(r['payload'])
-                            if payload.get('is_self'):
-                                continue
-                            segs = payload.get('segments', [])
-                            if any(s.get('type') == 'at' and str(s.get('qq', '')) in (account, cfg_account, 'all') for s in segs):
-                                has_mention = True
-                                break
-                            if any(s.get('type') == 'reply' and str(s.get('onebot_message_id', '')) in own_ids for s in segs):
-                                has_mention = True
-                                break
-                            txt = (payload.get('content', '') or payload.get('text', '')) + " " + " ".join(s.get('text', '') for s in segs if s.get('type') == 'text')
-                            txt_lower = txt.casefold()
-                            if any(kw in txt_lower for kw in kw_list):
-                                has_mention = True
-                                break
-
-                    if has_mention:
-                        dialogue_window['remaining_followups'] = followup_turns
-                        dialogue_window['active_until'] = time.monotonic() + followup_seconds
-
-                    is_in_dialogue = bool(dialogue_window.get('remaining_followups', 0) > 0 and time.monotonic() < dialogue_window.get('active_until', 0))
-
-                    if not has_mention and not is_in_dialogue and now < end:
-                        if len(pending) > 15:
-                            trim_through = pending[-10]['id']
-                            with self.access.connect() as db:
-                                db.execute('UPDATE chat_sessions SET cursor=? WHERE id=? AND active=1', (trim_through, sid))
-                            continue
-
-                collection = self.turns.collection(row, pending, quiet, collecting_since)
-                waiting = self.turns.waiting(sid)
-                new_input = False
-                if waiting:
-                    with self.access.connect() as db:
-                        live = db.execute("SELECT 1 FROM chat_inbox WHERE session_id=? AND id>? AND id<=? AND coalesce(json_extract(payload,'$.recalled'),0)=0 LIMIT 1",
-                            (sid, row['cursor'], waiting['watermark'])).fetchone()
-                        new_input = bool(db.execute('SELECT 1 FROM chat_inbox WHERE session_id=? AND id>? LIMIT 1', (sid, waiting['watermark'])).fetchone())
-                if waiting and not live:
-                    with self.access.connect() as db:
-                        db.execute("UPDATE chat_turn_plans SET state='CANCELLED',reason='input_unavailable' WHERE session_id=? AND state='WAITING'", (sid,))
-                    waiting = None
-                deferred = bool(waiting and time.time() < waiting['not_before'] and not new_input)
-                learning = self.learning.wake(grant, row) if allow_learning and not pending and not notices and now >= earliest else dict(ready=False)
-
-                ready_to_return = False
-                if mention_only:
-                    if (has_mention or is_in_dialogue) and (len(pending) > limit or collection['ready']):
-                        ready_to_return = True
-                else:
-                    if (len(pending) > limit or collection['ready']) or (notices and now - changed_at >= quiet) or learning['ready']:
-                        ready_to_return = True
-
-                if (now >= earliest and pending and not deferred and ready_to_return) or now >= end:
-                    if mention_only:
-                        if not has_mention and not is_in_dialogue and now >= end:
-                            if pending:
-                                through = pending[-1]['id']
-                                with self.access.connect() as db:
-                                    db.execute('UPDATE chat_sessions SET cursor=?,offered=max(offered,?) WHERE id=? AND active=1', (through, through, sid))
-                                    db.executemany('UPDATE chat_inbox SET delivered=1 WHERE session_id=? AND id=?', [(sid, m['id']) for m in pending])
-                                pending = []
-                        elif not has_mention and is_in_dialogue and ready_to_return:
-                            dialogue_window['remaining_followups'] -= 1
-                            dialogue_window['active_until'] = time.monotonic() + followup_seconds
-                    items=self.details.enrich(grant,row,self.messages(pending[:limit] if not deferred else []),cancel)
-                    through=items[-1]['id'] if items else max(row['cursor'],row['dropped_through'])
-                    with self.lock:
-                        self.validate(sid,gid)
-                        if cancel.is_set():return dict(event='cancelled',messages=[])
-                        with self.access.connect() as db:
-                            if waiting and items and not deferred:
-                                # Expiry or new input ends the timer, not the
-                                # pending input. Only later page ACKs advance it.
-                                db.execute("UPDATE chat_turn_plans SET state='CANCELLED',reason=? WHERE session_id=? AND state='WAITING' AND json_extract(payload,'$.batch_id')=?",
-                                    ('new_input' if new_input else 'wait_elapsed',sid,waiting['batch_id']))
-                            db.execute('UPDATE chat_sessions SET offered=max(offered,?) WHERE id=? AND active=1',(through,sid))
-                            db.executemany('UPDATE chat_inbox SET delivered=1 WHERE session_id=? AND id=?',[(sid,m['id']) for m in items])
-                    status=self.receiver.status()
-                    ready=status['state']=='connected' and status['account']==row['conversation_id'].split(':')[0]
-                    kind='messages' if items else wake_kind if notices and ready else 'learning_ready' if learning['ready'] and ready else 'idle' if ready else 'source_unavailable'
-                    if kind == 'idle':
-                        try:
-                            from water_group.memory_engine import get_memory_engine
-                            with self.access.connect() as _db:
-                                _recent_rows = _db.execute('SELECT payload FROM chat_inbox WHERE session_id=? ORDER BY id DESC LIMIT 20', (sid,)).fetchall()
-                            if _recent_rows:
-                                _recent_payloads = [json.loads(_r['payload']) for _r in reversed(_recent_rows)]
-                                get_memory_engine().digest_idle_batch(row['conversation_id'].split(':')[-1], _recent_payloads)
-                        except Exception:
-                            pass
-                    result=dict(event=kind,session_id=sid,messages=items,read_through_id=through,
-                                has_more=not deferred and len(pending)>len(items),continue_waiting=True,acknowledged_sent_echoes=echoes,
-                                receiver=status,gap_count=row['gap_count'],gap_note='接收曾中断或缓存溢出，不保证消息完整。' if row['gap_count'] else '',
-                                note='处理后以 read_through_id 确认；idle 继续等待，不表示整个聊天结束。')
-                    if len(pending)>limit:collection['reason']='page_limit'
-                    elif now>=end:collection['reason']='timeout'
-                    result['input_batch']=self.turns.batch(row,items,collection)
-                    changed=bool(args.get('known_prompt_version') and args['known_prompt_version']!=prompts.version(row))
-                    result['chat_guidance']=self.guidance(grant,row,items,through=through,
-                        event=kind if ready else 'source_unavailable',has_more=result['has_more'])
-                    result['decision_required']=bool(ready and (any(not m.get('recalled') for m in items) or result['chat_guidance']['reaction_notices'].get('new_items')))
-                    result['next_call']=result['chat_guidance']['continue_with']
-                    if result['decision_required'] and not result['has_more']:
-                        result['next_call']=result['input_batch']['plan_call']
-                    if deferred:result['deferred_until']=waiting['not_before']
-                    if kind=='learning_ready':
-                        result['learning_ready']=learning
-                        result['next_call']=learning['next_call']
-                        result['note']='领取并提交一个学习阶段；附 updated_chat 时沿 next_call 先聊天，否则回 wait，潜水不结束循环。'
-                    if not result['decision_required']:
-                        result['input_batch']['phase']='WAITING'
-                        result['input_batch']['next']='本轮没有待处理输入；直接 next_call，不需要 plan_chat_reply。'
-                    if changed:
-                        result['chat_prompt']=dict(result['chat_guidance'],behavior=prompts.BEHAVIOR,persona=row['persona'])
-                        with self.access.connect() as db:
-                            db.execute('UPDATE chat_sessions SET prompt_delivered_version=? WHERE id=?',(prompts.version(row),sid))
-                    result['prompt_changed']=changed
-                    return result
-                with timing.span('wait.event_sleep'):
-                    event.wait(min(.4,max(.01,end-now)))
-                event.clear()
-        finally:
-            with self.lock:self.waiters.discard(sid);self.events.pop(sid,None)
-
     def response_target(self, row, event_id):
         with self.access.connect() as db:
             found=db.execute('SELECT * FROM chat_inbox WHERE session_id=? AND id=? AND delivered=1',(row['id'],event_id)).fetchone()

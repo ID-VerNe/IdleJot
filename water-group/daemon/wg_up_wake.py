@@ -221,10 +221,10 @@ def wake_reason(event):
 
 
 def pending_reply_ttl():
-    """待回唤醒的时效上限（秒），读 config.json 的 pending_reply.max_age_seconds。
+    """待回唤醒的时效上限（秒），读 config.json 顶层 pending_reply.max_age_seconds。
 
-    与 followup 段平级。缺失或非法（含 0 / 负数）时回落 7200：一个拼错的
-    配置不该把时效关掉，那正是这个修复要治的病。
+    缺失或非法（含 0 / 负数）时回落 7200：一个拼错的配置不该把时效关掉，那正
+    是这个修复要治的病。
     """
     raw = (config().get("pending_reply") or {}).get("max_age_seconds")
     try:

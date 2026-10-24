@@ -7,9 +7,9 @@ time. This closes that gap — the call returns the moment a wake lands, so the
 only remaining delay is composing the reply.
 
 Two wake paths meet here: @ and keywords arrive in wg_events.jsonl, and while a
-follow-up window is open (followup.py) ordinary chatter after the last reply
-counts too, read straight from chat_inbox. They never overlap — a mention always
-wins — and the window closes itself once the group goes quiet.
+follow-up window is open (追问窗口插件，issue #4 PD2a) ordinary chatter after the
+last reply counts too, read straight from chat_inbox. They never overlap — a
+mention always wins — and the window closes itself once the group goes quiet.
 
 Exit codes:
   0  a wake was printed
@@ -26,7 +26,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-import followup  # noqa: E402  (追问窗口：回复之后继续听闲聊)
+import plugins  # noqa: E402  (事件型能力派发口：追问窗口，issue #4 PD2a)
 import up  # noqa: E402  (wake_reason / events / replied_ids live there)
 import wg_aliases  # noqa: E402  (别名指向渲染，issue #30)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
@@ -58,6 +58,20 @@ def write_cursor(value):
 
 def latest_id(rows):
     return max((r.get("id") or 0) for r in rows) if rows else 0
+
+
+def _plugin_settings():
+    """追问窗口插件的归一化设置（三态门控要它，issue #4 PD2a）。
+
+    延迟 import commands：等唤醒这条路径不碰指令树，别让 CLI 白拖约 80ms
+    进来。读不到配置时回落空设置——插件按 default_enabled 走。
+    """
+    try:
+        import commands  # noqa: PLC0415
+
+        return commands.load_settings()
+    except Exception:  # noqa: BLE001  设置坏了不该让等唤醒这条链路崩
+        return {}
 
 
 def main():
@@ -112,41 +126,35 @@ def main():
         # 没有新的 @/关键词，但追问窗口可能还开着：回复之后群里继续聊的几句
         # 全在 chat_inbox 里（mention_only 根本没把它们投递出来），顺带查一眼。
         # 窗口自己会过期；路上撞见了就顺手关掉，不用另起进程打扫。
-        window = followup.load()
-        if window:
-            reason = followup.stale(window)
-            if reason:
-                followup.close()
-                print(f"[追问] 窗口关闭（{reason}）")
-            else:
-                woke = followup.consume(window,
-                                        followup.since(window.get("after_id"),
-                                                       window.get("session"),
-                                                       window.get("not_before")))
-                if woke:
-                    print(wg_clock.now_line())
-                    for r in woke:
-                        stamp = wg_clock.clock_ms(r.get("ts"))
-                        # 追问行与唤醒行同一份渲染口径（issue #32）。
-                        body, _, _ = wg_text.render_body(r.get("text"),
-                                                          wg_text.WAKE_BODY_CHARS,
-                                                          r.get("id"))
-                        # 人名指向与唤醒行同款（issue #30）；追问行没有
-                        # conversation_id 字段时退回跨群主档别名。
-                        gid = wg_aliases.group_of(r.get("conversation_id"))
-                        tag = wg_aliases.sender_tag(r.get("sender"), gid)
-                        hits = wg_aliases.body_hits(r.get("text"), gid,
-                                                    sender=r.get("sender"))
-                        print(f"id={r.get('id')} {stamp} [追问] {r.get('sender')}{tag}: "
-                              f"{body}"
-                              f"{('  ' + r['quote']) if r.get('quote') else ''}"
-                              f"{('  ' + r['images']) if r.get('images') else ''}"
-                              f"{''.join('  ' + h for h in hits)}")
-                    # 报告文案由 followup 决定：额度用完的那一批不说「还剩 0 条」
-                    # （issue #98）。收窗也在 consume() 里做完，不再留到下一轮。
-                    print(followup.wake_report(window, len(woke)))
-                    print("WAKE")
-                    return 0
+        # 查窗口、判三态、收窗都在插件里（issue #4 PD2a）；宿主只负责渲染。
+        scan = plugins.emit("wake_scan", {"settings": _plugin_settings()})
+        if scan and scan.get("closed"):
+            print(f"[追问] 窗口关闭（{scan['closed']}）")
+        elif scan and scan.get("woke"):
+            woke = scan["woke"]
+            print(wg_clock.now_line())
+            for r in woke:
+                stamp = wg_clock.clock_ms(r.get("ts"))
+                # 追问行与唤醒行同一份渲染口径（issue #32）。
+                body, _, _ = wg_text.render_body(r.get("text"),
+                                                  wg_text.WAKE_BODY_CHARS,
+                                                  r.get("id"))
+                # 人名指向与唤醒行同款（issue #30）；追问行没有
+                # conversation_id 字段时退回跨群主档别名。
+                gid = wg_aliases.group_of(r.get("conversation_id"))
+                tag = wg_aliases.sender_tag(r.get("sender"), gid)
+                hits = wg_aliases.body_hits(r.get("text"), gid,
+                                            sender=r.get("sender"))
+                print(f"id={r.get('id')} {stamp} [追问] {r.get('sender')}{tag}: "
+                      f"{body}"
+                      f"{('  ' + r['quote']) if r.get('quote') else ''}"
+                      f"{('  ' + r['images']) if r.get('images') else ''}"
+                      f"{''.join('  ' + h for h in hits)}")
+            # 报告文案由 followup 决定：额度用完的那一批不说「还剩 0 条」
+            # （issue #98）。收窗也在 consume() 里做完，不再留到下一轮。
+            print(scan["report"])
+            print("WAKE")
+            return 0
 
         # Nothing to report: move past everything seen so a later call does not
         # rescan the whole file, then wait for the collector to append.

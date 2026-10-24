@@ -13,6 +13,11 @@
   （``import plugins.base``）——相对 import 在非 ``chatlocal`` 包里会把路径算错
   （``reload._resolve_import`` 用文件系统 parts 拼模块名），而且是静默算错。
 
+协议有两个扩展点，别混用：``commands`` 是**指令型**能力（``#`` 开头的 handler），
+``Hooks.on_event`` 是**事件型**能力（追问窗口一类——宿主在通用流程点派发命名事件，
+issue #4 PD2a）。指令型走 ``Registry.commands()`` 合成表；事件型没有表，宿主直接
+``emit(event, ctx)``。
+
 宿主（``Host``）不是插件，是本进程能给插件的能力集合；``Plugin.requires`` 必须被
 宿主满足，否则注册期就失败并留下原因（fail-fast + 可见），不许像旧的
 ``try/except`` 那样静默置空。
@@ -105,6 +110,10 @@ class Hooks:
     on_send_failed: Callable[[Ctx, Settings], None] | None = None
     # --status 里这一行插件的附加说明
     status: Callable[[Settings], str] | None = None
+    # 事件型能力入口（issue #4 PD2a）：宿主在通用流程点派发命名事件，
+    # 返回 None = 不接，宿主继续走自己的默认分支。事件是否受三态门控由插件
+    # 自决（窗口类门控、DB 兜底类不限）——语义属于插件，不属于协议。
+    on_event: Callable[[str, Ctx], Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +129,10 @@ class Plugin:
     default_enabled: bool = True
     # 插件私有配置的默认值；宿主不再知道任何 provider 字段（issue #4 PB）。
     options_defaults: Mapping[str, Any] = field(default_factory=dict)
+    # 旧版顶层配置段名（issue #4 PD2a）：宿主把 ``cfg[legacy_section]`` 当旧键
+    # 平铺读——``enabled`` 进三态、其余键进 options。只有真的有过一个顶层段的
+    # 插件才声明（followup 的 ``"followup"``）；新插件留空。
+    legacy_section: str = ""
 
     def enabled(self, settings: Settings, group_id: str = "") -> bool:
         """三态门控：``enabled`` 总开关 → ``groups`` 白名单 → 群级 ``group_off``。

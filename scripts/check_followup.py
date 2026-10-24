@@ -14,6 +14,14 @@ issue #70：`#` 指令（slash_commands.prefix 开头）不算接话——不扣
 issue #98：额度扣到 0 的那一批仍然是有效唤醒（消息要送到），但窗口必须**当场**
 收掉，报告改口成「本批 N 条，窗口到此为止」，不再出现「额度还剩 0 条」。
 
+issue #4 PD2a：追问窗口插件化之后的新契约——``reply_sent`` 三态门控（停用不开
+窗、群白名单按群放行、群级关闭优先）、``wake_scan`` 停用即不唤醒（本节点唯一的
+行为变化：改前 ``enabled:false`` 只挡开窗）、``event_lookup`` / ``active_group``
+两个 DB 兜底事件**不受门控**（关了窗口也要能回 ``--context`` 里看到的闲聊）、
+``window_status`` 过门控（插件行与追问行口径一致）、顶层 ``followup`` 旧段经
+``legacy_section`` 逐字段等效、``plugins.emit`` 与 commands 注册表派发到同一个
+PLUGIN 对象。
+
     .venv/Scripts/python.exe scripts/check_followup.py
 """
 import json
@@ -347,6 +355,174 @@ def check_watch_budget_wake():
     print("  ok  watch.py 用完那轮不再报「还剩 0 条」（issue #98）")
 
 
+# ---------- issue #4 PD2a：插件化之后的新契约 ----------
+# 以下用例都追加 id 700+ 的新消息：既不被前面任何 `since(小 anchor)` 用例捞到，
+# 也不给 watch 子进程测试的「本批 1 条」添行。
+
+def check_plugin_gating():
+    """reply_sent 过三态门控：停用不开窗；群白名单按群放行；群级关闭优先。"""
+    import commands
+    import plugins
+
+    def reply_sent(settings, group_id):
+        return plugins.emit("reply_sent", {
+            "settings": settings,
+            "group_id": group_id,
+            "event_id": 5,
+            "not_before": None,
+        })
+
+    # 默认（什么都没配）：开，参数走机件默认值
+    followup.close()
+    state = reply_sent(commands.settings_from({}), "123")
+    assert state and state["budget"] == 10 and state["idle_seconds"] == 180, state
+    assert followup.load() == state, "开窗没落盘"
+
+    # 总开关关：不开
+    off = commands.settings_from({"plugins": {"followup": {"enabled": False}}})
+    followup.close()
+    assert reply_sent(off, "123") is None, "停用不该开窗"
+    assert followup.load() is None
+
+    # 群白名单：只在这些群开
+    scoped = commands.settings_from({"plugins": {"followup": {
+        "enabled": True, "groups": ["123"]}}})
+    followup.close()
+    assert reply_sent(scoped, "123"), "白名单内的群该开窗"
+    followup.close()
+    assert reply_sent(scoped, "999") is None, "白名单外的群不该开窗"
+    assert followup.load() is None
+
+    # 群级关闭盖过白名单
+    group_off = commands.settings_from({
+        "plugins": {"followup": {"enabled": True, "groups": ["123"]}},
+        "groups": {"123": {"plugins": {"followup": False}}}})
+    followup.close()
+    assert reply_sent(group_off, "123") is None, "群级关闭优先于白名单"
+    assert followup.load() is None
+
+    # options 显式传进窗口机件
+    tuned = commands.settings_from({"plugins": {"followup": {
+        "enabled": True, "options": {"max_messages": 3, "idle_seconds": 60}}}})
+    followup.close()
+    state = reply_sent(tuned, "123")
+    assert state["budget"] == 3 and state["idle_seconds"] == 60, state
+    followup.close()
+    print("  ok  reply_sent 三态门控 + options 透传（issue #4 PD2a）")
+
+
+def check_disable_no_wake():
+    """停用即降级：窗口开着也不唤醒、不关窗（本节点唯一的行为变化）。"""
+    import commands
+    import plugins
+
+    followup.close()
+    state = followup.open(700, max_messages=5, idle_seconds=600,
+                          not_before=time.time() - 1)
+    append([(701, {"sender": "群友", "content": "停用期间说的话",
+                   "timestamp": 1792500500000}, time.time())])
+
+    off = commands.settings_from({"plugins": {"followup": {"enabled": False}}})
+    scan = plugins.emit("wake_scan", {"settings": off})
+    assert scan is None, f"停用不该唤醒：{scan}"
+    assert followup.load() == state, "停用只该不唤醒，不该顺手关窗"
+
+    # 启用且真有新消息：唤醒，报告由插件给
+    on = commands.settings_from({})
+    scan = plugins.emit("wake_scan", {"settings": on})
+    assert scan and scan.get("woke"), scan
+    assert [r["id"] for r in scan["woke"]] == [701], scan["woke"]
+    assert "群里还在聊" in scan["report"], scan["report"]
+
+    # 过期窗口：启用态下顺手关掉并报告
+    followup.close()
+    stale = followup.open(702, max_messages=5, idle_seconds=600,
+                          not_before=time.time() - 1)
+    stale["until"] = time.time() - 1
+    followup.save(stale)
+    scan = plugins.emit("wake_scan", {"settings": on})
+    assert scan and scan.get("closed"), scan
+    assert followup.load() is None, "过期窗口要当场收掉"
+    followup.close()
+    print("  ok  停用即不唤醒（窗口留着），启用才唤醒；过期顺手收窗（issue #4 PD2a）")
+
+
+def check_db_fallback_not_gated():
+    """DB 兜底不限门控：关了窗口也要能回 --context 里看到的闲聊。"""
+    import commands
+    import plugins
+
+    off = commands.settings_from({"plugins": {"followup": {"enabled": False}}})
+    # event_lookup / active_group 连 settings 都不看：停用态照旧回答
+    assert plugins.emit("event_lookup", {"event_id": 6, "settings": off}) == (GROUP, "776")
+    assert plugins.emit("event_lookup", {"event_id": 9999, "settings": off}) is None
+    assert plugins.emit("active_group", {"settings": off}) == GROUP
+    # commands 注册表同一条路，答案一样
+    assert commands.PLUGINS.emit("event_lookup", {"event_id": 6}) == (GROUP, "776")
+    assert commands.PLUGINS.emit("active_group") == GROUP
+    print("  ok  event_lookup / active_group 不受门控（回复链路 DB 兜底）")
+
+
+def check_window_status():
+    """window_status 过门控：插件行说停用而追问行说进行中是自相矛盾。"""
+    import commands
+    import plugins
+
+    on = commands.settings_from({})
+    off = commands.settings_from({"plugins": {"followup": {"enabled": False}}})
+    followup.close()
+    assert followup.status_text() is None, "没开窗时没有文案"
+    assert plugins.emit("window_status", {"settings": on}) is None
+
+    followup.open(5, max_messages=4, idle_seconds=600)
+    text = plugins.emit("window_status", {"settings": on})
+    assert text and "进行中" in text and "还可跟 4 条" in text, text
+    assert plugins.emit("window_status", {"settings": off}) is None, "停用不该报进行中"
+    assert commands.PLUGINS.emit("window_status", {"settings": off}) is None
+    followup.close()
+    print("  ok  window_status 过三态门控，文案与 up.py 追问行同源")
+
+
+def check_legacy_section():
+    """旧版顶层 followup 段逐字段等效（Plugin.legacy_section，PD2a）。"""
+    import commands
+
+    legacy = commands.settings_from({"followup": {
+        "enabled": True, "max_messages": 5, "idle_seconds": 60}})
+    new = commands.settings_from({"plugins": {"followup": {
+        "enabled": True, "options": {"max_messages": 5, "idle_seconds": 60}}}})
+    assert legacy["plugins"]["followup"] == new["plugins"]["followup"], (
+        f"{legacy['plugins']['followup']} != {new['plugins']['followup']}")
+    # 顶层段不算 plugins_legacy：那个列表的 --status 提示写死了 slash_commands.<名字>
+    assert legacy["plugins_legacy"] == [], legacy["plugins_legacy"]
+    # 停用也认；没配的键用机件默认
+    off = commands.settings_from({"followup": {"enabled": False}})
+    assert off["plugins"]["followup"]["enabled"] is False, off["plugins"]["followup"]
+    assert off["plugins"]["followup"]["options"] == {}, off["plugins"]["followup"]
+    print("  ok  顶层 followup 旧段逐字段等效，不计入 plugins_legacy（issue #4 PD2a）")
+
+
+def check_two_dispatch_paths():
+    """CLI 的 plugins.emit 与 commands 注册表的 emit 是同一个 PLUGIN 对象。"""
+    import commands
+    import plugins
+
+    follow = commands.PLUGINS.get("followup")
+    assert follow is not None, "followup 没注册进 commands 注册表"
+    assert follow.hooks.on_event is not None, "followup 必须挂 on_event"
+    assert plugins._load_followup() is follow, "两条派发路必须是同一个对象"
+    for name, loader in plugins.EVENT_LOADERS:
+        assert (name, loader) in plugins.LOADERS, f"{name} 只在 EVENT_LOADERS，没静态注册"
+    # 注册表路的 reply_sent 同样过门控（不只是 CLI 路）
+    off = commands.settings_from({"plugins": {"followup": {"enabled": False}}})
+    followup.close()
+    assert commands.PLUGINS.emit("reply_sent", {
+        "settings": off, "group_id": "123", "event_id": 5}) is None
+    assert followup.load() is None, "注册表路停用也不该开窗"
+    followup.close()
+    print("  ok  plugins.emit 与注册表 emit 同源，EVENT_LOADERS ⊆ LOADERS")
+
+
 def main():
     build()
     print("追问窗口回归：")
@@ -364,6 +540,13 @@ def main():
     # 否则会被别的用例当成接话捞进去。
     check_budget_report()
     check_watch_budget_wake()
+    # PD2a 用例追加 id 700+ 的新消息，排在 watch 子进程测试之后
+    check_plugin_gating()
+    check_disable_no_wake()
+    check_db_fallback_not_gated()
+    check_window_status()
+    check_legacy_section()
+    check_two_dispatch_paths()
     print("PASS")
     return 0
 

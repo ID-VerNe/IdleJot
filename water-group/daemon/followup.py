@@ -45,12 +45,20 @@ DB = Path(os.environ.get("IDLEJOT_WG_DB") or os.environ.get("TULPA_WG_DB", data_
 CONFIG = ROOT / "water-group" / "config.json"
 WINDOW = STATE / "wg_followup.json"
 
-# 跟不跟、跟多少、跟多久，都可以在 config.json 的 followup 段里改。
-DEFAULTS = {"enabled": True, "max_messages": 10, "idle_seconds": 180}
+# 跟多少、跟多久，都可以在 config.json 里改：旧键是顶层 followup 段，新键是
+# plugins.followup.options（插件经 legacy_section 平铺读旧段，见
+# commands._plugins_from）。**跟不跟（三态开关）归插件**，不归这个模块——
+# 开关在 plugins/base.py 的 Plugin.enabled，本文件只负责窗口机件。
+DEFAULTS = {"max_messages": 10, "idle_seconds": 180}
 
 
 def settings():
-    """Config 的 followup 段，缺项用代码默认值补齐。"""
+    """Config 的 followup 段，缺项用代码默认值补齐。
+
+    只服务**不经过插件**的直接调用方：``open()`` 的无参默认值、``--show``
+    一类调试路径。运行期开窗参数由插件从归一后的 options 显式传进来
+    （issue #4 PD2a），不走这个读者。
+    """
     data = dict(DEFAULTS)
     try:
         cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
@@ -61,10 +69,6 @@ def settings():
     except (OSError, ValueError):
         pass
     return data
-
-
-def enabled():
-    return bool(settings().get("enabled", True))
 
 
 def load():
@@ -232,8 +236,9 @@ def consume(window, rows):
     """
     if not rows:
         return []
-    # 延迟导入：up.report() 会 import followup，顶层互导会让 `python up.py --status`
-    # 把 up 二次加载成 `__main__` 和 `up` 两份。
+    # 延迟导入：followup 现在由 followup_plugin 在插件注册期加载（commands
+    # import 期），而那条链可能从 `python up.py --status` 起步——顶层互导会把
+    # up 二次加载成 `__main__` 和 `up` 两份。
     import up  # noqa: PLC0415
 
     woke = [r for r in rows
@@ -268,6 +273,22 @@ def wake_report(window, batch):
         return f"[追问] 群里还在聊：本批 {int(batch)} 条，窗口到此为止（额度用完）"
     return (f"[追问] 群里还在聊：额度还剩 {budget} 条，"
             f"静默 {window.get('idle_seconds')}s 后收回")
+
+
+def status_text():
+    """``up.py --status`` 追问行的窗口部分；没开窗或已过期返回 None。
+
+    不过三态门控——那是插件的事（``window_status`` 事件先问开关），这里只
+    回答窗口本身的状态。``--show`` 有自己的格式，不复用这一句。
+    """
+    window = load()
+    if not window or stale(window):
+        return None
+    until = window.get("until") or 0
+    left = wg_clock.seconds_left(until)
+    left_text = f"，还剩 {left}s" if left is not None else ""
+    return (f"进行中（回复后还可跟 {window.get('budget')} 条，"
+            f"静默至 {wg_clock.clock(until)}{left_text}）")
 
 
 def _group_of(payload):

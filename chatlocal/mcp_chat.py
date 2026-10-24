@@ -477,10 +477,10 @@ class MCPChat:
                     if value not in ('','0') and len(details)<8:details.append(dict(type='reply',id=value))
                     elif value not in ('','0'):segments[-1]['state']='detail_limit'
                 elif kind=='forward' and len(details)<8:
-                    from .mcp_chat_details import forward_nodes, sanitize_nodes
+                    from .mcp_chat_details import MAX_NODES, forward_nodes, sanitize_nodes
                     ref=dict(type='forward',id=str(data.get('id',''))[:200])
                     inline=forward_nodes(data)
-                    if inline is not None:ref.update(nodes=sanitize_nodes(inline),truncated=len(inline)>50)
+                    if inline is not None:ref.update(nodes=sanitize_nodes(inline),truncated=len(inline)>MAX_NODES)
                     parts.append('[合并转发]');segments.append(dict(type='forward',forward_index=len(details)))
                     details.append(ref)
                 elif kind in ('image','mface') and grant['scope'].get('chat_images') and len(media)<8:

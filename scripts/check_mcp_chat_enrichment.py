@@ -21,6 +21,7 @@ from check_fixture_support import isolated_env
 from check_mcp_reactions import ReactionBot, Events, eventually, ROOT
 from chatlocal.mcp_routes import install_mcp_routes
 from chatlocal.store import Store
+from chatlocal.mcp_chat_details import MAX_NODES
 from chatlocal.mcp_chat_local_media import read_path
 from chatlocal.onebot import Client
 from fastapi import FastAPI
@@ -41,7 +42,8 @@ async def wire(service,token,sid,eid):
                 assert not out.isError and out.structuredContent['event_id']==eid
                 assert len(out.structuredContent['nodes'])==25 and not out.structuredContent['has_more']
                 schema=next(t for t in (await client.list_tools()).tools if t.name=='read_chat_forward').inputSchema
-                assert schema['properties']['limit']['default']==schema['properties']['limit']['maximum']==50
+                # 对外暴露的翻页上限必须等于节点常量（issue #8 分节 PD）。
+                assert schema['properties']['limit']['default']==schema['properties']['limit']['maximum']==MAX_NODES
                 small=await client.call_tool('read_chat_forward',dict(session_id=sid,event_id=eid,limit=20))
                 assert len(small.structuredContent['nodes'])==20 and small.structuredContent['has_more']
 
@@ -530,7 +532,7 @@ class DetailBot(ReactionBot):
 
 
 def main():
-    from chatlocal.mcp_chat_details import MAX_NODES, forward_nodes, sanitize_nodes,MAX_TEXT
+    from chatlocal.mcp_chat_details import forward_nodes, sanitize_nodes,MAX_TEXT
     from chatlocal.mcp_chat_materials import incomplete
     # issue #8: NapCat 的 forward 段键名是 content（parseMultMsg 打开后才填），
     # 节点自己的 message_id 必须保留，否则转发内单条无法再 get_msg。
@@ -544,11 +546,20 @@ def main():
     for count in (MAX_NODES,MAX_NODES+1):
         nodes=sanitize_nodes([dict(message=[text('x')]) for _ in range(count)])
         assert len(nodes)==MAX_NODES and incomplete(dict(nodes=nodes))==(count>MAX_NODES)
+    # issue #8 PD: 对外 schema 的翻页上限必须跟着 MAX_NODES 走，否则显式重读被压成两页，
+    # 且 render_forward 生成的 next_call(limit=MAX_NODES) 会被自己的 schema 拒绝。
+    from chatlocal.agent_tools import tool as tool_schema
+    from chatlocal.mcp_chat import schemas as chat_schemas
+    page=next(t for t in chat_schemas(tool_schema) if t['name']=='read_chat_forward')['parameters']['properties']
+    assert page['offset']['maximum']==MAX_NODES,page['offset']
+    assert page['limit']['maximum']==MAX_NODES and page['limit']['default']==MAX_NODES,page['limit']
     for count in (MAX_TEXT,MAX_TEXT+1):
         nodes=sanitize_nodes([dict(message=[text('x'*count)])])
         assert incomplete(dict(nodes=nodes))==(count>MAX_TEXT)
-    nested=sanitize_nodes([dict(message=[dict(type='forward',data={'messages':[dict(message=[text('x')]) for _ in range(49)]})])])
-    assert not incomplete(dict(nodes=nested)),'exact nested node budget was incorrectly marked incomplete'
+    # 外层 1 + 内层 MAX_NODES-1 正好用完预算，必须不算超限；内层再多一条才超。
+    nested=lambda inner:sanitize_nodes([dict(message=[dict(type='forward',data={'messages':[dict(message=[text('x')]) for _ in range(inner)]})])])
+    assert not incomplete(dict(nodes=nested(MAX_NODES-1))),'exact nested node budget was incorrectly marked incomplete'
+    assert incomplete(dict(nodes=nested(MAX_NODES))),'nested overrun was not marked incomplete'
     # Windows OpenSSL needs its first initialization before the fixture clears env.
     ssl.create_default_context()
     events=Events();DetailBot.sent=[];DetailBot.writes=[];DetailBot.history={};DetailBot.intercept=None

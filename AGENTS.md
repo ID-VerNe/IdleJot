@@ -53,7 +53,7 @@
 
 ### 0.1 停栈（与启动对称）
 
-三个入口同一个实现（`water-group/daemon/up.py:stop_stack()`），随便用哪个：
+三个入口同一个实现（`water-group/daemon/wg_up_stack.py:stop_stack()`，issue #37 前在 `up.py`），随便用哪个：
 
 ```bash
 # 最省事：双击 water-group/stop-bot.pyw（停止无注入风险，不必经 explorer）
@@ -72,7 +72,7 @@
 | `water-group/config.json`（群列表、各类开关、`plugins.<名字>.enabled`…） | `commands.py` **按消息懒重载**（`RELAY_SECONDS=30`，判断点在下一条消息 `dispatch` 之前），**不用重启** |
 | `commands.py` / `sixty.py` / `miyoushe.py` / `qr_login.py` 等 handler 代码 | `.\reload.ps1`：按 AST 闭包只重启 `commands`（`HANDLERS` 是 import 期合成的，进程级重启才会换模块） |
 | `memory_engine.py` 及四个分层模块 | `.\reload.ps1`：闭包会命中 `app` / `commands` / `watchdog`，自动重启对应子进程 |
-| `up.py` / `bootstrap.py` / `reload.py` / `winconsole.py` / `watchdog.py` / `supervisor.py` / `start-bot.pyw`（启动链、控制台、NapCat 注入） | **必须整栈重启**：`.\stop.ps1`（或 `up.py --stop`）后从 explorer 启动 `start-bot.pyw`；`reload.ps1` 会把 guard-owned 代码拒绝掉，普通重载不会替换已运行的 `up.py` 和它拉起的 NapCat（#4 的旧乱码控制台窗口就是这么留下的） |
+| `up.py` / `wg_up_probe.py` / `wg_up_wake.py` / `wg_up_stack.py` / `bootstrap.py` / `reload.py` / `winconsole.py` / `watchdog.py` / `supervisor.py` / `start-bot.pyw`（启动链、控制台、NapCat 注入） | **必须整栈重启**：`.\stop.ps1`（或 `up.py --stop`）后从 explorer 启动 `start-bot.pyw`；`reload.ps1` 会把 guard-owned 代码拒绝掉，普通重载不会替换已运行的 `up.py` 和它拉起的 NapCat（#4 的旧乱码控制台窗口就是这么留下的） |
 
 > 启动链没有热重载：旧 `up.py` 会一直用它启动时 import 的模块，NapCat 也是它的子进程。判断是否旧进程，看 `up.py --status` 里的守护 pid 对应进程的启动时间是否早于 `up.py` 的 mtime；是就整栈重启。
 
@@ -383,6 +383,12 @@ uv run python scripts/check_sender_name.py
 #     （计数重置，不许永久停机）；halt 期间写 state/napcat_halt.json
 #     （kind/fails/first_fail_at/halted_at/reason），恢复后立即清除
 uv run python scripts/check_watchdog_halt.py
+
+# 31. up.py 门面完整性（issue #37）：wg_up_probe/wake/stack 里每个公开定义都必须
+#     能从 `up` 拿到、且是同一对象（否则补丁打门面等于打空）；三模块之间不许同名
+#     定义；up.py 自己只许定义 report/main/strip_proxy/python_exe；底层模块不得
+#     反向 import 门面或上层
+uv run python scripts/check_up_facade.py
 ```
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

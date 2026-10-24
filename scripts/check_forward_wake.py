@@ -18,6 +18,7 @@ import check_fixture_support  # noqa: F401,E402  (先钉数据根，见 issue #7
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
 import up  # noqa: E402
+import wg_up_wake  # noqa: E402  (issue #37 PC: config 的真实调用点；up.config 只是门面引用)
 
 SELF = "999"
 NAME = "小助手"
@@ -76,7 +77,7 @@ def cases():
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    up.config = lambda: CONFIG
+    wg_up_wake.config = lambda: CONFIG
     bad = 0
     items = cases()
     for name, ev, want in items:

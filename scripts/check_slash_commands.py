@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
 import commands  # noqa: E402
 import up  # noqa: E402  (唤醒侧的 `#` 闸门，issue #70)
+import wg_up_wake  # noqa: E402  (issue #37 PC: config 的真实调用点；up.config 只是门面引用)
 
 # 守护的 log() 写死运维日志；检查进程不该往里混行，整体改道临时目录。
 commands.LOG = Path(tempfile.gettempdir()) / "wg_commands_check.log"
@@ -85,7 +86,7 @@ check("command_key: 空前缀串 → None", commands.command_key("", "#") is Non
 check("command_key: 自定义前缀 '!' 生效", commands.command_key("!ping", "!") == ("ping", ""))
 
 # ---- 与唤醒闸门一致：command_key 是唯一契约（issue #70） ----------------------
-_real_config = up.config
+_real_config = wg_up_wake.config
 PREFIX_CASES = [
     ({}, "#"),
     ({"slash_commands": {}}, "#"),
@@ -96,22 +97,22 @@ PREFIX_CASES = [
 ]
 try:
     for cfg, want in PREFIX_CASES:
-        up.config = lambda cfg=cfg: cfg
+        wg_up_wake.config = lambda cfg=cfg: cfg
         check(f"command_prefix: {cfg} → {want!r}", up.command_prefix() == want)
         check(f"command_prefix 与 settings_from 一致: {cfg}",
               up.command_prefix() == commands.settings_from(cfg)["prefix"])
     TEXTS = ["#ping", "#帮助 体力", "#  体力", "#", "#   ", " #ping",
              "C#", "第#3名", "https://x/#frag", "!ping", ""]
-    up.config = lambda: {"slash_commands": {"prefix": "#"}}
+    wg_up_wake.config = lambda: {"slash_commands": {"prefix": "#"}}
     for text in TEXTS:
         check(f"闸门一致: {text!r}",
               up.is_command(text) == (commands.command_key(text, "#") is not None))
-    up.config = lambda: {"slash_commands": {"prefix": "!"}}
+    wg_up_wake.config = lambda: {"slash_commands": {"prefix": "!"}}
     for text in ("!ping", "#ping", "!!ping"):
         check(f"闸门一致(prefix=!): {text!r}",
               up.is_command(text) == (commands.command_key(text, "!") is not None))
 finally:
-    up.config = _real_config
+    wg_up_wake.config = _real_config
 
 # ---- plain_text：两种事件形状 -------------------------------------------------
 check("plain_text: 数组段拼接",

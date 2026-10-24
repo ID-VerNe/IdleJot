@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
-import up  # noqa: E402
+import wg_up_wake  # noqa: E402  (issue #37 PC: 账本判定的真实调用点)
 
 START = 1000.0
 
@@ -39,10 +39,10 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
-    up.ledger_started = lambda: START  # 固定账本起点，不吃真实文件
+    wg_up_wake.ledger_started = lambda: START  # 固定账本起点，不吃真实文件
     bad = 0
     for name, event_id, ledger, want in CASES:
-        got = up.replied_after(event_id, rows(), ledger)
+        got = wg_up_wake.replied_after(event_id, rows(), ledger)
         if got == want:
             print(f"✓ {name}")
         else:

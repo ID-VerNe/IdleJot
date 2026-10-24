@@ -50,6 +50,7 @@ sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
 import followup  # noqa: E402
 import up  # noqa: E402  (`#` 指令闸门与 wake_reason 同源，issue #70)
+import wg_up_wake  # noqa: E402  (issue #37 PC: config 的真实调用点；up.config 只是门面引用)
 
 # 5 是被回复的那条；6/9 是群友接话；7 是机器人自己；8 是系统提示；
 # 10 属于另一个会话；11 是稍后机器人自己补的一句。第三个字段是入库时刻 at。
@@ -253,8 +254,8 @@ def check_pagination():
 
 def check_command_gate():
     """issue #70：`#` 指令不算接话，但游标要越过它；前缀读配置。"""
-    real = up.config
-    up.config = lambda: {"slash_commands": {"prefix": "#"},
+    real = wg_up_wake.config
+    wg_up_wake.config = lambda: {"slash_commands": {"prefix": "#"},
                          "self_account": "999", "self_names": ["小鲸鱼"]}
     try:
         # 一批里混排：两条指令 + 一条真接话
@@ -304,7 +305,7 @@ def check_command_gate():
                                "segments": [{"type": "at", "qq": "999"}]}) == "at"
 
         # 前缀是配置项：换成 ! 之后 #ping 是闲聊、!ping 才是指令
-        up.config = lambda: {"slash_commands": {"prefix": "!"},
+        wg_up_wake.config = lambda: {"slash_commands": {"prefix": "!"},
                              "self_account": "999", "self_names": ["小鲸鱼"]}
         append([
             (206, {"sender": "甲", "content": "#ping",
@@ -318,7 +319,7 @@ def check_command_gate():
         assert state["after_id"] == 207, state
         assert followup.since(207, SID) == []
     finally:
-        up.config = real
+        wg_up_wake.config = real
     print("  ok  `#` 指令不占额度、不续期，但推进游标；前缀读配置（issue #70）")
 
 

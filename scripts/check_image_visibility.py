@@ -46,6 +46,7 @@ import followup  # noqa: E402
 import up  # noqa: E402
 import watch  # noqa: E402
 import wg_images  # noqa: E402
+import wg_up_wake  # noqa: E402  (issue #37 PC: config 的真实调用点；up.config 只是门面引用)
 
 # 事件 id 段：9001+ 与真实数据不撞车；每条用例一个 id，索引行按需写入。
 EID_SEG = 9001        # 段有 image_index、无 pixels（实机 6026/5274 的形状）
@@ -186,8 +187,8 @@ def 唤醒行端到端带图片提示():
         "timestamp": NOW_MS, "is_self": False,
         "segments": [{"type": "image", "image_index": 0}, {"type": "at", "qq": SELF}],
     }, ensure_ascii=False) + "\n", encoding="utf-8")
-    real = up.config
-    up.config = lambda: {"self_account": SELF, "self_names": ["小鲸鱼"],
+    real = wg_up_wake.config
+    wg_up_wake.config = lambda: {"self_account": SELF, "self_names": ["小鲸鱼"],
                          "slash_commands": {"prefix": "#"}}
     argv = sys.argv
     sys.argv = ["watch.py", "--timeout", "2", "--replay"]
@@ -197,7 +198,7 @@ def 唤醒行端到端带图片提示():
             code = watch.main()
     finally:
         sys.argv = argv
-        up.config = real
+        wg_up_wake.config = real
     text = buf.getvalue()
     return (code == 0 and "WAKE" in text
             and f"look.py --event {EID_WAKE} --index 0" in text)

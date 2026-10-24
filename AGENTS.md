@@ -330,6 +330,11 @@ uv run python scripts/check_now_clock.py
 #     exit 2 且不写库；--through 只在写入成功后推进游标；--apply 带 group_id 追加
 #     只写覆盖行（#5 边界）；未知字段 fail-closed；--dry-run 零写入
 uv run python scripts/check_dossier_ingest.py
+
+# 24. 私有目录巡检（issue #6）：tmp/ 顶层禁 .py/.md/.ps1（它是 TEMP 的重定向目标）；
+#     bin/ 与 archive/ 的脚本必须在对应 INDEX.md 登记；drafts/ 非空只警告；
+#     archive/ 条目缩水只报告。无数据根时自动跑 A/B 自检，不空转
+uv run python scripts/check_tmp_hygiene.py
 ```
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

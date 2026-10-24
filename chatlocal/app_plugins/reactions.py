@@ -90,7 +90,7 @@ class ChatReactions(AppPlugin):
         self.access, self.actions = chat.access, chat.actions
         self.lock = threading.RLock()  # Never holds the chat/wait or media locks.
         self.epoch = uuid.uuid4().hex
-        self.policy_path = Path(self.access.path).parent / 'mcp-reactions.json'
+        self.policy_path = Path(self.access.path).parent / spec.REACTIONS['policy']
         self.log = logging.getLogger('tulpa.mcp.reactions')
         with self.access.connect() as db:
             db.executescript('''

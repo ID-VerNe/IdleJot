@@ -1,6 +1,6 @@
 # 闲笔 (IdleJot) AI Agent 协作与开发指南 (AGENTS.md)
 
-欢迎使用 闲笔 (IdleJot) 仓库（衍生自 Tulpa 水群分支）。本指南是专为进入本项目的 AI Agent（以及协同开发者）设计的操作手册，旨在说明项目架构、开发规范、核心子系统设计以及强制性安全门禁。
+欢迎使用 闲笔 (IdleJot) 仓库。本指南是专为进入本项目的 AI Agent（以及协同开发者）设计的操作手册，旨在说明项目架构、开发规范、核心子系统设计以及强制性安全门禁。
 
 面向使用者的教程在 `doc/`（水群协议与各 MCP 工具的验证记录、安全说明、两轮 DRY/SRP 审计报告）；**所有 Agent 的仓库改动流程（先发 issue → plan 追评 → worktree → PR → 对账）见 §2.7，操作指引在 `doc/ISSUE_GUIDE.md`（怎么发 issue）与 `doc/PR_GUIDE.md`（怎么开 PR）**；水群子系统的 Agent 侧规则另有 `.agents/rules/water_group.md`（通用骨架）与 `.agents/skills/water-group/SKILL.md`，**私有 SOP（群号、群友花名/QQ/地域、人设卡、数据源速查、排查实例）不在仓库里**，在 `~/.water-group/rules/water_group.md` 与 `~/.water-group/personas/`。本文件面向**仓库内的开发与维护工作**。
 
@@ -95,7 +95,7 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
 
 ## 1. 项目定位与核心架构
 
-本项目（闲笔 IdleJot）是 Tulpa 的 water-group-only slim 分支演化：把上游的桌面产品壳（.NET 桌面壳、Web 前端、读微信、Linux 终端、安装包）整个砍掉，只留水群这一条路。后端入口是单一进程 `server_wg.py`（FastAPI），监听 OneBot 11 实时事件，通过 Model Context Protocol (MCP) 向外部 Agent 暴露工具。**Windows only**。
+本项目（闲笔 IdleJot）只做一件事：让 Agent 常驻 QQ 群。代码库的早期骨架来自 Tulpa（MIT），当前仓库已按水群场景重构，桌面产品壳（.NET 桌面壳、Web 前端、读微信、Linux 终端、安装包）不在本项目内。后端入口是单一进程 `server_wg.py`（FastAPI），监听 OneBot 11 实时事件，通过 Model Context Protocol (MCP) 向外部 Agent 暴露工具。**Windows only**。
 
 ```
         ┌──────────────────────────────────────────────────┐
@@ -127,7 +127,7 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
 | `water_group/` | 根目录标准 Python 模块兼容桥接 shim（连字符目录不可直接 import）。**它是唯一知道连字符目录存在的 water-group 文件**：通过扩展自身 `__path__` 使每个文件以 `water_group.<name>` 恰好可达一次；子模块经 PEP 562 懒加载解析。**严禁把连字符目录加入 `sys.path`**——同一文件以两个名字加载会拆分状态（记忆引擎单例曾因此损坏） |
 | `scripts/` | 检查与辅助脚本，以及共享基建：`fixture_server.py`（假服务器样板基类）、`check_fixture_support.py`（隔离环境/临时目录/网络护栏）、`incremental_common.py`（增量游标指纹）、`setup-napcat.ps1`（NapCat Shell 拉取器，pinned + sha256 校验） |
 | `doc/` | 水群与 MCP 协议文档：`MCP_CHAT*`、`MCP_REACTIONS*`、`GROUP_MANAGEMENT`、`REPLY_TIMING`、`WATER_GROUP_ONLY_PLAN`、`SECURITY`、`THIRD_PARTY`，及两轮 DRY/SRP 审计报告 |
-| `tools/` | NapCat Shell（OneBot 11 适配器，`setup-napcat.ps1` 拉取，受 `.gitignore` 保护）。上游的 qq-reader / wechat-reader / snowluma 已随桌面壳删除 |
+| `tools/` | NapCat Shell（OneBot 11 适配器，`setup-napcat.ps1` 拉取，受 `.gitignore` 保护）。qq-reader / wechat-reader / snowluma 等桌面壳组件不在本项目内 |
 
 **运行时/本地数据（仓库内只剩配置，数据全部在 `~/.water-group/`）**：本地数据根 `~/.water-group/`（`state/` 守护状态、`logs/` 全部日志、`data/` SQLite 库与媒体缓存、`tmp/` 临时目录；`WATER_GROUP_HOME` 可改根，`IDLEJOT_WG_STATE` / `TULPA_WG_STATE` 可改 state 目录，`IDLEJOT_WG_DB` / `IDLEJOT_WG_MEMORY_DB` 可钉单个库给测试用）；仓库内受 `.gitignore` 保护的仅剩 `imports/`、`reports/`、`build/`、`.env`、`.cache/`、`water-group/config.json`、`tools/`、以及部署者自建的私有人设卡。路径单一事实来源：`water-group/daemon/wg_paths.py`；`chatlocal/config.py` 与 `water-group/memory_engine.py` 因不能 flat import 而按同规则复述一份，改规则时三处一起改，`scripts/check_path_hygiene.py` 会拦住漏改。
 
@@ -339,7 +339,7 @@ uv run python scripts/check_now_clock.py
 uv run python scripts/check_mcp.py
 ```
 
-完整 25 门禁清单与顺序见 `doc/WATER_GROUP_ONLY_PLAN.md` §8。`scripts/` 已按 issue #22 清掉上游桌面壳遗留的死脚本（模块级 import 无法解析者，含传递闭包共 62 个），现存的每个脚本自身 import 都能解析。新增脚本必须是活门禁：要么进 §5.1/§5.2，要么进 CI 清单，否则按死代码处理。
+完整 25 门禁清单与顺序见 `doc/WATER_GROUP_ONLY_PLAN.md` §8。`scripts/` 已按 issue #22 清掉桌面壳遗留的死脚本（模块级 import 无法解析者，含传递闭包共 62 个），现存的每个脚本自身 import 都能解析。新增脚本必须是活门禁：要么进 §5.1/§5.2，要么进 CI 清单，否则按死代码处理。
 
 **红门禁归因纪律**：失败时先用 git worktree pristine HEAD 对照——若同族失败则为既有环境问题（沙箱 WAL 竞态等，见审计报告第 3 节），记录在案，不要盲目"修复"。
 

@@ -1,25 +1,24 @@
 # 闲笔 (IdleJot)
 
 **把 AI Agent 塞进 QQ 群，让它当个群友，而不是当客服。**
+
 > *“闲笔勾勒群友百态，静水深流长驻人间。”*
 
-**IdleJot (闲笔)** 衍生自 [Tulpa](https://github.com/fumingyang2004/Tulpa) 的 slim 分支。上游做的是本地聊天资料汇聚 + MCP 桥接的桌面产品——导入历史、读微信、Linux 终端版、桌面安装包那一整套。本项目把那套桌面产品整个砍掉，专注精简为常驻水群一条路，打磨到能长期跑：
-
-> Agent 常驻一个 QQ 群，被叫到就回，没被叫就潜水看别人聊，顺手把群友的脾气记下来。
+Agent 常驻一个 QQ 群：被叫到就回，没被叫就潜水看别人聊，顺手把群友的脾气记下来。回复是 Agent 读上下文之后现场写的，不是关键词表里查出来的固定话术；人格来自可热切换的人格卡，记忆存在本地 SQLite 里。
 
 默认触发模式是 `mention_only`：只在被 **@**、被**引用**、或者正文里出现它的名字时才醒。群友不会每条消息都接话，这里也一样。
 
-## 和上游的区别
+## 和常见 QQ 机器人的区别
 
-| | 上游 Tulpa | 闲笔 (IdleJot) |
+| | 常见 QQ 机器人 | 闲笔 (IdleJot) |
 | --- | --- | --- |
-| 定位 | 聊天资料汇聚 + MCP 中间件 | 让 Agent 长期驻留 QQ 群 |
-| 入口 | 桌面 GUI，点选配置 | 一个常驻进程栈，Agent 用命令行读事件、写回复 |
-| 谁在说话 | 你在 Tulpa 里提问 | Agent 以固定人格在群里发言 |
-| 历史数据 | 需要先导入 | 不需要，直接吃 OneBot 实时事件 |
-| 主要难点 | 授权范围与数据完整性 | 不崩、不失聪、不重复回、不说客服腔 |
+| 谁在说话 | 关键词 / 指令表驱动的固定回复 | Agent 读上下文现场写，带人格卡 |
+| 触发方式 | 指令前缀 | @ / 引用 / 叫名字，按群配置 |
+| 记忆 | 无，或全局一个库 | 群友画像按群沉淀，闲时自动整理 |
+| 接入方式 | 插件 / 框架 | MCP：Agent 用命令行读事件、写回复 |
+| 部署 | 面板 + 插件 | 一个常驻进程栈，双击启动 |
 
-`water-group/` 整个子系统是本分支新增的，上游没有。它建立在两个上游组件之上：MCP 后端（`chatlocal/`）和 OneBot 11 网关。人设卡体系与群友记忆引擎由本分支实现。上游的桌面产品壳（GUI、导入、读微信、Linux 终端、安装包）已在本分支删除，不再随仓库分发。
+整个 `water-group/` 子系统是本项目的核心：常驻栈负责收消息与保活，Agent 只负责读事件、写回复。人设卡体系与群友记忆引擎都在这里。
 
 ## 它现在能做什么
 
@@ -32,7 +31,7 @@
 - **人格卡热切换**。仓库 `water-group/personas/` 放公开模板，私有卡放 `~/.water-group/personas/`，同名私有优先；换个文件就是换个人。
 - **崩了会自己爬起来**。守护进程探的是 OneBot 的真实应答（`get_login_info`），不是端口——QQ 那种「端口还在但不应答」的假活能被识别，约 8 秒重新上线。
 
-目前只发**文字 + @ + 引用**。表情、图片、戳一戳这些还留在上游的 MCP 工具层，命令行这条路没接。
+目前只发**文字 + @ + 引用**。表情、图片、戳一戳这些能力在 MCP 工具层有，命令行这条路没接。
 
 ## 快速开始
 
@@ -46,8 +45,8 @@
 ### 1. 装依赖
 
 ```powershell
-git clone https://github.com/<your-org>/Tulpa.git
-cd Tulpa
+git clone https://github.com/ID-VerNe/IdleJot.git
+cd IdleJot
 .\setup.ps1
 ```
 
@@ -356,13 +355,13 @@ tail -20 ~/.water-group/logs/napcat-watchdog.log  # QQ 是否被反复重注入
 - **只发文字。** 表情、图片、语音这些能力在 MCP 层，命令行这条路没接。
 - **`mention_only` 下不会主动接话。** 想让它参与闲聊，把 `trigger_mode` 改成 `natural`，噪音会一起上来。
 - **同名歧义在 `find_profile` 层没解决。** `reply.resolve_member` 会报候选，但 MCP 的 `query_member_dossier` 遇到歧义仍会静默选第一个。
-- **Windows only。** 保活逻辑是 Windows 进程模型写的，Linux 那份是上游的终端版，跟这条链无关。
+- **Windows only。** 保活、开窗抑制、控制台代码页都依赖 Windows 进程模型（taskkill / WMI / `CREATE_NO_WINDOW`），没有 Linux 版本。
 
 ## 许可与致谢
 
 本项目自有代码采用 [MIT License](LICENSE)。不是腾讯官方产品，与 QQ、微信及模型服务商没有隶属关系。
 
-- [Tulpa](https://github.com/fumingyang2004/Tulpa)：本分支的上游，MCP 后端来自这里。
+- [Tulpa](https://github.com/fumingyang2004/Tulpa)：代码库的早期骨架，MCP 后端（`chatlocal/`）源自这里，MIT。
 - [NapCat](https://github.com/NapNeko/NapCatQQ)：OneBot 11 实现，需独立安装并遵循其许可。
 - [qq-bridge](https://github.com/Derpyu520/qq-bridge)：群聊行为与提示词设计参考。
 - [QQ-agent](https://github.com/K0nd1us/QQ-agent)：表情收藏、语义笔记与候选反馈的设计参考。

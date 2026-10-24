@@ -1,11 +1,11 @@
 ---
 name: water-group
-description: QQ群聊挂机水群专家Skill。支持单群/多群并发水群，支持“全量水群”与底层硬件级“仅被@才触发唤醒”防刷屏模式。当用户提到“水群”、“挂机水群”、“开始水群”、“在群里聊会”、“只回被@的消息”、“停止水群”等时必须触发此Skill。负责通过Tulpa MCP无缝接管QQ群聊，自动执行多群发现、底层硬件门禁过滤、Planner决策与Replyer表达，支持多模态识图与去AI味拟真回复。
+description: QQ群聊挂机水群专家Skill。支持单群/多群并发水群，支持“全量水群”与底层硬件级“仅被@才触发唤醒”防刷屏模式。当用户提到“水群”、“挂机水群”、“开始水群”、“在群里聊会”、“只回被@的消息”、“停止水群”等时必须触发此Skill。负责通过闲笔 (IdleJot) MCP 无缝接管QQ群聊，自动执行多群发现、底层硬件门禁过滤、Planner决策与Replyer表达，支持多模态识图与去AI味拟真回复。
 ---
 
 # QQ 自动水群工作流 (Water Group Skill)
 
-本 Skill 专门用于驱动 Tulpa MCP 协议端，实现 Antigravity 作为主脑在单个或多个 QQ 群中自主持续水群、接话与多模态互动。支持大群底层硬件级“仅被@才触发”静默守护，彻底杜绝闲聊频繁唤醒大模型烧 Token。
+本 Skill 专门用于驱动闲笔 (IdleJot) MCP 协议端，实现 Antigravity 作为主脑在单个或多个 QQ 群中自主持续水群、接话与多模态互动。支持大群底层硬件级“仅被@才触发”静默守护，彻底杜绝闲聊频繁唤醒大模型烧 Token。
 
 > **私有化边界**：本文件只写通用流程。群号、群友 QQ/花名/地域、人设卡、数据源速查与真实排查实例
 > 全部在 `~/.water-group/` 下（`rules/water_group.md`、`personas/<人格>.md`），**动手前先读私有规则**。
@@ -56,7 +56,7 @@ description: QQ群聊挂机水群专家Skill。支持单群/多群并发水群�
 - 确认 OneBot 配置：
   - HTTP 接口：`http://127.0.0.1:43000`
   - 正向 WebSocket：`ws://127.0.0.1:43001`
-  - Access Token：需与 Tulpa 及 `config.json` 一致（如 `tulpa_token_secret_123`）。
+  - Access Token：需与闲笔 (IdleJot) 及 `config.json` 一致（如 `tulpa_token_secret_123`）。
 - 浏览器打开 NapCat WebUI（如 `http://127.0.0.1:46099`），扫描二维码登录机器人 QQ 小号。
 
 ### 2. 初始化群配置文件 (`config.json`)
@@ -280,7 +280,7 @@ description: QQ群聊挂机水群专家Skill。支持单群/多群并发水群�
 
 ### 第四步：闲时沉淀群友画像（没被 @ 的时候）
 
-群里照样在聊，`chat_inbox` 一条不落——Tulpa 先把每条消息入库，再决定要不要唤醒，所以素材一直都在，只是没人整理。
+群里照样在聊，`chat_inbox` 一条不落——闲笔先把每条消息入库，再决定要不要唤醒，所以素材一直都在，只是没人整理。
 
 ```bash
 # 该提炼了吗（exit 0 = 该，3 = 还不用）

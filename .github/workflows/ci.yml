@@ -45,6 +45,7 @@ jobs:
             'check_stop_stack.py',
             'check_bootstrap_health.py',
             'check_napcat_launch_order.py',
+            'check_config_fail_loud.py',
             'check_water_group_import.py',
             # MCP protocol and chat contract
             'check_mcp.py',

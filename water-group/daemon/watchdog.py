@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from wg_daemon import logger, write_json
+from wg_config import config_path  # noqa: E402  (config.json 路径单一规则，issue #51)
 from wg_paths import logs_dir, state_dir
 
 # The watchdog runs without a console, so any console child it spawns (powershell,
@@ -32,7 +33,9 @@ from wg_paths import logs_dir, state_dir
 import winconsole  # noqa: E402  (探针开窗抑制，一次收口)
 
 LOG = logs_dir() / "napcat-watchdog.log"
-CONFIG = ROOT / "water-group" / "config.json"
+# 与 wg_config / bootstrap 同一份路径规则：IDLEJOT_WG_CONFIG / TULPA_WG_CONFIG
+# 覆盖时探针读同一份配置，不会出现「探针读旧路径、注入读新路径」。
+CONFIG = config_path()
 # Machine-readable "the link is down" marker (issue #45): halt used to exist
 # only as a log line, so a duty agent saw "no wake-up" with no way to tell a
 # quiet group from a dead chain. up.py --status and any watcher read this.

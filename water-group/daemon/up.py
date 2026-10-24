@@ -77,6 +77,7 @@ from wg_up_wake import (  # noqa: E402,F401  (分节 PC：配置/账号/唤醒�
     app_plugins_line,
     command_prefix,
     config,
+    config_problems,
     events,
     heartbeat_age,
     heartbeat_time,
@@ -169,9 +170,16 @@ def report(exclude_pids=None, resident_pid=None):
         beat = f"{age:.0f}s 前（{at}，已卡死，supervisor 应会重启）"
     else:
         beat = f"{age:.0f}s 前（{at}，wait 周期 170s，正常）"
+    # issue #51：配置缺失曾经整条链路静默退化（注入少传账号参数只能弹二维码、
+    # token 读空让 NapCat 行误报、@ 判定永假让监听永远唤不醒人）。problems() 把
+    # 「缺什么」说出来——与 bootstrap 注入前的拒绝判定同一份实现。
+    problems = config_problems()
     listeners = listener_pids(exclude=exclude_pids)
     listener = (f"已挂 pid={','.join(listeners)}" if listeners
                 else "未挂 —— 消息照收，但没人会叫醒你")
+    if listeners and any("self_account" in p for p in problems):
+        # 一个永远唤不醒的监听比没有监听更糟：它让人以为在值守（issue #51）。
+        listener += "（⚠ self_account 不可用，@ 与关键词都判不中——这个监听唤不醒任何人，见「配置」行）"
     cmds = commands_pids(exclude=exclude_pids)
     command = (f"运行中 pid={','.join(cmds)}（# 指令直回，不过 Agent）" if cmds
                else "未运行（# 指令无自动回复）")
@@ -182,6 +190,7 @@ def report(exclude_pids=None, resident_pid=None):
     print()
     print(wg_clock.now_line())
     print(f"NapCat    : {napcat}")
+    print(f"配置      : {'；'.join(problems) if problems else 'ok（self_account / onebot_token 均在位）'}")
     print(f"后端      : {backend}  (47860 / 48777)")
     print(f"守护      : {guard}  心跳 {beat}")
     print(f"监听      : {listener}")

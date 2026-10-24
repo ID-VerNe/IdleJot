@@ -42,6 +42,15 @@ CONFIG_FILE = config_path()
 CONFIG_EXAMPLE = ROOT_DIR / "water-group" / "config.example.json"
 STATUS_FILE = state_dir() / "status.json"
 
+# 最近一次注入的启动器标识（issue #46）。命令行指纹在「多实例并存」时不可靠：
+# 实测重拉出来的主进程只有 `--disable-gpu`，没有 `-q <账号>`，所以按进程表 + 命令行
+# 判定会恒报 0，上一实例就这么活到了下一次注入。记下「这次我拉起的到底是谁」，
+# 下一轮才有得比对。
+LAUNCH_FILE = state_dir() / "napcat_launch.json"
+# 本进程最近一次真正 spawn 的启动器记录；ensure_napcat 因「已在线」提前返回时不写，
+# 这样 watchdog 日志里的 pid 一定对得上本次注入，而不是上一轮的残留。
+LAST_LAUNCH = None
+
 def is_port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.8) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -297,7 +306,8 @@ def launch_napcat_direct(qq_exe, account=""):
     if account:
         cmd.append(account)
     cmd.extend(qq_extra_args())
-    start_process_detached(cmd, cwd=str(NAPCAT_DIR), log_name="napcat.log", env=env)
+    proc = start_process_detached(cmd, cwd=str(NAPCAT_DIR), log_name="napcat.log", env=env)
+    return _record_launch(proc, account, "direct")
 
 
 def qq_extra_args():
@@ -329,8 +339,155 @@ def qq_extra_args():
     return [str(a) for a in args if str(a).strip()]
 
 
+def _record_launch(proc, account, mode):
+    """记下本次 spawn 的启动器，供下一轮按身份找出「这次拉起的实例」（issue #46）。
+
+    `proc.pid` 是 NapCatWinBootMain（bat 降级时是 cmd.exe）。QQ 主进程是它的
+    子进程，父进程先退时 WMI 里的 ParentProcessId 仍是这个 pid，所以这份记录
+    就是钥匙。pid 缺失（门禁替身、spawn 抛错）时不写：没有记录好过一份对不上
+    号的记录。
+    """
+    global LAST_LAUNCH
+
+    pid = getattr(proc, "pid", None)
+    if not pid:
+        return None
+    record = {
+        "launcher_pid": int(pid),
+        "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "started_epoch": int(time.time()),
+        "account": account or "",
+        "mode": mode,
+    }
+    try:
+        LAUNCH_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = LAUNCH_FILE.with_name(LAUNCH_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, LAUNCH_FILE)
+    except OSError:
+        pass
+    LAST_LAUNCH = record
+    return record
+
+
+def last_launch():
+    """本进程最近一次真正 spawn 的启动器记录；None = 这一轮没有注入。
+
+    `ensure_napcat()` 因「已在线」提前返回时不写记录，日志里的 pid 因此一定是
+    本次注入的，而不是上一轮留在 state/ 里的残影。
+    """
+    return LAST_LAUNCH
+
+
+def _qq_processes(launcher_pid=None):
+    """一次 WMI 查询取出全部 QQ.exe（以及记录里的启动器本身）。
+
+    返回 `[{pid, parent, name, created, command_line}]`；`created` 是进程创建
+    时刻（epoch）。它和父 pid 一起用，挡的是 pid 回收：只有创建时间不早于本次
+    注入的 QQ 才算本次实例。查询失败回空列表，调用方据此说「没找到」，不猜。
+    """
+    filt = "Name='QQ.exe'" if launcher_pid is None else f"Name='QQ.exe' or ProcessId={launcher_pid}"
+    script = (
+        f"Get-CimInstance Win32_Process -Filter \"{filt}\" | "
+        "ForEach-Object { \"$($_.ProcessId)`t$($_.ParentProcessId)`t"
+        "$($_.CreationDate.ToString('yyyy-MM-dd HH:mm:ss'))`t$($_.Name)`t$($_.CommandLine)\" }"
+    )
+    try:
+        out = winconsole.run_hidden(["powershell", "-NoProfile", "-NonInteractive",
+                                     "-Command", script], capture_output=True, timeout=30)
+    except Exception:  # noqa: BLE001
+        return []
+    rows = []
+    for line in out.stdout.decode("utf-8", "ignore").splitlines():
+        parts = line.split("\t", 4)
+        if len(parts) < 4 or not parts[0].strip().isdigit():
+            continue
+        try:
+            created = time.mktime(time.strptime(parts[2].strip(), "%Y-%m-%d %H:%M:%S"))
+        except ValueError:
+            created = 0.0
+        rows.append({
+            "pid": int(parts[0]),
+            "parent": int(parts[1]) if parts[1].strip().isdigit() else 0,
+            "created": created,
+            "name": parts[3].strip(),
+            "command_line": parts[4] if len(parts) > 4 else "",
+        })
+    return rows
+
+
+def _launch_instance_pids(record, rows):
+    """记录里那次注入还活着的 QQ 主进程（父 pid + 创建时间双重比对）。"""
+    launcher_pid = record["launcher_pid"]
+    started = record.get("started_epoch") or 0
+    return [str(row["pid"]) for row in rows
+            if row["parent"] == launcher_pid and row["pid"] != launcher_pid
+            and (not started or row["created"] >= started - 60)]
+
+
+def _load_launch_record():
+    """只读 state/ 里的启动记录；文件缺失或字段不完整时返回 None。"""
+    try:
+        record = json.loads(LAUNCH_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    try:
+        record["launcher_pid"] = int(record.get("launcher_pid"))
+    except (TypeError, ValueError):
+        return None
+    return record
+
+
+def read_launch_record():
+    """最近一次注入的记录，附带现读的进程事实（issue #46）。
+
+    `instance_pids` 是本次注入还活着的 QQ 主进程，`launcher_alive` 只作为日志
+    提示（不参与杀谁的决定）。返回 None 表示「没有记录可比对」，与「记录在、
+    实例已死」是两件事——连续 killed 0 时，watchdog 靠这个区分同源失败。
+    """
+    record = _load_launch_record()
+    if not record:
+        return None
+    rows = _qq_processes(record["launcher_pid"])
+    record["instance_pids"] = _launch_instance_pids(record, rows)
+    expected = {"direct": "napcatwinbootmain.exe", "bat": "cmd.exe"}.get(record.get("mode"), "")
+    record["launcher_alive"] = any(
+        row["pid"] == record["launcher_pid"]
+        and (not expected or row["name"].lower() == expected)
+        for row in rows
+    )
+    return record
+
+
+def injected_instance_pids():
+    """现在活着的注入实例 pid：本次注入的 ∪ `-q <账号>` 认出来的，去重。
+
+    身份优先（issue #46）：`-q` 只在主进程命令行确实带着它时才有效，实测重拉
+    出来的进程只带 `--disable-gpu`，所以只认标记会漏掉正抢同一份 user-data-dir
+    的那一个。两个判据共用一次 WMI 查询。
+    """
+    record = _load_launch_record()
+    rows = _qq_processes(record["launcher_pid"] if record else None)
+    pids = _launch_instance_pids(record, rows) if record else []
+    account = configured_account()
+    if account:
+        marker = f" -q {account}"
+        for row in rows:
+            pid = str(row["pid"])
+            if marker in (row["command_line"] or "") and pid not in pids:
+                pids.append(pid)
+    return pids
+
+
+def count_injected_instances():
+    """只读：现在有几个注入实例（`--stop` 收前的计数口径，issue #46）。"""
+    return len(injected_instance_pids())
+
+
 def kill_stale_instances():
-    """Kill QQ instances this launcher started before starting another one.
+    """Kill every QQ instance this launcher started, whole tree.
 
     Every boot attempt spawns a QQ process. When a boot stalls — waiting for a QR
     scan, for example — the old process stays alive, the next attempt adds one
@@ -339,34 +496,18 @@ def kill_stale_instances():
     usable", which reads like a network outage from the outside.
 
     Identification used to be `--enable-logging`, because that was the one switch
-    NapCatWinBootMain injected. Rewriting that literal to `--disable-gpu` (to dodge
-    the GPU crash loop) silently broke the match: nothing was recognised, nothing
-    was killed, and ten orphan instances piled up at ~190 MB each while every
-    watchdog restart added another one.
+    NapCatWinBootMain injected. Rewriting that literal to `--disable-gpu` silently
+    broke the match: nothing was recognised, nothing was killed, and ten orphan
+    instances piled up at ~190 MB each while every watchdog restart added another.
 
-    `-q <uin>` is the durable marker. The launcher always appends it for quick
-    login, and a personal QQ started from the desktop carries no switches at all,
-    so this still leaves the user's own client alone.
+    `-q <uin>` was the next marker and it is not durable either: an instance the
+    watchdog relaunched carries only `--disable-gpu` on its command line (observed
+    2026-10-24, issue #46), so the same `killed 0` came back while two instances
+    coexisted. The launch record is what actually identifies them: the pid we
+    spawned, matched against QQ's ParentProcessId, with a creation-time check so a
+    recycled pid cannot drag in a stranger.
     """
-    account = configured_account()
-    if account:
-        match = f"* -q {account}*"
-    else:
-        # Without a configured account there is no safe identity to match on, and
-        # guessing would risk killing the user's own client. Leave everything up.
-        return 0
-
-    script = (
-        "Get-CimInstance Win32_Process -Filter \"Name='QQ.exe'\" | "
-        f"Where-Object {{ $_.CommandLine -like '{match}' }} | "
-        "ForEach-Object { $_.ProcessId }"
-    )
-    try:
-        out = winconsole.run_hidden(["powershell", "-NoProfile", "-NonInteractive",
-                                     "-Command", script], capture_output=True, timeout=30)
-        pids = [line.strip() for line in out.stdout.decode("utf-8", "ignore").splitlines() if line.strip().isdigit()]
-    except Exception:
-        return 0
+    pids = injected_instance_pids()
     killed = 0
     for pid in pids:
         try:
@@ -409,6 +550,10 @@ def ensure_napcat():
     nothing on this path said why. The account is now checked before anything is
     spawned: no account, no injection, and the note names what to restore.
     """
+    # 一次 ensure 只认自己这次拉起的：进来先清掉上一轮，跳过注入的提前返回
+    # （「在线」/ 守护接管）就不会把旧 pid 报成本次注入（issue #46）。
+    global LAST_LAUNCH
+    LAST_LAUNCH = None
     if is_port_open(43000) and is_port_open(43001):
         return True, "在线"
 
@@ -448,6 +593,7 @@ def ensure_napcat():
         cmd.append(account)
     cmd.extend(qq_extra_args())
     launcher = start_process_detached(cmd, cwd=str(NAPCAT_DIR), log_name="napcat.log")
+    _record_launch(launcher, account, "bat")
     if wait_napcat_ports():
         return True, "启动成功（bat 降级）"
     # A still-running launcher is booting QQ, not failing: never inject a

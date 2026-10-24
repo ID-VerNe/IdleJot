@@ -90,6 +90,9 @@ def main():
             watchdog.dead_instance_count = lambda: 0
             watchdog.owner_pid = lambda: None
             watchdog.kill_injected_instances = lambda: 1
+            # issue #46 added a WMI-backed trace to the failure lines; this gate
+            # is offline, so it must not shell out to powershell.
+            watchdog.launch_trace = lambda: "prev launch: none recorded"
             watchdog.relaunch = fake_relaunch
 
             with patch.object(watchdog.time, "sleep", fake_sleep):

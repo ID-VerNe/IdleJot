@@ -396,6 +396,12 @@ uv run python scripts/check_watchdog_halt.py
 #     定义；up.py 自己只许定义 report/main/strip_proxy/python_exe；底层模块不得
 #     反向 import 门面或上层
 uv run python scripts/check_up_facade.py
+
+# 32. 注入实例身份识别（issue #46）：启动时把 launcher pid/启动时刻记进
+#     state/napcat_launch.json；下一轮按 ParentProcessId + 创建时间找回实例，
+#     孙代 QQ 命令行无 -q 也判得出；启动即死时明确说「无实例」而不是静默 killed 0；
+#     --stop 计数取「收前只读计数」与「直接收掉」的较大者，不再整树收净却报 0
+uv run python scripts/check_watchdog_launch_identity.py
 ```
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

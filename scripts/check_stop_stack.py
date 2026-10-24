@@ -113,11 +113,13 @@ class Stubs:
     `wg_up_probe`。只打一处等于放一半真等待进来。
     """
 
-    def __init__(self, pids, os_stub=None, instances=0):
+    def __init__(self, pids, os_stub=None, instances=0, before=0):
         self.pids = pids
         self.os = os_stub or FakeOS()
         self.clock = Clock()
         self.instances = instances
+        # 收前的只读计数（issue #46）：树杀带走的那几个只能在动手前数到。
+        self.before = before
 
     def match(self, pattern, exclude=None):
         found = list(self.pids.get(self._kind(pattern), []))
@@ -141,17 +143,20 @@ class Stubs:
         self.saved = (
             subprocess.run, wg_up_probe.time, wg_up_stack.time,
             wg_up_probe._match_pids, wg_up_stack._kill_instances,
+            wg_up_stack._count_instances,
         )
         subprocess.run = self.os.run
         wg_up_probe.time = self.clock
         wg_up_stack.time = self.clock
         wg_up_probe._match_pids = self.match
         wg_up_stack._kill_instances = lambda: self.instances
+        wg_up_stack._count_instances = lambda: self.before
         return self
 
     def __exit__(self, *exc):
         (subprocess.run, wg_up_probe.time, wg_up_stack.time,
-         wg_up_probe._match_pids, wg_up_stack._kill_instances) = self.saved
+         wg_up_probe._match_pids, wg_up_stack._kill_instances,
+         wg_up_stack._count_instances) = self.saved
         return False
 
     def stop(self):
@@ -232,6 +237,24 @@ def case_instances_uncounted_is_not_zero():
     result = Stubs({"guard": [], "watchdog": [], "stack": []}, instances=None).stop()
     assert result.instances is None, result.instances
     assert "未统计" in result.summary(), result.summary()
+
+
+def case_instances_counted_before_tree_kill():
+    """树杀已经带走的注入实例也要计入（issue #46 计数口径）。
+
+    真实故障：`--stop` 把整棵实例树收干净了，同一行却报 `注入实例 0 个`——
+    因为事后只按 `-q` 标记又数了一遍，而实例早随守护树消失了。
+    """
+    result = Stubs({"guard": ["100"], "watchdog": ["101"], "stack": []},
+                   instances=0, before=2).stop()
+    assert result.instances == 2, result.instances
+    assert "注入实例 2 个" in result.summary(), result.summary()
+
+    # 事后又直接收掉 3 个（收前只数到 1 个）：取较大值，不重复相加。
+    result = Stubs({"guard": [], "watchdog": [], "stack": []},
+                   instances=3, before=1).stop()
+    assert result.instances == 3, result.instances
+    assert "注入实例 3 个" in result.summary(), result.summary()
 
 
 def case_log_line_written():
@@ -365,6 +388,7 @@ CASES = [
     ("进程名未知不许杀", case_unknown_name_is_spared),
     ("端口清不掉必须报失败", case_leftover_ports_are_reported),
     ("注入实例未统计 != 0", case_instances_uncounted_is_not_zero),
+    ("树杀收掉的实例也计数", case_instances_counted_before_tree_kill),
     ("停止结果落 stopper.log", case_log_line_written),
     ("强杀留下的死锁被清掉", case_dead_commands_lock_is_cleared),
     ("活着的锁不许动", case_live_commands_lock_is_kept),

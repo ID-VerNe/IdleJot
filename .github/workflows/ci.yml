@@ -78,6 +78,7 @@ jobs:
             'check_reply_context.py',
             'check_reply_quote.py',
             'check_quote_visibility.py',
+            'check_image_visibility.py',
             'check_reply_timing.py',
             'check_now_clock.py',
             'check_slash_commands.py',

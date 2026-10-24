@@ -37,6 +37,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收口)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
+import wg_images  # noqa: E402  (图片标记渲染，issue #35 追问行同款)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 from wg_paths import data_dir, state_dir
 STATE = state_dir()
@@ -170,7 +171,7 @@ def since(after_id, session, not_before=None, limit=50):
     except sqlite3.Error:
         return []
     limit = max(1, int(limit))
-    sql = "SELECT id, payload FROM chat_inbox WHERE session_id=? AND id>?"
+    sql = "SELECT id, payload, media FROM chat_inbox WHERE session_id=? AND id>?"
     params = [session, int(after_id or 0)]
     if not_before:
         sql += " AND at>=?"
@@ -182,11 +183,15 @@ def since(after_id, session, not_before=None, limit=50):
             rows = db.execute(sql, (*params, limit)).fetchall()
             if not rows:
                 break
-            for event_id, payload in rows:
+            for event_id, payload, raw_media in rows:
                 try:
                     data = json.loads(payload)
                 except ValueError:
                     continue
+                try:
+                    media = json.loads(raw_media or "[]")
+                except ValueError:
+                    media = []
                 out.append({
                     "id": event_id,
                     "sender": data.get("sender") or "",
@@ -200,6 +205,8 @@ def since(after_id, session, not_before=None, limit=50):
                     "recalled": bool(data.get("recalled")),
                     # 追问行和 @ 唤醒行一样要能看出引用原文（issue #94）。
                     "quote": wg_quotes.render_payload(db, session, data),
+                    # 追问窗里收到的图也要有路径/补读提示，不能只剩裸 [图片]（issue #35）。
+                    "images": wg_images.render(dict(data, id=event_id), media),
                 })
             params[1] = rows[-1][0]
             if len(rows) < limit:

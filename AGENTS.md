@@ -331,7 +331,12 @@ uv run python scripts/check_now_clock.py
 #     只写覆盖行（#5 边界）；未知字段 fail-closed；--dry-run 零写入
 uv run python scripts/check_dossier_ingest.py
 
-# 24. 模块体量红线（issue #11）：单文件 >1000 行或单类 >800 行即 fail，
+# 24. 私有目录巡检（issue #6）：tmp/ 顶层禁 .py/.md/.ps1（它是 TEMP 的重定向目标）；
+#     bin/ 与 archive/ 的脚本必须在对应 INDEX.md 登记；drafts/ 非空只警告；
+#     archive/ 条目缩水只报告。无数据根时自动跑 A/B 自检，不空转
+uv run python scripts/check_tmp_hygiene.py
+
+# 25. 模块体量红线（issue #11）：单文件 >1000 行或单类 >800 行即 fail，
 #     700+ 行进提示带；豁免名单逐条注明由哪个分节消除，清空即拆分完成
 uv run python scripts/check_module_size.py
 ```

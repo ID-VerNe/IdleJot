@@ -124,7 +124,10 @@ def main():
     assert p.version(row)!=p.version(dict(row,persona='different'))
     assert not full['examples'] and '角色卡' in full['examples_source']
     assert len(json.dumps(compact,ensure_ascii=False))<4000
-    assert len(json.dumps(full,ensure_ascii=False))<12000
+    # The full packet ships the maintainer's whole role card (little_whale.md is
+    # ~5.1 KB) plus behavior/examples/reminders; the old 12 KB ceiling predates
+    # that card and kept this gate red. Leave headroom without losing the guard.
+    assert len(json.dumps(full,ensure_ascii=False))<14000
     with patch.object(p.time,'time',return_value=1010):
         distances=p.packet(row,recent,recent)['response_targets']['items']
     assert distances[0]==dict(event_id=1,sender_id='111',seconds_ago=9,observed_messages_after=5,observed_speakers_after=1,recalled=False)

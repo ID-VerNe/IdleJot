@@ -41,6 +41,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收口)
+import wg_budget  # noqa: E402  (等待预算：重挂提示不推荐撑不住的取值，issue #83)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_images  # noqa: E402  (图片标记渲染，与 reply/look 同一份实现)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
@@ -239,7 +240,8 @@ def report(exclude_pids=None, resident_pid=None):
     print("下一步    : 对上面 id 里还没回过的，用 reply.py <id> \"文本\" 回复"
           "（内部走 plan_chat_reply + send_chat_reply）；")
     print("            [过期] 是超过待回时效的老唤醒，默认不再回，确实要回加 --force；")
-    print("            回完立刻重挂 listen.py --timeout 300，它是唯一会叫醒你的东西。")
+    print(f"            回完立刻重挂 listen.py --timeout {wg_budget.WAIT_BUDGET}，"
+          "它是唯一会叫醒你的东西。")
     print("            # 开头的指令由 commands.py 直接回复，Agent 不参与；增删关键词改 "
           "water-group/config.json 的 slash_commands.commands（30 秒热生效）。")
     return 0

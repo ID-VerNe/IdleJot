@@ -34,6 +34,7 @@ sys.path.insert(0, str(HERE))
 
 import plugins  # noqa: E402  (事件型能力派发口：追问窗口，issue #4 PD2a)
 import up  # noqa: E402  (wake_reason / events / replied_ids live there)
+import wg_budget  # noqa: E402  (等待预算，issue #83)
 import wg_aliases  # noqa: E402  (别名指向渲染，issue #30)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_images  # noqa: E402  (图片标记渲染)
@@ -46,6 +47,9 @@ from wg_paths import state_dir
 STATE = state_dir()
 CURSOR = STATE / "wg_watch.txt"
 POLL = 1.5
+# 裸跑 `watch.py`（不带 --timeout）时的等待上限。与 listen / reply 同一个预算：
+# 超过它，宿主工具超时会把本进程杀掉，而那条路径上不会打印任何东西（issue #83）。
+DEFAULT_TIMEOUT = wg_budget.WAIT_BUDGET
 # 过期未回唤醒的报告里最多列几个 id：一行报得下，又不至于把整块输出撑成清单。
 EXPIRED_SHOWN = 5
 
@@ -134,7 +138,8 @@ def _plugin_settings():
 
 def main():
     parser = argparse.ArgumentParser(description="等一条唤醒（@ 或关键词）")
-    parser.add_argument("--timeout", type=int, default=240, help="最多等多少秒")
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
+                        help=f"最多等多少秒（默认 {DEFAULT_TIMEOUT}，即等待预算）")
     parser.add_argument("--after", type=int, default=None, help="从这个事件 id 之后开始找")
     parser.add_argument("--replay", action="store_true", help="忽略游标，重扫所有未回唤醒")
     args = parser.parse_args()

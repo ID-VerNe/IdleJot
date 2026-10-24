@@ -28,6 +28,7 @@ ROOT = HERE.parents[1]
 
 sys.path.insert(0, str(HERE))
 import winconsole  # noqa: E402
+import wg_budget  # noqa: E402  (等待预算的唯一出口，issue #79/#83)
 
 # Same family as the window suppression: if a console does attach, retag it as
 # UTF-8 (and point Python's own streams at UTF-8) so the scripts' output is not
@@ -36,7 +37,9 @@ winconsole.ensure_utf8_stdio()
 
 # 常驻监听的默认静默周期。`reply.py --wait N` 会用一个很小的 N 把监听临时当
 # 有界等待用；那种参数不该被 RESTART 行继承成新的常驻周期（issue #69）。
-DEFAULT_TIMEOUT = 300
+# 取值对齐等待预算（issue #83）：一个周期必须能装进一次 Agent 工具调用，否则
+# 宿主超时会把本进程连 watch.py 一起杀掉，而这轮等待期间不会打印任何东西。
+DEFAULT_TIMEOUT = wg_budget.WAIT_BUDGET
 SHORT_WAIT = 60
 
 
@@ -54,8 +57,15 @@ def restart_hint(timeout):
 
     短等待（`--wait 6` 这类）不透传：那是有界等待的临时边界，重挂应回到
     常驻周期。`--cycles` / `--no-digest` 同理，它们是调试/有界等待开关。
+
+    超预算的取值压回预算（issue #83）：宿主工具超时撑不住 300s，原样推荐会让
+    Agent 照抄一次、再被截断一次，而截断路径上不打印任何东西——RESTART 行于是
+    变成自己喂养自己的循环。
     """
-    shown = timeout if timeout >= SHORT_WAIT else DEFAULT_TIMEOUT
+    if timeout < SHORT_WAIT or wg_budget.over_budget(timeout):
+        shown = DEFAULT_TIMEOUT
+    else:
+        shown = timeout
     exe = Path(python_exe())
     try:
         command = exe.relative_to(ROOT).as_posix()
@@ -84,7 +94,8 @@ def run(script, *args):
 
 def main():
     parser = argparse.ArgumentParser(description="等消息；闲下来就沉淀积压，有事就退出叫人")
-    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="每轮静默等待多少秒")
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
+                        help=f"每轮静默等待多少秒（默认 {DEFAULT_TIMEOUT}，即等待预算）")
     parser.add_argument("--cycles", type=int, default=0, help="最多循环几轮，0 表示不限（调试用）")
     parser.add_argument("--no-digest", action="store_true",
                         help="超时后不沉淀、不查档案，只等（给 reply.py --wait 用）")
@@ -94,6 +105,12 @@ def main():
     while True:
         cycles += 1
 
+        # 等待开始前把边界说出来（issue #83）。listen.py 按设计不返回：群里一直
+        # 安静时宿主迟早会截断这次调用，而截断路径上 run_passthrough 不会回写任何
+        # 输出 —— 「我挂上了、正在等」这句话只能打在等待之前。
+        print(f"等最多 {args.timeout}s（第 {cycles} 轮）…"
+              f"若宿主超时短于此值，本进程会连同 watch.py 一起被杀，本行之后不会再有输出",
+              flush=True)
         rc = run("watch.py", "--timeout", str(args.timeout))
         if rc == 0:
             # watch.py already printed the wake lines and the closing WAKE, and

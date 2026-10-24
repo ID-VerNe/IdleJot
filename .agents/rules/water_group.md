@@ -29,15 +29,16 @@
 ## 1. 监听（唯一唤醒源）
 
 ```bash
-.venv/Scripts/python.exe water-group/daemon/listen.py --timeout 300
+.venv/Scripts/python.exe water-group/daemon/listen.py --timeout 90
 ```
 
 只活一轮：退出码 0 = 有活（`WAKE` / `DOSSIER_DUE`），**退出末行的 `RESTART:` 就是重挂命令**（照抄）。
 忘了挂不是「安静」而是「失聪」——消息照样进 `~/.water-group/state/wg_events.jsonl`，但没人叫醒你。
 `reply.py` 发送成功后默认续挂监听 90s（`--no-wait` 关闭），正常回消息不必手动重挂。
-90s = 宿主工具调用超时 120s − 发送余量 30s（issue #79）：**你自己把工具超时调小过，
-`--wait` 就必须更小**——被截断时父进程和子监听同组同死，且不打印任何东西，最后一行
-停在「等下一次唤醒…」。
+90s = 宿主工具调用超时 120s − 发送余量 30s（issue #79 / #83）：**你自己把工具超时调小过，
+就要同步调小**——被截断时父进程和子监听同组同死，且不打印任何东西。`listen.py` 每轮进入
+`watch.py` 前会打「等最多 90s（第 1 轮）…」，被砍时那是唯一痕迹；`RESTART:` 行不会推荐
+超过预算的取值。
 
 ## 2. 回复
 

@@ -1,5 +1,7 @@
 # 闲笔 (IdleJot)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 **把 AI Agent 塞进 QQ 群，让它当个群友，而不是当客服。**
 
 > *“闲笔勾勒群友百态，静水深流长驻人间。”*

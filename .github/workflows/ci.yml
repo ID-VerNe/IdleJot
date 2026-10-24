@@ -72,6 +72,7 @@ jobs:
             'check_plan_recovery.py',
             # Water-group daemons: wake ledger, follow-up, replies, commands
             'check_wake_ledger.py',
+            'check_forward_wake.py',
             'check_followup.py',
             'check_pending_reply.py',
             'check_reply_context.py',
@@ -82,6 +83,7 @@ jobs:
             'check_slash_commands.py',
             'check_miyoushe.py',
             'check_sixty.py',
+            'check_plugin_registry.py',
             'check_qr_login.py',
             'check_log_encoding.py',
             'check_watchdog_token.py',

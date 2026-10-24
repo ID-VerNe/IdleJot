@@ -71,11 +71,13 @@
 判据看 `~/.water-group/logs/wg_commands.log` 的启动行：
 
 ```
-commands start, prefix='#' keywords=[...] groups=[...] handlers=<N> sixty=<M>
+commands start, prefix='#' keywords=[...] groups=[...] handlers=<N> plugins=miyoushe:17,sixty:14
 ```
 
 这行**时间早于提交时间** = 进程还是旧代码，此时新指令会被当未知指令**静默丢弃**
-（`unknown_reply` 默认空串，症状是「发了完全没反应」，见 issue #68）。
+（`unknown_reply` 默认空串，症状是「发了完全没反应」，见 issue #68）。`plugins=`
+里缺某个插件或写成 `:0` = 那个插件没加载起来（issue #4 PA：注册表按插件记
+`load_error`，`up.py --status` 的 `插件` 行也会列出来）。
 
 重启单棵树（别整栈停，supervisor 会在 8 秒内拉起）：
 
@@ -336,7 +338,11 @@ uv run python scripts/check_dossier_ingest.py
 #     archive/ 条目缩水只报告。无数据根时自动跑 A/B 自检，不空转
 uv run python scripts/check_tmp_hygiene.py
 
-# 25. 模块体量红线（issue #11）：单文件 >1000 行或单类 >800 行即 fail，
+# 25. 转发体唤醒（issue #9）：合并转发里的 @ 与关键词必须参与 wake_reason；
+#     首层/嵌套两层、不可得时不猜、节点 100/字符 4000 封顶、# 指令闸门优先
+uv run python scripts/check_forward_wake.py
+
+# 26. 模块体量红线（issue #11）：单文件 >1000 行或单类 >800 行即 fail，
 #     700+ 行进提示带；豁免名单逐条注明由哪个分节消除，清空即拆分完成
 uv run python scripts/check_module_size.py
 ```

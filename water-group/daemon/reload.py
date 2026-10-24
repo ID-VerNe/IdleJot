@@ -86,6 +86,11 @@ NO_RESTART = {
     "chatlocal/tulpa_model.py": "one-shot/dead module, not in a daemon closure",
     "chatlocal/watch_check.py": "one-shot/dead module, not in a daemon closure",
     "water-group/daemon/dossier.py": "one-shot CLI",
+    # Read fresh by reply.py / watch.py and by up.py's report; no daemon imports it
+    # since commands stopped pulling in up for config (issue #4 PA0).
+    "water-group/daemon/followup.py": "one-shot CLI dependency (reply/watch/status)",
+    "water-group/daemon/wg_clock.py": "shared clock helper for guard/CLI, no daemon imports it",
+    "water-group/daemon/wg_quotes.py": "shared quote renderer for guard/CLI, no daemon imports it",
     "water-group/daemon/listen.py": "one-shot CLI",
     "water-group/daemon/look.py": "one-shot CLI",
     "water-group/daemon/reply.py": "one-shot CLI",

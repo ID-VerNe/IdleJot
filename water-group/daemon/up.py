@@ -31,10 +31,11 @@ ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收口)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
+import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #4 PA0)
 import wg_images  # noqa: E402  (图片标记渲染，与 reply/look 同一份实现)
 from wg_paths import logs_dir, state_dir
 STATE = state_dir()
-CONFIG = ROOT / "water-group" / "config.json"
+CONFIG = wg_config.CONFIG
 
 NAPCAT_PORTS = (43000, 43001)
 BACKEND_PORTS = (47860, 48777)
@@ -66,6 +67,12 @@ PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
 # wg_events.jsonl 里从未回复过的老唤醒会永远挂 [待回]，Agent 据此会回头
 # 回复早已过时的话题——这个上限就是那条时间维度上的刀。
 DEFAULT_PENDING_REPLY_TTL = 7200
+
+# 合并转发的唤醒判定预算（issue #9）。转发体只用来回答「叫不叫得醒」，
+# 不承载正文：节点数与字符数都封顶，避免一条 100 条转发把 --status / watch
+# 的每次扫描拖成毫秒级长尾。与 chatlocal 的 MAX_NODES 对齐（QQ 单条上限）。
+FORWARD_WAKE_NODES = 100
+FORWARD_WAKE_CHARS = 4000
 
 # 探针和 taskkill 都是控制台程序，而这个进程本身可能没有可见的控制台（经 pythonw/
 # 无窗口控制台起出来），于是每跑一次探针就闪一个黑框。开窗抑制统一走
@@ -105,10 +112,8 @@ def read_text(path):
 
 
 def config():
-    try:
-        return json.loads(CONFIG.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    """委托 ``wg_config``：配置只有一份实现（issue #4 PA0）。"""
+    return wg_config.config()
 
 
 def onebot_token():
@@ -607,12 +612,69 @@ def is_command(text, prefix=None):
     return bool(text[len(prefix):].strip())
 
 
+def _forward_at(nodes, account, budget, depth=0):
+    """转发体里有没有 @ 我（issue #9）。只读落盘节点，不联网。
+
+    `budget` 是共享的 ``{"nodes": N}`` 计数器：一条消息挂多个转发时，总扫描量
+    仍受 ``FORWARD_WAKE_NODES`` 约束。嵌套最多跟两层，与 chatlocal 的
+    ``sanitize_nodes`` 展开深度一致。
+    """
+    if depth >= 2:
+        return False
+    for node in nodes or []:
+        if budget["nodes"] <= 0:
+            return False
+        budget["nodes"] -= 1
+        if not isinstance(node, dict):
+            continue
+        for seg in node.get("segments") or []:
+            if not isinstance(seg, dict):
+                continue
+            if seg.get("type") == "at" and str(seg.get("qq")) == account:
+                return True
+            if seg.get("type") == "forward" and _forward_at(seg.get("nodes"), account, budget, depth + 1):
+                return True
+    return False
+
+
+def _forward_word(nodes, budget, words, depth=0):
+    """转发体里有没有唤醒词，返回命中的那个（issue #9）。"""
+    if depth >= 2:
+        return ""
+    for node in nodes or []:
+        if budget["nodes"] <= 0 or budget["chars"] <= 0:
+            return ""
+        budget["nodes"] -= 1
+        if not isinstance(node, dict):
+            continue
+        for seg in node.get("segments") or []:
+            if not isinstance(seg, dict):
+                continue
+            kind = seg.get("type")
+            if kind == "text":
+                text = str(seg.get("text") or "")[: max(0, budget["chars"])]
+                budget["chars"] -= len(text)
+                for word in words:
+                    if word in text:
+                        return word
+            elif kind == "forward":
+                word = _forward_word(seg.get("nodes"), budget, words, depth + 1)
+                if word:
+                    return word
+    return ""
+
+
 def wake_reason(event):
     """Why this message should wake an agent: an explicit @, or our name in the text.
 
     The server already applies the same three rules (at / reply-to-self / keyword)
     before it returns a batch; repeating them here lets the report say which
     messages still deserve a reply without a second round trip.
+
+    合并转发（issue #9）：正文在 ``referenced_messages[].nodes`` 里，顶层
+    ``segments`` 只有 ``{"type":"forward","forward_index":0}``、``content`` 只有
+    ``[合并转发]``。判定因此要下沉到节点内——转发里 @ 我、或转发正文里有我的
+    名字，都该叫醒。数据全部来自落盘事件，这里不发起网络请求。
     """
     if event.get("is_self"):
         return ""
@@ -626,8 +688,24 @@ def wake_reason(event):
     # `#帮助 机器人` 里的名字不该把 Agent 叫醒、和守护抢同一条消息（issue #70）。
     if is_command(text):
         return ""
+    # 只认服务端当场展开过的转发：state 不是 available 就没有正文可判，宁可不醒
+    # 也不猜（#8 的「状态必须说出来」同一口径）。
+    forwards = [d for d in event.get("referenced_messages") or []
+                if isinstance(d, dict) and d.get("type") == "forward"
+                and d.get("state") == "available"]
+    # 转发体内的 @ 与顶层同一优先级：@ 先于关键词。
+    budget = {"nodes": FORWARD_WAKE_NODES}
+    for detail in forwards:
+        if _forward_at(detail.get("nodes"), account, budget):
+            return "at"
     for word in wake_words():
         if word in text:
+            return f"keyword:{word}"
+    words = wake_words()
+    budget = {"nodes": FORWARD_WAKE_NODES, "chars": FORWARD_WAKE_CHARS}
+    for detail in forwards:
+        word = _forward_word(detail.get("nodes"), budget, words)
+        if word:
             return f"keyword:{word}"
     return ""
 
@@ -831,6 +909,12 @@ def report(exclude_pids=None, resident_pid=None):
     print(f"守护      : {guard}  心跳 {beat}")
     print(f"监听      : {listener}")
     print(f"#指令     : {command}")
+    try:
+        import commands as wg_commands  # noqa: PLC0415  只读：拿插件状态与设置
+        plugin_line = wg_commands.PLUGINS.status_line(wg_commands.load_settings())
+    except Exception as exc:  # noqa: BLE001  status must not fail because a plugin is broken
+        plugin_line = f"状态不可读（{type(exc).__name__}: {exc}）"
+    print(f"插件      : {plugin_line}")
     try:
         reload_line = load_reload().status_line()
     except Exception as exc:  # noqa: BLE001  status must not fail because reload is broken

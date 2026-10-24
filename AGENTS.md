@@ -2,7 +2,7 @@
 
 欢迎使用 闲笔 (IdleJot) 仓库。本指南是专为进入本项目的 AI Agent（以及协同开发者）设计的操作手册，旨在说明项目架构、开发规范、核心子系统设计以及强制性安全门禁。
 
-面向使用者的教程在 `doc/`（水群协议与各 MCP 工具的验证记录、安全说明、两轮 DRY/SRP 审计报告）；**所有 Agent 的仓库改动流程（先发 issue → plan 追评 → worktree → PR → 对账）见 §2.7，操作指引在 `doc/ISSUE_GUIDE.md`（怎么发 issue）与 `doc/PR_GUIDE.md`（怎么开 PR）**；水群子系统的 Agent 侧规则另有 `.agents/rules/water_group.md`（通用骨架）与 `.agents/skills/water-group/SKILL.md`，**私有 SOP（群号、群友花名/QQ/地域、人设卡、数据源速查、排查实例）不在仓库里**，在 `~/.water-group/rules/water_group.md` 与 `~/.water-group/personas/`。本文件面向**仓库内的开发与维护工作**。
+面向使用者的教程在 `doc/`（水群协议与各 MCP 工具的验证记录、安全说明、两轮 DRY/SRP 审计报告）；**所有 Agent 的仓库改动流程（先发 issue → plan 追评 → worktree → PR → 对账/回签）见 §2.7，操作指引在 `doc/ISSUE_GUIDE.md`（怎么发 issue）与 `doc/PR_GUIDE.md`（怎么开 PR）**；水群子系统的 Agent 侧规则另有 `.agents/rules/water_group.md`（通用骨架）与 `.agents/skills/water-group/SKILL.md`，**私有 SOP（群号、群友花名/QQ/地域、人设卡、数据源速查、排查实例）不在仓库里**，在 `~/.water-group/rules/water_group.md` 与 `~/.water-group/personas/`。本文件面向**仓库内的开发与维护工作**。
 
 ## 0. 接管水群（用户说「在 xxx 群挂机水群」时先看这里）
 
@@ -211,8 +211,8 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
 1. **先发 issue**：按 [`doc/ISSUE_GUIDE.md`](doc/ISSUE_GUIDE.md) 立单，正文四要素（现象 / 证据链 / 影响面 / 修复候选）齐全——issue 是派活与验收的唯一依据。**发布前正文过隐私门禁**（`scripts/check_publication.py --require-private --text <草稿>`），见 §5.3。
 2. **写 plan 追评到 issue 下面**：探索结论（带 `文件:行号` 证据）+ 方案 + 明确不做 + 验证方式；定稿后实施只追加不改口。
 3. **开 worktree 改代码**：`git worktree add .tmp/wt-<issue> -b type/<issue>-<slug> slim`，不在主工作区切分支；分支 / PR 标题 / commit 三处带 issue 号。大 issue 拆多个 PR 时，分节用 `P+字母`、优先级用 `P+数字`，命名落点见 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「拆分与命名规范」。
-4. **开 PR**：按 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)，正文分段齐全，修红门禁必须带基线验证段；**CI 全绿 + 无冲突才合并**（`slim` 已开分支保护、required check 为 `checks`，CI 没绿时 GitHub 直接判 `BLOCKED`；设置漂移跑 `scripts/check_repo_settings.py` 复现，见 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「合并条件」）。PR 标题 / 正文 / commit message 同样先过 §5.3 发布门禁。
-5. **合并后对账**：自述 vs 实际逐项核对，欠账转新 issue（#41 模式）。
+4. **开 PR**：按 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)，正文分段齐全，修红门禁必须带基线验证段；**CI 全绿 + 无冲突才合并**（`slim` 已开分支保护、required check 为 `checks`，CI 没绿时 GitHub 直接判 `BLOCKED`；设置漂移跑 `scripts/check_repo_settings.py` 复现，见 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「合并条件」）。行为类 PR 用 `Refs #NN`，纯文档 / 纯重构才用 `Closes #NN`（见 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「关闭方式」）。PR 标题 / 正文 / commit message 同样先过 §5.3 发布门禁。
+5. **合并后对账与回签**：修复者先做自述 vs 实际逐项核对（`git status`、文件存在性、门禁原始输出），并给行为类 issue 贴 `needs-live-verify`；再由发现者或全新上下文的验证 agent 按 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「合并后：对账与回签」的模板回签，**回签通过才关 issue**（修复者不能给自己回签）。欠账转新 issue（#41 模式）。
 
 与 §0 的边界（issue #83）分工：那里管「水群回路里主 Agent 只水群、重活派后台 subagent」，本节管「仓库改动怎么走 issue/PR」；派活 prompt 模板见 `.agents/skills/water-group/SKILL.md` §五。
 

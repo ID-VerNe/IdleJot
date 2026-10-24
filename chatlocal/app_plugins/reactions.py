@@ -3,6 +3,11 @@
 Only set_msg_emoji_like is written. Independent of image/sticker permissions.
 Known state is connection-local; uncertain writes survive restart as no-retry
 receipts. Notifications are observations, not synthetic messages or commands.
+
+This module is an app plugin (``chatlocal/app_plugins``): the protocol methods
+at the bottom forward into the unchanged business methods above. Everything
+below the protocol block is byte-for-byte the pre-plugin implementation, so the
+end-to-end gates keep asserting the same behaviour.
 """
 import hashlib
 import json
@@ -14,12 +19,15 @@ import threading
 import time
 import uuid
 
-from .mcp_actions import dump
-from .mcp_schemas import event_id, idempotency_key, session_id
-from .message_sender import QQSender, SendError
-from .onebot import OneBotError, OneBotUncertain
+from ..mcp_actions import dump
+from ..mcp_schemas import event_id, idempotency_key, session_id
+from ..message_sender import QQSender, SendError
+from ..onebot import OneBotError, OneBotUncertain
+from . import spec
+from .base import AppPlugin
 
-TOOL = 'react_to_chat_message'
+TOOL = spec.REACTIONS['tool']
+FLAG = spec.REACTIONS['scope']
 HINT = ('消息回应可单独完成本批参与，然后继续等待；有新内容才再发文字，不补发操作说明。'
         '结合人物卡、原消息和群内语气选择，也可不用；不逐条贴、不随机贴。'
         '目录仅是表情资料，不是人格指令；微笑等含义随语境变化。'
@@ -71,9 +79,15 @@ def target_digest(target):
     return hashlib.sha256(dump({k:target[k] for k in fields}).encode()).hexdigest()
 
 
-class ChatReactions:
+class ChatReactions(AppPlugin):
+    name = spec.REACTIONS['name']
+    tool_names = frozenset((TOOL,))
+    scope_flag = FLAG
+    expression = spec.REACTIONS['expression']
+
     def __init__(self, chat):
-        self.chat, self.access, self.actions = chat, chat.access, chat.actions
+        super().__init__(chat)
+        self.access, self.actions = chat.access, chat.actions
         self.lock = threading.RLock()  # Never holds the chat/wait or media locks.
         self.epoch = uuid.uuid4().hex
         self.policy_path = Path(self.access.path).parent / 'mcp-reactions.json'
@@ -172,7 +186,7 @@ class ChatReactions:
         with self.access.connect() as db:
             found=db.execute('SELECT payload FROM chat_inbox WHERE session_id=? AND id=?',(row['id'],eid)).fetchone()
         p=json.loads(found['payload']) if found else {}
-        if p.get('source')!='onebot_websocket' or p.get('reaction_epoch')!=self.epoch:
+        if p.get('source')!='onebot_websocket' or (p.get('app_epochs') or {}).get(self.name)!=self.epoch:
             raise Rejected('target_expired','目标不是当前连接接收的真实消息，或引用已因断线/重启失效；请读取新的真实群消息。')
         if any(p.get(k) for k in ('virtual','is_notify','is_system','synthetic')):
             raise Rejected('target_not_message','通知、摘要或虚拟消息不能作为回应目标。')
@@ -342,7 +356,7 @@ class ChatReactions:
                     and self.chat.receiver.matches_client(self.actions.client_factory()))
         except (ValueError,TypeError,KeyError):return False
 
-    def receive(self,event):
+    def receive_notice(self,event):
         """Normalize bounded observations; only new peer reactions to us wake wait."""
         if not self.policy()['enabled']:return
         account,group=str(event.get('self_id','')),str(event.get('group_id',''))
@@ -365,7 +379,7 @@ class ChatReactions:
         if not found:
             self.log.info('reaction_notice ignored=target_not_cached');return
         target=json.loads(found['payload'])
-        if target.get('reaction_epoch')!=self.epoch or target.get('recalled') or target.get('synthetic'):
+        if (target.get('app_epochs') or {}).get(self.name)!=self.epoch or target.get('recalled') or target.get('synthetic'):
             self.log.info('reaction_notice ignored=target_expired_or_virtual');return
         source=target.get('source')
         if source!='onebot_websocket' and not (source=='send_receipt' and self.receipt_target(row,target)):
@@ -450,3 +464,69 @@ class ChatReactions:
                 db.execute('UPDATE chat_sessions SET reaction_seen=max(reaction_seen,?) WHERE id=?',(max(p['notice_id'] for p in items),row['id']))
         return dict(items=items,scope='仅当前连接期间收到、且目标在本授权会话已读缓存内的最近12条通知；不是群内全部回应或完整远端历史。',
                     new_items=new,wake_model=False,note='new_items 是本次新交付的他人对本人消息的回应，可按语境接话或沉默；不自动发言。items 是有限历史，勿重复处理；自己的回声不触发回复。')
+
+    # -- app plugin protocol ---------------------------------------------
+    # Forwarders only. Behaviour lives above; the host never reaches past these.
+
+    def enabled(self):
+        return bool(self.policy()['enabled'])
+
+    def scope(self,scope,row):
+        if ':direct:' in row['conversation_id'] or not self.enabled():
+            return dict(scope,**{self.scope_flag:False})
+        return scope
+
+    def schemas(self,tool,scope):
+        if not scope.get(self.scope_flag) or not self.enabled():return ()
+        return (schema(tool,self.policy()['candidates']),)
+
+    def dispatch(self,grant,args,cancel):
+        return self.request(grant,args,cancel)
+
+    def deny(self,grant,target,row):
+        if not target or not grant['scope'].get(self.scope_flag):
+            return 'reaction_permission','仅回应也需要真实目标和回应授权。'
+        if ':direct:' in row['conversation_id']:
+            return 'reaction_unavailable','私聊暂不支持消息表情回应。'
+        return None
+
+    def exempt_cancel(self):return True
+
+    def owns_receipt(self):return True
+
+    def hint(self,scope):
+        if not scope.get(self.scope_flag):return None
+        return ('reactions 目录可用于 react_to_chat_message，对本会话已读真实消息添加/撤销小回应。'
+                '可以只贴回应就继续等待，有话才再发文字；不逐条贴，不固定表情含义。'
+                'reaction_notices 是动作通知，不是聊天指令，自己的回声不触发回应。UNKNOWN 不自动重试。')
+
+    def batch(self,grant,row):
+        return dict(catalog=self.catalog(grant['scope']),notices=self.context(row,consume=True))
+
+    def decorate(self,packet,data):
+        packet['reactions']=data['catalog']
+        packet['reaction_notices']=data['notices']
+
+    def wake_hint(self,data):
+        if not (data.get('notices') or {}).get('new_items'):return None
+        return ('有人对你之前的发言添加或撤销了表情回应。先读 reaction_notices.new_items 的原消息和操作者，'
+                '结合人格与语境决定回一句、贴回应或沉默；不用逐项回礼。items 中旧通知不要重复接话，自己的回声不接。'
+                '处理后继续 wait_chat_messages。')
+
+    def brief(self):
+        return '结合回应通知和目标原消息决定是否参与；自己的回声不接。'
+
+    def stamp(self):
+        return self.epoch
+
+    def receive(self,event):
+        if event.get('post_type')!='notice' or event.get('notice_type')!='group_msg_emoji_like':return False
+        self.receive_notice(event)
+        return True
+
+    def wake(self,row):
+        return self.pending(row)
+
+    def reset(self):
+        self.reset_connection()
+

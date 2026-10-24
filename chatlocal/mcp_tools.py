@@ -20,7 +20,7 @@ from .agent_tools import ChatTools, SCHEMAS, tool
 from .mcp_access import RateLimited
 from .mcp_chat import MCPChat, CHAT_TOOLS
 from .mcp_chat_media import MEDIA_TOOLS, MEDIA_WRITES, schemas as media_schemas
-from .mcp_reactions import TOOL as REACTION_TOOL, schema as reaction_schema, ChatReactions
+from .app_plugins import TOOL_NAMES as APP_TOOL_NAMES
 from .mcp_schemas import idempotency_key
 from .mcp_qq import TOOLS as QQ_TOOLS, WRITES as QQ_WRITES, schemas as qq_schemas
 from .mcp_qq_permissions import QQ_FLAGS
@@ -145,8 +145,8 @@ class WGTools:
             from .mcp_chat import schemas as chat_schemas
             rows += chat_schemas(tool)
             rows += media_schemas(tool, grant['scope'])
-            if grant['scope'].get('chat_reactions') and self.chat.reactions.policy()['enabled']:
-                rows.append(reaction_schema(tool,self.chat.reactions.policy()['candidates']))
+            for plugin in self.chat.apps.all():
+                rows.extend(plugin.schemas(tool, grant['scope']))
         rows += qq_schemas(tool,grant['scope'])
         rows.append(tool('read_message', '按字符分页读一条允许范围内的原始消息，适合被搜索结果截断的长消息。',
                          dict(message_id=dict(type='integer', minimum=1),
@@ -181,14 +181,16 @@ class WGTools:
             # Starting and sending perform their own live identity checks.
             from .mcp_chat import schemas as chat_schemas
             rows = chat_schemas(tool) if grant['scope'].get('chat') and grant['scope'].get('send') else []
-            if rows and grant['scope'].get('chat_reactions') and self.chat.reactions.policy()['enabled']:
-                rows.append(reaction_schema(tool,self.chat.reactions.policy()['candidates']))
+            if rows:
+                for plugin in self.chat.apps.all():
+                    rows.extend(plugin.schemas(tool, grant['scope']))
         else:
             rows = self.schemas(grant)
         schema = next((s for s in rows if s['name'] == name), None)
+        owner = self.chat.apps.tool_owner(name)
         if schema is None:
-            if name==REACTION_TOOL:
-                return self.result(ChatReactions.rejected(arguments,'tool_unavailable','消息回应未启用或本连接尚未授权。'))
+            if owner:
+                return self.result(owner.rejected(arguments,'tool_unavailable',f'{owner.name} 未启用或本连接尚未授权。'))
             return self.result(dict(error='工具未开放或连接没有该权限。', error_code='tool_unavailable'))
         # Validate before budget, IO or tool-specific paths. Don't echo private args.
         try:
@@ -362,6 +364,7 @@ class WGTools:
         if waiting and not self.chat_slots.acquire(blocking=False):
             return self.result(dict(error='持续聊天等待通道繁忙；普通工具仍可使用。',error_code='chat_busy'))
         started=time.monotonic();call_id=None;status='error';count=0;learning_receipt=None
+        owner=self.chat.apps.tool_owner(name)
         try:
             call_id=self.access.begin_call(grant['id'],name)
             timing.note(call_id=call_id)
@@ -370,11 +373,11 @@ class WGTools:
             if name in ('claim_chat_learning','submit_chat_learning'):
                 if name=='submit_chat_learning' and data.get('state')!='rejected':learning_receipt=dict(data)
                 data=self.chat.learning.handoff(grant,data,arguments['session_id'],cancel)
-            if name in ('plan_chat_reply','send_chat_reply','send_chat_message',REACTION_TOOL):
+            if name in ('plan_chat_reply','send_chat_reply','send_chat_message') or (owner and owner.owns_receipt()):
                 data=self.chat.refresh_rejected(grant,data,arguments['session_id'],cancel)
             if name=='wait_chat_messages' and arguments.get('response_format','compact')=='compact':
                 from .mcp_chat_output import compact_wait
-                data=compact_wait(data,arguments.get('known_prompt_version'))
+                data=compact_wait(data,arguments.get('known_prompt_version'),brief=self.chat.apps.brief(data.get('event','')))
             if name=='send_chat_reply':
                 from .mcp_chat_output import compact_sent
                 data=compact_sent(data)
@@ -386,16 +389,16 @@ class WGTools:
                     auto_images=arguments.get('auto_images','candidates'))
             # A revocation after dispatch stops future actions; it cannot turn
             # this operation's durable receipt into a false "not executed".
-            if 'updated_chat' in data or name not in (REACTION_TOOL,'send_chat_reply','send_chat_message'):self.access.ensure_revision(grant)
+            if 'updated_chat' in data or (name not in ('send_chat_reply','send_chat_message') and not (owner and owner.owns_receipt())):self.access.ensure_revision(grant)
             if name in ('claim_chat_learning','submit_chat_learning'):self.chat.validate(arguments['session_id'],grant['id'])
-            if cancel.is_set() and name not in ('send_chat_reply','send_chat_message','stop_chat_session',REACTION_TOOL):
+            if cancel.is_set() and name not in ('send_chat_reply','send_chat_message','stop_chat_session') and not (owner and owner.exempt_cancel()):
                 if learning_receipt is not None:raise ValueError('学习提交后的交接已取消。')
                 data=dict(event='cancelled',messages=[],note='本次调用已取消；需要结束聊天请停止会话。')
                 images=[]
             status=data.get('state','ok').lower();count=len(data.get('messages',[]))
             return self.result(data,images)
         except RateLimited as exc:
-            if name==REACTION_TOOL:return self.result(ChatReactions.rejected(arguments,'rate_limited',str(exc)))
+            if owner:return self.result(owner.rejected(arguments,'rate_limited',str(exc)))
             return self.result(dict(error=str(exc),error_code='rate_limited'))
         except (ValueError,OSError,sqlite3.Error) as exc:
             if learning_receipt is not None:
@@ -403,7 +406,7 @@ class WGTools:
                 return self.result({k:v for k,v in learning_receipt.items() if k not in ('next_call','continue_waiting','note')} |
                     dict(chat_error='handoff_unavailable',note='学习提交状态已记录；聊天材料未交付。核对会话与授权后接续，不要重做已保存阶段。'))
             if not isinstance(exc,ValueError):raise
-            if name==REACTION_TOOL:return self.result(ChatReactions.rejected(arguments,'chat_rejected',str(exc)))
+            if owner:return self.result(owner.rejected(arguments,'chat_rejected',str(exc)))
             return self.result(dict(error=str(exc),error_code='chat_rejected'))
         finally:
             if call_id is not None:self.access.finish_call(call_id,status,time.monotonic()-started,count)

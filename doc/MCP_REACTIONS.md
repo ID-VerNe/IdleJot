@@ -134,6 +134,34 @@
 3. 由另一位成员手动给同一消息添加、撤销回应，下一次正常 get/wait 应显示准确目标和操作者，没有新增聊天文字。自己的回声不会引发第二次动作。
 4. 在目录禁用候选后再次尝试，应明确拒绝；停用会话/撤权、断线或重启后，旧引用不能写入。
 
+## 归属（issue #4 PD）
+
+消息回应是**第一个 app 侧插件**，代码在 `chatlocal/app_plugins/reactions.py`（原
+`chatlocal/mcp_reactions.py`，业务方法未改）。宿主只通过 `chatlocal/app_plugins/base.py`
+的协议与它交互，`mcp_chat` / `mcp_tools` / `mcp_chat_prompts` / `mcp_chat_turns` /
+`mcp_chat_output` / `mcp_connect` / `mcp_server` 里不再有它的名字——
+`scripts/check_app_plugins.py` 会扫 `chatlocal/*.py`，出现硬编码即失败。
+
+协议 12 个钩子（`name` / `tool_names` / `scope_flag` / `expression` 为类属性）：
+
+| 钩子 | 宿主何时调用 |
+| --- | --- |
+| `enabled()` | 决定工具是否出现、授权位是否保留 |
+| `scope(scope, row)` | 每批算出有效授权位（私聊或停用时清掉自己） |
+| `schemas(tool, scope)` | 组装 MCP 工具清单（两处调用点合一） |
+| `dispatch(grant, args, cancel)` | 气泡队列派发到该表达 |
+| `rejected(args, code, note)` | 统一拒绝回执（未开放/限流/取消） |
+| `deny(grant, target, row)` | 规划阶段的预检拒绝 |
+| `owns_receipt()` | 回执已自持：不刷新聊天视图、不推进 revision |
+| `exempt_cancel()` | 取消后仍保留自己的持久回执 |
+| `hint(scope)` / `batch(grant,row)` / `decorate(packet,data)` | 提示与批次数据 |
+| `wake_hint(data)` / `brief()` | 本批因它而醒时的提示（完整/精简两处） |
+| `stamp()` / `receive(event)` / `wake(row)` / `reset()` | 连接戳、事件、唤醒、断线重置 |
+
+入箱戳从 `reaction_epoch` 改为 `app_epochs: {插件名: 连接戳}`，旧行没有该键即视为
+过期（与重启同义）。`ChatReactions` 仍挂在 `chat.reactions` 上，但它是**写穿属性**
+（`chat.reactions is chat.apps.get('reactions')`），给现有门禁直接检查用，不会产生第二份状态。
+
 ## 迁移与回退
 
 只向原有 `data/mcp-access.sqlite3` 添加三张独立 reaction 表及索引，不改旧 grants、聊天、人格或原有消息发送回执。旧 grant 没有新标志时视为未授权。状态缓存可重建，操作记录不可为“解除 UNKNOWN”随便删除。

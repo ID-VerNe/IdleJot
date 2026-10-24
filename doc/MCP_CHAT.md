@@ -131,3 +131,21 @@ Agent 调用 `list_chat_personas`，得到最新的 `count`、`personas` 和 `wa
 ## 消息表情回应
 
 MCP 持续群聊现在可在独立授权下对已读真实群消息添加或撤销小表情回应，并在正常上下文中看到他人的回应通知。它与图片/表情包权限独立，旧连接不会自动获得权限。启用、目录配置、回执、边界及人工步骤见 [消息回应说明](MCP_REACTIONS.md)。
+
+## app 侧插件
+
+MCP 这边的可选能力（工具 + 授权位 + 实时事件）走一套独立协议，与 daemon 的 `#` 指令插件
+（`water-group/daemon/plugins/`）**刻意不合并**：宿主不同、生命周期不同、授权模型不同。
+落地位置 `chatlocal/app_plugins/`：
+
+- `spec.py`：纯名字表（工具名、授权位、表达、是否 openWorld）。低层模块和 import 期常量只读它。
+- `base.py`：`AppPlugin` 协议与 `AppPlugins` 注册表。宿主只认注册表，不认名字。
+- `loader.py`：`build(chat)` 实例化；单独一层是为了不让只读名字表的进程被拖进功能模块
+  （热重载闭包会跟着函数体内的 import 走）。
+- `<功能>.py`：功能本身，协议方法只做转发。
+
+新增一个 app 侧能力 = 在 `spec.py` 加一块 + 在 `app_plugins/` 加一个模块 + 在 `loader.py`
+注册一行。**不许**去 `mcp_chat` / `mcp_tools` 里加 `if name == ...`：
+`scripts/check_app_plugins.py` 会扫出来。
+
+协议钩子的逐条说明与调用时机见 [消息回应说明 · 归属](MCP_REACTIONS.md#归属issue-4-pd)。

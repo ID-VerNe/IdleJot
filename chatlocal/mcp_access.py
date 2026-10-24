@@ -6,13 +6,15 @@ import time
 import uuid
 from contextlib import contextmanager
 
+from .app_plugins import SCOPE_FLAGS
 from .client_accounts import bound_account
 from .retrieval import Plan, date_bound
 from .mcp_qq_permissions import QQ_FLAGS, MEDIA_FLAGS as ATTACHMENT_FLAGS, live_grant
 from .sqlite_util import connect as sqlite_connect
 
 CHAT_MEDIA_FLAGS = ('chat_images', 'chat_sticker_send', 'chat_sticker_collect')
-CHAT_EXTRA_FLAGS = ('chat_reactions',)
+# App plugins own their scope flag names; see chatlocal/app_plugins/spec.py.
+CHAT_EXTRA_FLAGS = SCOPE_FLAGS
 PERMISSION_FLAGS = ('media', 'prepare', 'voice', 'onebot', 'send', 'manage', 'chat',
                     *CHAT_MEDIA_FLAGS, *CHAT_EXTRA_FLAGS, *QQ_FLAGS)
 CHAT_MEDIA_TOOLS = ('read_chat_image','import_chat_image','list_chat_stickers','read_chat_sticker','note_chat_sticker','send_chat_sticker','collect_chat_sticker')
@@ -166,8 +168,8 @@ class MCPAccess:
             raise ValueError('发送和群管理需要选择 QQ 平台。')
         if scope.get('chat') and not scope.get('send'):
             raise ValueError('持续聊天需要同时允许直接发送 QQ 消息。')
-        if scope.get('chat_reactions') and not scope.get('chat'):
-            raise ValueError('消息表情回应需要开启持续群聊及发送权限。')
+        if any(scope.get(k) for k in CHAT_EXTRA_FLAGS) and not scope.get('chat'):
+            raise ValueError('插件子功能需要开启持续群聊及发送权限。')
         if any(scope.get(k) for k in CHAT_MEDIA_FLAGS) and not scope.get('chat'):
             raise ValueError('表情包子功能需要开启持续群聊。')
         if (scope.get('chat_sticker_send') or scope.get('chat_sticker_collect')) and not scope.get('chat_images'):

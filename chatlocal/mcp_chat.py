@@ -21,7 +21,7 @@ from .mcp_chat_schemas import schemas  # noqa: F401  (issue #11 PC: facade re-ex
 from .mcp_chat_wait import ChatWaitMixin
 from .mcp_schemas import event_id, idempotency_key, session_id
 from .onebot_events import EventReceiver
-from .onebot_segments import at as at_segment, message_id, qq as qq_id, reply as reply_segment
+from .onebot_segments import at as at_segment, message_id, name as at_name, qq as qq_id, reply as reply_segment
 from . import mcp_chat_prompts as prompts
 from .mcp_chat_turns import ChatTurns, TOOLS as TURN_TOOLS
 from .mcp_language_learning import ChatLearning, TOOLS as LEARNING_TOOLS
@@ -409,7 +409,10 @@ class MCPChat(ChatWaitMixin):
                 if kind=='text':
                     value=str(data.get('text',''))[:12000];parts.append(value);segments.append(dict(type='text',text=value))
                 elif kind=='at':
-                    value=qq_id(data.get('qq'));parts.append('@'+value);segments.append(at_segment(value))
+                    value=qq_id(data.get('qq'))
+                    display=at_name(data.get('name'))
+                    parts.append('@'+(display or value))
+                    segments.append(at_segment(value, display))
                 elif kind=='reply':
                     value=message_id(data.get('id'));parts.append('[引用 QQ 消息 '+value+']');segments.append(reply_segment(value))
                     if value not in ('','0') and len(details)<8:details.append(dict(type='reply',id=value))

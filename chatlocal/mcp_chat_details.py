@@ -46,7 +46,7 @@ def sanitize_nodes(value,depth=0,budget=None):
                 segments.append(dict(type='text',text=text))
             elif kind in ('image','mface'):segments.append(dict(type='image',image=image_ref(d)))
             elif kind=='reply':segments.append(reply_segment(d.get('id')))
-            elif kind=='at':segments.append(at_segment(d.get('qq')))
+            elif kind=='at':segments.append(at_segment(d.get('qq'),d.get('name')))
             elif kind=='forward':
                 children=sanitize_nodes(d,depth+1,budget);raw_children=forward_nodes(d)
                 ref=dict(type='forward',truncated=depth+1>=2 or raw_children is None or len(children)<len(raw_children))
@@ -277,7 +277,12 @@ class ChatDetails:
                 target=dict(location,forward_index=index) if location else None
                 parts.append('[嵌套转发]');result.append(self.render_forward(seg,media,stamp,allow_images,quote_message_id,target,read))
             elif kind=='at':
-                parts.append('@'+str(seg.get('qq','')));result.append(dict(type='at',qq=str(seg.get('qq',''))))
+                # issue #52: the @-ed member's display name survives into the
+                # rendered forward node; only name-less legacy segments fall
+                # back to the bare number.
+                qq=str(seg.get('qq',''));display=str(seg.get('name') or qq)
+                parts.append('@'+display)
+                result.append(dict(type='at',qq=qq,**({'name':str(seg['name'])} if seg.get('name') else {})))
             else:
                 label={'reply':'引用','record':'语音','video':'视频','file':'文件','face':'表情','at':'@'}.get(kind,'非文本消息')
                 parts.append('['+label+']');result.append(dict(type=label))

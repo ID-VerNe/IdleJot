@@ -37,7 +37,6 @@ ADVISORY_FILE_LINES = 700
 # Violators pinned at gate creation, each removed by one issue #11 section.
 # Keep this list honest: a stale entry hides real growth.
 EXEMPTIONS = {
-    'water-group/memory_engine.py': 'PA: split storage/use-case layers',
     'water-group/daemon/reload.py': 'PD: split plan analysis from restart execution',
     'chatlocal/mcp_chat.py': 'PC: move the schema factory out',
     # Crossed the wall via issue #9 (forward-wake touched up.py): 926 -> 1010

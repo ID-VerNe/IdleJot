@@ -126,7 +126,8 @@ def main():
                                                           r.get("id"))
                         print(f"id={r.get('id')} {stamp} [追问] {r.get('sender')}: "
                               f"{body}"
-                              f"{('  ' + r['quote']) if r.get('quote') else ''}")
+                              f"{('  ' + r['quote']) if r.get('quote') else ''}"
+                              f"{('  ' + r['images']) if r.get('images') else ''}")
                     # 报告文案由 followup 决定：额度用完的那一批不说「还剩 0 条」
                     # （issue #98）。收窗也在 consume() 里做完，不再留到下一轮。
                     print(followup.wake_report(window, len(woke)))

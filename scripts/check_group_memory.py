@@ -606,9 +606,11 @@ def test_memory_cap_consistency(tmp_dir):
     dossier = engine.query_member_dossier(uid)
     assert len(dossier["profile"]["key_memories"]) == MEMORY_SLOTS
 
-    # 10. Source guard: the hardcoded ceiling must not come back.
-    source = (ROOT / "water-group" / "memory_engine.py").read_text(encoding="utf-8")
-    assert "[:5]" not in source, "memory_engine.py 不得再出现硬编码 [:5] 截断"
+    # 10. Source guard: the hardcoded ceiling must not come back. issue #11
+    # (PA) moved save_profile into memory_profile.py, so the tombstone scans
+    # the method's new home.
+    source = (ROOT / "water-group" / "memory_profile.py").read_text(encoding="utf-8")
+    assert "[:5]" not in source, "memory_profile.py 不得再出现硬编码 [:5] 截断"
 
     print("✓ 11. 画像记忆上限统一为 MEMORY_SLOTS、复述续命与溢出淘汰测试通过 (issue #43/#60)")
 

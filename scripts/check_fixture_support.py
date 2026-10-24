@@ -14,7 +14,7 @@ LOOPBACK = frozenset({'127.0.0.1', 'localhost', '::1'})
 _SCRATCH_HOME = None
 
 # 数据根必须在进程级钉住，不能只靠 main() 里的 patch.dict。
-# memory_engine.py:31,34-36 的 WG_HOME / DEFAULT_DB_PATH 是 import 期求值的，
+# memory_store.py 的 WG_HOME / DEFAULT_DB_PATH 是 import 期求值的（issue #11 PA 搬家），
 # 而 chatlocal/mcp_chat.py 的 get_memory_engine() 全是函数内延迟导入
 # （399/547/868/1005/1018/1042 行），事件处理又跑在 onebot_events.py:169 的
 # 后台线程里：补丁退出后线程才第一次 import，环境已恢复成「补丁前的样子」，

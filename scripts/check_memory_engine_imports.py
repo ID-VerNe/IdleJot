@@ -27,8 +27,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 # 子进程探针会 import water_group.memory_engine，而 WG_HOME / DEFAULT_DB_PATH 都是
-# import 期求值的（memory_engine.py:31、34-36），不钉就会落到实机 ~/.water-group。
-# get_memory_engine() 首次加载还会自动 seed_from_persona()（memory_engine.py:1388-1394），
+# import 期求值的（memory_store.py 的 WG_HOME / DEFAULT_DB_PATH，issue #11 PA 搬家），
+# 不钉就会落到实机 ~/.water-group。
+# get_memory_engine() 首次加载还会自动 seed_from_persona()（facade 末尾的单例），
 # 于是每跑一次本门禁就往实机库写两行种子档案。钉到临时目录后，探针仍然验证同一件事
 # （模块同一性 / 单例唯一），只是不再碰真实数据。见 issue #79。
 _SCRATCH = Path(tempfile.mkdtemp(prefix="tulpa-wg-import-"))
@@ -52,6 +53,7 @@ SCANNED = [
 ]
 WATER_GROUP_MODULES = {
     "memory_engine", "memory_commands", "memory_format",
+    "memory_store", "memory_profile", "memory_observe", "memory_dossier",
     "bootstrap", "sync_groups",
 }
 
@@ -72,7 +74,8 @@ print('PROBE_OK')
 STAR_PROBE = """
 ns = {}
 exec('from water_group import *', ns)
-for name in ['memory_engine','memory_commands','memory_format','bootstrap',
+for name in ['memory_engine','memory_commands','memory_format','memory_store',
+             'memory_profile','memory_observe','memory_dossier','bootstrap',
              'sync_groups']:
     assert name in ns, name
 assert 'sys' not in ns and 'Path' not in ns and 'importlib' not in ns
@@ -84,7 +87,8 @@ import sys
 import water_group
 assert 'water_group.bootstrap' not in sys.modules, 'bridge must not eager-import bootstrap'
 assert sorted(water_group.__all__) == sorted([
-    'memory_engine','memory_commands','memory_format',
+    'memory_engine','memory_commands','memory_format','memory_store',
+    'memory_profile','memory_observe','memory_dossier',
     'bootstrap','sync_groups'])
 print('LAZY_OK')
 """
@@ -119,7 +123,7 @@ def test_no_bare_imports():
 def test_no_string_import():
     """importlib.import_module would bypass the AST check above."""
     import re
-    pattern = re.compile(r"""import_module\(\s*['"](?:memory_engine|memory_commands|memory_format|bootstrap|sync_groups)['"]""")
+    pattern = re.compile(r"""import_module\(\s*['"](?:memory_engine|memory_commands|memory_format|memory_store|memory_profile|memory_observe|memory_dossier|bootstrap|sync_groups)['"]""")
     hits = []
     for target in SCANNED:
         base = ROOT / target

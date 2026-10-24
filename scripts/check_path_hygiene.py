@@ -76,19 +76,24 @@ def scan_derived_paths():
 
 
 def scan_memory_engine_root():
-    """`memory_engine.py` must resolve its data root from the environment."""
-    path = ROOT / 'water-group' / 'memory_engine.py'
+    """The memory data root must resolve from the environment.
+
+    issue #11 (PA) moved the constants out of `memory_engine.py` into
+    `memory_store.py`; the facade only re-exports them, so the scan follows
+    the constants to their new home.
+    """
+    path = ROOT / 'water-group' / 'memory_store.py'
     if not path.exists():
-        return ['water-group/memory_engine.py 缺失']
+        return ['water-group/memory_store.py 缺失']
     text = path.read_text(encoding='utf-8')
     problems = []
     if 'WATER_GROUP_HOME' not in text:
         problems.append(
-            'water-group/memory_engine.py 的数据根没读 WATER_GROUP_HOME '
+            'water-group/memory_store.py 的数据根没读 WATER_GROUP_HOME '
             '——测试隔离会失效，fixture 会写进生产记忆库')
     if re.search(r'DEFAULT_DB_PATH\s*=\s*PROJECT_ROOT\s*/', text):
         problems.append(
-            'water-group/memory_engine.py 的 DEFAULT_DB_PATH 仍从仓库根推导')
+            'water-group/memory_store.py 的 DEFAULT_DB_PATH 仍从仓库根推导')
     return problems
 
 

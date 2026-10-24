@@ -1,8 +1,35 @@
 #!/bin/sh
-# Publication gate: nothing leaves this machine with personal data in it.
-# Covers tracked files (private store tokens, credentials, paths, images)
-# and commit identities/messages. See scripts/check_publication.py.
+# Pre-push gate（issue #61 起两步）：
+# 1. scripts/check_publication.py：全部文件 + commit 身份/文案（规则见 AGENTS.md §5.3）；
+# 2. scripts/check_pr_parity.py：对每个被推送的 commit 在干净 worktree + 空数据根里复跑门禁，
+#    证明「本地绿」不是靠开发机私有状态绿出来的（CI 等价条件）。
+# SKIP_PARITY=1 跳过第 2 步并在 stderr 留痕（纯文档推送等已知场景）；第 1 步不可跳。
 root=$(git rev-parse --show-toplevel) || exit 1
 cd "$root" || exit 1
-if [ -x .venv/Scripts/python.exe ]; then PY=.venv/Scripts/python.exe; else PY=python; fi
-exec "$PY" scripts/check_publication.py --require-private --history
+# worktree 里没有 .venv；venv 在主工作区（git-common-dir 的父目录）。parity 必须用
+# 项目 venv 的解释器，否则 pristine 树里的门禁会拿不到依赖、红得毫无意义。
+common=$(git rev-parse --path-format=absolute --git-common-dir)
+main_root=$(dirname "$common")
+if [ -x "$main_root/.venv/Scripts/python.exe" ]; then PY="$main_root/.venv/Scripts/python.exe"
+elif [ -x .venv/Scripts/python.exe ]; then PY=.venv/Scripts/python.exe
+else PY=python
+fi
+
+# stdin 每行：<local ref> <local sha> <remote ref> <remote sha>；删除推送的 sha 全零。
+refs=$(cat)
+"$PY" scripts/check_publication.py --require-private --history || exit 1
+
+if [ "$SKIP_PARITY" = "1" ]; then
+  echo "pre-push: SKIP_PARITY=1，跳过 CI 等价复跑（$(date -u '+%Y-%m-%dT%H:%M:%SZ')）" >&2
+  exit 0
+fi
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_sha" in
+    0000000000000000000000000000000000000000) continue ;;
+  esac
+  "$PY" scripts/check_pr_parity.py --ref "$local_sha" || exit 1
+done <<EOF
+$refs
+EOF
+exit 0

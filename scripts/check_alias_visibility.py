@@ -51,10 +51,14 @@ from water_group.memory_engine import get_memory_engine  # noqa: E402
 GROUP = "777000111"
 CID = f"666000222:group:{GROUP}"
 # 甲：主档有主名+历史外号；乙：主名只在覆盖行里有别群外号；丙：只在覆盖行
+# 戊/己/庚：单字主名、单字外号、泛称别名各一，钉精确视图不被扫描规则挡掉（#54）
 PROFILES = [
     ("10001", "群友甲", ["甲哥", "老甲"]),
     ("10002", "群友乙", []),
     ("10003", "丙老板", []),
+    ("10004", "戊", ["老戊"]),
+    ("10005", "群友己", ["己"]),
+    ("10006", "群友庚", ["领导"]),
 ]
 OVERLAY = [("10002", "乙总"), ("10003", "老丙")]
 
@@ -85,6 +89,11 @@ def build():
     payload = {"sender": "群友甲", "content": "老甲今天带 「乙总」 过来玩",
                "timestamp": 1792815041000, "is_self": False, "conversation_id": CID}
     chats.execute("INSERT INTO chat_inbox (id,session_id,message_id,payload) VALUES (1,'s1','m1',?)",
+                  (json.dumps(payload, ensure_ascii=False),))
+    # 单字显示名：行内必须带档案锚，正文里的单字不得长出指向（issue #54）
+    payload = {"sender": "己", "content": "己来了",
+               "timestamp": 1792815042000, "is_self": False, "conversation_id": CID}
+    chats.execute("INSERT INTO chat_inbox (id,session_id,message_id,payload) VALUES (2,'s1','m2',?)",
                   (json.dumps(payload, ensure_ascii=False),))
     chats.commit()
     chats.close()
@@ -139,6 +148,31 @@ def 发送者对不上_原样():
 
 
 @case
+def 单字主名_发送者带外号锚():
+    """主名只有一个字，精确查找也必须认出档案（issue #54）。"""
+    return wg_aliases.sender_tag("戊", GROUP) == "（外号：老戊）"
+
+
+@case
+def 单字外号_发送者带档案锚():
+    return wg_aliases.sender_tag("己", GROUP) == "（档案：群友己）"
+
+
+@case
+def 单字名不参与正文扫描():
+    """子串扫描继续挡单字：正文里的「戊」「己」不产生任何指向。"""
+    return (wg_aliases.body_hits("戊说她要睡了", GROUP) == []
+            and wg_aliases.body_hits("己来了", GROUP) == [])
+
+
+@case
+def 泛称精确命中_正文仍不指():
+    """显示名就叫「领导」是确定的同一字符串；正文里的泛称仍不指（issue #54）。"""
+    return (wg_aliases.sender_tag("领导", GROUP) == "（档案：群友庚）"
+            and wg_aliases.body_hits("领导说话了，群友都在", GROUP) == [])
+
+
+@case
 def 群覆盖行外号也指向():
     """乙总只在覆盖行里（issue #5 并集视图），按群号必须指得到。"""
     return wg_aliases.body_hits("乙总 来了", GROUP) == ["↪ 外号「乙总」= 群友乙(10002)"]
@@ -163,14 +197,19 @@ def 同一个人只指一次_长的优先():
 
 @case
 def 引擎故障_静默降级():
-    real = get_memory_engine().alias_index
-    get_memory_engine().alias_index = lambda **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    engine = get_memory_engine()
+    real = engine.alias_index
+    real_exact = engine.alias_index_exact
+    boom = lambda **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    engine.alias_index = boom
+    engine.alias_index_exact = boom
     wg_aliases._CACHE.clear()
     try:
         return (wg_aliases.sender_tag("群友甲", GROUP) == ""
                 and wg_aliases.body_hits("老甲 今天", GROUP) == [])
     finally:
-        get_memory_engine().alias_index = real
+        engine.alias_index = real
+        engine.alias_index_exact = real_exact
         wg_aliases._CACHE.clear()
 
 
@@ -182,6 +221,17 @@ def context_端到端带指向():
     text = buf.getvalue()
     return (code == 0 and "↪ 外号「乙总」= 群友乙(10002)" in text
             and "群友甲（外号：甲哥/老甲）" in text)
+
+
+@case
+def context_端到端单字锚():
+    """单字显示名的上下文行带档案锚，正文里的单字不长出指向（issue #54）。"""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = reply.show_context(10)
+    text = buf.getvalue()
+    return (code == 0 and "己（档案：群友己）: 己来了" in text
+            and "外号「己」" not in text)
 
 
 def main():

@@ -3,9 +3,16 @@
 写侧一直落得进去（档案 `aliases` 有数据），读侧不接：唤醒行只印发送者的 QQ
 群名片，正文里出现的外号没有任何指向信息，Agent 判不出「这是谁」。这里补读侧。
 
-数据源是记忆引擎的只读原语 `alias_index`（主档 ∪ 本群覆盖行并集，issue #5 同一
-视图），daemon 不直连库。别名表按进程缓存一次：CLI 一命一进程，一批唤醒行共用
-一份，不会读到半新半旧的中间态。
+数据源是记忆引擎的只读原语（主档 ∪ 本群覆盖行并集，issue #5 同一视图），
+daemon 不直连库。两个用途各读一张视图：
+
+- `alias_index_exact`：精确等值查找（`sender_tag`）。单字真名和泛称都保留——
+  显示名就是那个字符串，不是猜测（issue #54）；
+- `alias_index`：子串扫描（`body_hits`）。单字名和泛称挡掉——它们几乎在任何
+  句子里都能命中，会制造假指向（issue #30 的原始约束只针对这里）。
+
+别名表按进程缓存一次：CLI 一命一进程，一批唤醒行共用一份，不会读到半新半旧
+的中间态。
 
 引擎不可用（库锁、缺失、异常）时静默降级：只印原样，不长出任何指向，也不拖垮
 唤醒链路——与 `reply.dossier_matches` 同一兜底姿势。认错人比不认严重得多，
@@ -30,15 +37,23 @@ def group_of(conversation_id):
     return parts[2] if len(parts) == 3 and parts[1] == "group" else ""
 
 
-def alias_map(group_id=None):
-    """``{名字: (QQ, 主名)}``；拿不到就空表（调用方按没有指向处理）。"""
-    key = str(group_id or "")
+def alias_map(group_id=None, exact=False):
+    """``{名字: (QQ, 主名)}``；拿不到就空表（调用方按没有指向处理）。
+
+    ``exact=True`` 取精确等值视图（单字名也保留），``exact=False`` 取子串扫描
+    视图（单字名与泛称挡掉）。缓存键必须带视图维度，否则两张表互相污染
+    （issue #54）。
+    """
+    key = (str(group_id or ""), bool(exact))
     if key in _CACHE:
         return _CACHE[key]
     try:
         from water_group.memory_engine import get_memory_engine
 
-        table = get_memory_engine().alias_index(group_id=key or None)
+        engine = get_memory_engine()
+        gid = key[0] or None
+        table = (engine.alias_index_exact(group_id=gid) if exact
+                 else engine.alias_index(group_id=gid))
     except Exception:  # noqa: BLE001  渲染层不因档案库故障而失败
         table = {}
     _CACHE[key] = table
@@ -54,7 +69,9 @@ def sender_tag(sender, group_id=None, limit=SENDER_ALIAS_CHARS):
     name = str(sender or "").strip()
     if not name:
         return ""
-    table = alias_map(group_id)
+    # 精确等值查找：单字真名必须是确定的命中，不能被子串扫描的 min_len 挡掉
+    # （issue #54）。
+    table = alias_map(group_id, exact=True)
     hit = table.get(name)
     if not hit:
         return ""

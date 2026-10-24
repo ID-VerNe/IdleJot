@@ -34,6 +34,7 @@ import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #4 PA0)
 import wg_images  # noqa: E402  (图片标记渲染，与 reply/look 同一份实现)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
+from wg_daemon import read_json
 from wg_paths import data_dir, logs_dir, state_dir
 STATE = state_dir()
 CONFIG = wg_config.CONFIG
@@ -897,7 +898,19 @@ def report(exclude_pids=None, resident_pid=None):
 
     napcat = "离线"
     if all(port_open(p) for p in NAPCAT_PORTS):
-        napcat = f"在线 ({account} {nickname})" if info else "端口在，OneBot 暂未响应"
+        if info:
+            napcat = f"在线 ({account} {nickname})"
+        else:
+            # Ports bound but OneBot silent is the issue #45 outage signature:
+            # QQ keeps delivering to NapCat while the bridge emits no events, so
+            # @ and # commands get no answer at all. "暂未响应" read like NapCat
+            # itself was still healthy -- say what it actually means.
+            napcat = ("端口在，OneBot 无响应（消息可达 NapCat，但事件未发出"
+                      "——@ 与 # 指令都不会有响应）")
+            halt = read_json(STATE / "napcat_halt.json")
+            if halt:
+                napcat += (f"；watchdog 已 halt（{halt.get('kind')} ×{halt.get('fails')}，"
+                           f"{halt.get('halted_at')} 起，每 10 分钟重试一次）")
     backend = "在线" if all(port_open(p) for p in BACKEND_PORTS) else "离线"
     if resident_pid:
         guard = f"运行中 pid={resident_pid}（本进程常驻）"

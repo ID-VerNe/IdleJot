@@ -22,8 +22,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from wg_daemon import logger
-from wg_paths import logs_dir
+from wg_daemon import logger, write_json
+from wg_paths import logs_dir, state_dir
 
 # The watchdog runs without a console, so any console child it spawns (powershell,
 # netstat, taskkill) gets a fresh console window -- the black box that flashes
@@ -33,6 +33,10 @@ import winconsole  # noqa: E402  (探针开窗抑制，一次收口)
 
 LOG = logs_dir() / "napcat-watchdog.log"
 CONFIG = ROOT / "water-group" / "config.json"
+# Machine-readable "the link is down" marker (issue #45): halt used to exist
+# only as a log line, so a duty agent saw "no wake-up" with no way to tell a
+# quiet group from a dead chain. up.py --status and any watcher read this.
+HALT_FILE = state_dir() / "napcat_halt.json"
 PORT = int(os.environ.get("IDLEJOT_ONEBOT_PORT") or os.environ.get("TULPA_ONEBOT_PORT", "43000"))
 
 # A relaunch that keeps failing must slow down instead of hammering. Each attempt
@@ -211,6 +215,33 @@ def relaunch():
     return ok
 
 
+def write_halt_state(kind, fails, reason, first_fail_at=None):
+    """Leave a machine-readable marker that the watchdog has stopped trying (#45).
+
+    `up.py --status` saying "端口在" while the chain is dead is what let issue
+    #45 run 1h37m unnoticed: the only signal was a log line nobody reads. This
+    file is the readable one -- status and any watcher pick it up. Write
+    failures are swallowed: a state file we cannot write must not take the
+    watchdog down with it.
+    """
+    payload = {
+        "kind": kind,
+        "fails": fails,
+        "first_fail_at": first_fail_at or time.strftime("%Y-%m-%d %H:%M:%S"),
+        "halted_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "reason": reason,
+    }
+    write_json(HALT_FILE, payload)
+
+
+def clear_halt_state():
+    """Drop the halt marker; every recovery point calls this (#45)."""
+    try:
+        HALT_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def kill_injected_instances():
     """Take down every QQ instance this launcher started, whole tree.
 
@@ -237,6 +268,10 @@ def main():
         log(f"WARN this process carries {sandbox}: every injected QQ dies ~20s after "
             f"launch (0xC06D007F). Restart the stack from water-group\\start-bot.pyw.")
     fails = 0
+    # When the current failure streak began, for the halt marker (#45): the gap
+    # between "first boot failed" and "watchdog gave up" is how long the chain
+    # was already down before anyone could notice.
+    first_fail_at = None
     while True:
         try:
             # Checked before the probe, and on a short cycle: a crashed instance
@@ -254,8 +289,11 @@ def main():
                     # counter is what makes this a slow retry instead of a permanent
                     # stop, which would leave the bot down after a transient cause.
                     log(f"halt: {fails} consecutive crashes, cooling down {HALT_SLEEP}s before one more try")
+                    write_halt_state("crash loop", fails,
+                                     f"{fails} consecutive crashes, cooling down", first_fail_at)
                     time.sleep(HALT_SLEEP)
                     fails = 0
+                    first_fail_at = None
                     continue
                 time.sleep(2)
                 relaunch()
@@ -263,18 +301,24 @@ def main():
                 again = [pid for pid in crash_dialog_pids() if is_our_instance(pid)]
                 if again:
                     fails += 1
+                    if fails == 1:
+                        first_fail_at = time.strftime("%Y-%m-%d %H:%M:%S")
                     delay = min(BACKOFF_BASE * (2 ** (fails - 1)), BACKOFF_MAX)
                     log(f"crash loop (#{fails}) pid={again}, backing off {delay}s")
                     time.sleep(delay)
                 else:
                     log("settled after crash")
                     fails = 0
+                    first_fail_at = None
+                    clear_halt_state()
                 continue
 
             if healthy():
                 if fails:
                     log(f"recovered after {fails} failed boot(s)")
                 fails = 0
+                first_fail_at = None
+                clear_halt_state()
                 time.sleep(2)
                 continue
 
@@ -290,16 +334,30 @@ def main():
                     break
             if recovered:
                 fails = 0
+                first_fail_at = None
+                clear_halt_state()
                 continue
 
             dead = dead_instance_count()
             if dead >= ZOMBIE_LIMIT:
                 log(f"halt: {dead} dead QQ objects never reaped, relaunching only adds more")
+                write_halt_state("zombie", dead,
+                                 f"{dead} dead QQ objects never reaped", first_fail_at)
                 time.sleep(HALT_SLEEP)
                 continue
             if fails >= MAX_CONSECUTIVE_FAILURES:
-                log(f"halt: {fails} consecutive boot failures, waiting for a human")
+                # Boot timeouts used to stop here for good: the counter never
+                # reset, so every later pass hit the same condition and the log
+                # just repeated "waiting for a human" every ten minutes while QQ
+                # stayed down -- 1h37m of silent outage in issue #45. Cool down
+                # and reset like the crash-loop branch above: the next pass
+                # relaunches, so a transient cause still recovers on its own.
+                log(f"halt: {fails} consecutive boot failures, cooling down {HALT_SLEEP}s before one more try")
+                write_halt_state("boot timeout", fails,
+                                 f"{fails} consecutive boot failures, cooling down", first_fail_at)
                 time.sleep(HALT_SLEEP)
+                fails = 0
+                first_fail_at = None
                 continue
 
             pid = owner_pid()
@@ -313,9 +371,13 @@ def main():
                 if healthy():
                     log("online")
                     fails = 0
+                    first_fail_at = None
+                    clear_halt_state()
                     break
             else:
                 fails += 1
+                if fails == 1:
+                    first_fail_at = time.strftime("%Y-%m-%d %H:%M:%S")
                 delay = min(BACKOFF_BASE * (2 ** (fails - 1)), BACKOFF_MAX)
                 log(f"boot timeout (#{fails}), backing off {delay}s")
                 time.sleep(delay)

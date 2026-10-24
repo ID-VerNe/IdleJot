@@ -323,6 +323,7 @@ jsonschema==4.26.0
 | `check_no_console_child.py` | 子进程不开控制台窗口（运行时树 spawn 必须带 `creationflags`；flag 只在两个 helper 模块里拼写，防 issue #39 复发） | 全程 |
 | `check_issue_16_audit_fixes.py` | #16 审计缺陷回归（store 异常类型 / grants 排序 / MCP 响应解析 / 会话活性） | 全程 |
 | `check_watchdog_token.py` | watchdog 探针现读 OneBot token（轮换 config.json 后探针必须跟随，防 #17 复发） | 全程 |
+| `check_watchdog_halt.py` | watchdog halt 可恢复：连续 boot timeout 后冷却重置再试（不许永久停机），halt 写 `state/napcat_halt.json`、恢复即清（防 #45 复发） | 全程 |
 | `check_collector_self_echo.py` | collector 不落盘自身回显（唤醒流只留群友消息；游标/去重仍按整批推进，防 #28 复发） | 全程 |
 | `check_qr_login.py` | 每用户扫码登录（passport 双流 / 凭据兜底解析 / DPAPI 往返 / 限流 / P0 隐私不回退全局 CK，issue #6） | 全程 |
 

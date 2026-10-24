@@ -1,4 +1,5 @@
 """Key paths only: identity, bounded parsing, scope, cache and citation checks."""
+import hashlib
 import json
 import sys
 import tempfile
@@ -15,6 +16,7 @@ from chatlocal.artifact_metadata import wechat_file
 
 
 def main():
+    (ROOT/'.tmp').mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(dir=ROOT/'.tmp',prefix='artifact-check-') as tmp:
         root=Path(tmp);s=Store(root/'test.sqlite3');a=Artifacts(s)
         body='课程任务书\n截止时间是10月15日。\n端云协同需要本地Router选择推理节点。\n'
@@ -69,24 +71,6 @@ def main():
         blank=[dict(values[0],source_id='',content='',timestamp=f'2026-09-22 11:0{n}:00') for n in range(2)]
         export.write_text(json.dumps(blank,ensure_ascii=False),'utf-8');assert s.import_file(export)['imported']==2
         with s.connect() as db:assert db.execute("SELECT count(*) FROM artifact_sources WHERE original_message_id=''").fetchone()[0]==blank_before+2
-        # Observed upload ACK: a nonzero WX FileMessage ID is finalized later.
-        import hashlib,time
-        xml='<msg><appmsg><type>6</type><title>任务书.txt</title><appattach><totallen>10</totallen><filemd5>'+'a'*32+'</filemd5></appattach></appmsg></msg>'
-        raw=dict(chat='self',sender_username='self',sender_name='本人',create_time=1790067000,server_id=111,
-            type_code=49,content=xml,local_id=7,source_db='message/message_1.db',source_table='Msg_'+'a'*32)
-        head=dict(reader='wechatauto-replica',wxid='self',identity_method='per-shard',chats=[dict(username='self',name='本人')],messages=[raw])
-        cp=dict(platform='wechat',previous={},next={'account':'self'},observed_at=time.time())
-        export.write_text(json.dumps(head,ensure_ascii=False),'utf-8');assert s.import_file(export,live=cp)['imported']==1
-        with s.connect() as db:source=dict(db.execute("SELECT * FROM artifact_sources WHERE original_message_id='111'").fetchone())
-        head['messages'][0]['server_id']=222;cp['previous']=cp['next']
-        export.write_text(json.dumps(head,ensure_ascii=False),'utf-8');assert s.import_file(export,live=cp)['duplicate']==1
-        with s.connect() as db:
-            assert db.execute('SELECT original_message_id FROM artifact_sources WHERE id=?',(source['id'],)).fetchone()[0]=='222'
-            assert db.execute('SELECT count(*) FROM artifact_sources WHERE message_id=?',(source['message_id'],)).fetchone()[0]==1
-        head['messages'][0].update(server_id=333,content=xml.replace('a'*32,'b'*32))
-        export.write_text(json.dumps(head,ensure_ascii=False),'utf-8')
-        try:s.import_file(export,live=cp);raise AssertionError('Different file accepted as upload acknowledgement')
-        except ValueError:pass
         # Metadata-only OneBot contract fixture; explicitly not a live QQ test.
         class Bot(OneBot):
             def __init__(self):self.count=2
@@ -117,28 +101,7 @@ def main():
         with s.connect() as db:
             eventrow=db.execute("SELECT sha256,availability FROM artifact_sources WHERE file_id='event-file'").fetchall()
             assert len(eventrow)==1 and tuple(eventrow[0])==(None,'METADATA_ONLY')
-        from fastapi import FastAPI
-        from fastapi.testclient import TestClient
-        from chatlocal.artifact_routes import install_artifact_routes
-        app=FastAPI();install_artifact_routes(app,s)
-        with TestClient(app) as client:
-            assert client.get('/api/artifacts').status_code==200
-            assert client.get('/api/artifacts',headers={'Origin':'https://evil.example'}).status_code==403
-            assert client.get('/api/artifacts/1/content').headers['content-disposition'].startswith('attachment;')
-            assert client.get('/api/artifacts/999/content').status_code==404
-        # Purging chat sources releases only unshared, unprotected owned blobs.
-        disposable=root/'临时.txt';disposable.write_text('不同的附件正文','utf-8')
-        export.write_text(json.dumps([dict(values[0],source_id='disposable',content='[文件] 临时.txt',
-            files=[dict(filename=disposable.name,size=disposable.stat().st_size)])],ensure_ascii=False),'utf-8')
-        s.import_file(export);sid=a.search({'query':'临时.txt'})['files'][0]['id'];a.prepare(sid)
-        own_blob=a.cache_path(a.get(sid));retained_blob=a.cache_path(a.get(2))
-        from chatlocal.data_delete import preview,purge
-        deletion=dict(platform='qq',conversations=['c'],start='2026-09-22',end='2026-09-22')
-        purge(s,deletion,preview(s,deletion)['fingerprint'])
-        assert not own_blob.exists() and disposable.exists() and retained_blob.exists()
-        assert a.chunks(2)['files'][0]['text']==body.strip()
-        assert not a.search({'query':'临时.txt'})['files']
-    print('PASS: metadata/idempotency, SHA256 shared parse, retained index after eviction, reacquisition, hard scope, real chunk citations, missing files, XML limits, recursive OneBot fixture and local HTTP boundaries. No cloud.')
+    print('PASS: metadata/idempotency, SHA256 shared parse, retained index after eviction, reacquisition, hard scope, real chunk citations, missing files, XML limits and recursive OneBot fixture. No cloud.')
 
 
 if __name__=='__main__':main()

@@ -7,15 +7,25 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+# 同一分支/PR 的新推送取消旧运行（issue #60）：不再让上一轮白烧 runner。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  checks:
+  gates:
     # slim is Windows-only (taskkill/WMI/.pyw, pywin32); there is no Linux
-    # terminal chain to validate anymore, so this is the only job.
+    # terminal chain to validate anymore, so this is the only matrix job.
+    name: gates (${{ matrix.shard }})
     runs-on: windows-latest
     timeout-minutes: 40
     env:
       PYTHONUTF8: '1'
       GRADIO_ANALYTICS_ENABLED: 'False'
+    strategy:
+      # 门禁分片互不影响：一片红不取消其余片，一次红灯看全貌（issue #60）。
+      fail-fast: false
+      matrix:
+        shard: [static, runtime, mcp, storage, reply]
     steps:
       # Pinned to an exact tag, same rule as setup-uv below. v5 runs on
       # Node.js 24, which clears the Node 20 deprecation annotation (#25).
@@ -30,9 +40,24 @@ jobs:
           python-version: '3.13'
       - name: Sync pinned dependencies
         run: uv sync --frozen
-      # The gate list, order and per-gate args live in scripts/gates.json
-      # (issue #59): CI no longer keeps a hand-written array, and
-      # scripts/check_gate_manifest.py fails when disk, manifest and AGENTS
-      # §5.1 drift apart. check_publication.py runs with --history there.
+      # 门禁清单、顺序、单门禁参数与分片归属都在 scripts/gates.json（issue #59/#60）；
+      # 上面的 matrix.shard 与清单的 shards 由 scripts/check_gate_manifest.py 钉住。
+      # 分片内部仍是串行执行（保持 AGENTS.md §2.6 的安静窗口），结果写进 job 摘要。
       - name: Regression suite (scripts/gates.json)
-        run: uv run --frozen python scripts/run_gates.py ci
+        run: uv run --frozen python scripts/run_gates.py ci --shard ${{ matrix.shard }}
+  checks:
+    # 分支保护要求的必需上下文就是 `checks`（issue #58）。matrix 的检查名会变成
+    # `gates (static)` 之类，所以保留这个汇总 job 顶住原来的名字：任一色分片没绿即失败。
+    name: checks
+    needs: gates
+    if: always()
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: 汇总分片结果
+        shell: pwsh
+        env:
+          MATRIX_RESULT: ${{ needs.gates.result }}
+        run: |
+          "分片矩阵结果：$env:MATRIX_RESULT" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          if ($env:MATRIX_RESULT -ne 'success') { exit 1 }

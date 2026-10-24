@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
+from wg_daemon import pid_alive, read_json, write_json  # noqa: E402  (issue #11 PB: 助手收口)
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 WATER_GROUP = ROOT / "water-group"
@@ -151,57 +153,6 @@ def _log(line: str) -> None:
         pass
 
 
-def _read_json(path: Path):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return None
-
-
-def _write_json(path: Path, payload) -> bool:
-    """Write one JSON line atomically, leaving no half file for a reader."""
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{secrets.token_hex(4)}")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
-        os.replace(tmp, path)
-        return True
-    except OSError:
-        return False
-
-
-def pid_alive(pid) -> bool:
-    """True when *pid* names a live process.  Never sends a signal."""
-    try:
-        pid = int(pid)
-    except (TypeError, ValueError):
-        return False
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        try:
-            import ctypes
-
-            kernel32 = ctypes.windll.kernel32
-            handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
-            if not handle:
-                return False
-            try:
-                code = ctypes.c_ulong()
-                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-                    return False
-                return code.value == 259  # STILL_ACTIVE
-            finally:
-                kernel32.CloseHandle(handle)
-        except Exception:  # noqa: BLE001
-            return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-
 def sandbox_dll() -> str:
     """Name of an injected agent-sandbox DLL, or an empty string."""
     if os.name != "nt":
@@ -215,7 +166,7 @@ def sandbox_dll() -> str:
 
 
 def guard_info():
-    return _read_json(_state(GUARD_NAME)) or {}
+    return read_json(_state(GUARD_NAME)) or {}
 
 
 def write_guard_state(pid=None, build="", sandbox=None):
@@ -226,7 +177,7 @@ def write_guard_state(pid=None, build="", sandbox=None):
         "sandbox": sandbox_dll() if sandbox is None else sandbox,
         "build": build,
     }
-    _write_json(_state(GUARD_NAME), payload)
+    write_json(_state(GUARD_NAME), payload)
     return payload
 
 
@@ -433,7 +384,7 @@ class Planner:
         return files
 
     def load(self):
-        raw = _read_json(self.snapshot_path)
+        raw = read_json(self.snapshot_path)
         if not isinstance(raw, dict):
             return None
         files = raw.get("files")
@@ -442,7 +393,7 @@ class Planner:
         return {str(k): v for k, v in files.items() if isinstance(v, dict)}
 
     def save(self, files):
-        return _write_json(self.snapshot_path, {
+        return write_json(self.snapshot_path, {
             "v": 1,
             "at": time.time(),
             "files": files,
@@ -652,7 +603,7 @@ def _http_json(url: str, timeout: float = 2.0):
 
 def napcat_healthy() -> bool:
     """OneBot answers on 127.0.0.1:43000.  Used before bouncing watchdog."""
-    config = _read_json(WATER_GROUP / "config.json") or {}
+    config = read_json(WATER_GROUP / "config.json") or {}
     token = str(config.get("onebot_token") or "")
     body = b"{}"
     request = urllib.request.Request(
@@ -712,7 +663,7 @@ class Reloader:
         self.quarantine_until: dict[str, float] = {}
         self.quarantine_delay: dict[str, float] = {}
         self.deferred: set[str] = set()
-        self.state = _read_json(_state(STATE_NAME)) or {}
+        self.state = read_json(_state(STATE_NAME)) or {}
         # A guard restart is a fresh start: quarantine does not survive it.
         # The failed file is still overwritten by _write_failed on a new failure.
         self.recover_inflight()
@@ -721,7 +672,7 @@ class Reloader:
     # ---- mailbox -----------------------------------------------------
     def recover_inflight(self):
         path = _inflight_path()
-        raw = _read_json(path)
+        raw = read_json(path)
         if raw is None:
             return
         nonce = str(raw.get("nonce") or "")
@@ -740,7 +691,7 @@ class Reloader:
             pass
 
     def _write_result(self, nonce: str, payload: dict):
-        _write_json(_result_path(nonce), payload)
+        write_json(_result_path(nonce), payload)
 
     def _claim_requests(self):
         if _inflight_path().exists():
@@ -766,7 +717,7 @@ class Reloader:
         return claimed
 
     def _read_inflight(self):
-        raw = _read_json(_inflight_path())
+        raw = read_json(_inflight_path())
         return raw if isinstance(raw, dict) else None
 
     def _finish_inflight(self):
@@ -1126,7 +1077,7 @@ class Reloader:
                 "count": self.failures.get(name, 0),
                 "until": self.quarantine_until.get(name, 0),
             }
-        _write_json(_state(FAILED_NAME), {"v": 1, "at": time.time(), "targets": targets})
+        write_json(_state(FAILED_NAME), {"v": 1, "at": time.time(), "targets": targets})
 
     def _write_state(self, **extra):
         self.state.update({
@@ -1147,11 +1098,11 @@ class Reloader:
                 "last_files": result.get("changed") or [],
                 "last_restarted": result.get("restarted") or [],
             })
-        _write_json(_state(STATE_NAME), self.state)
+        write_json(_state(STATE_NAME), self.state)
 
 
 def status_line() -> str:
-    state = _read_json(_state(STATE_NAME)) or {}
+    state = read_json(_state(STATE_NAME)) or {}
     if not state:
         return "未启用（无 wg_reload_state.json）"
     watch = "开" if state.get("watch") else "关"
@@ -1194,7 +1145,7 @@ def _wait_result(nonce: str, wait: float, guard: int):
     path = _result_path(nonce)
     deadline = time.monotonic() + max(0.0, wait)
     while True:
-        raw = _read_json(path)
+        raw = read_json(path)
         if isinstance(raw, dict):
             return raw
         if wait <= 0:
@@ -1238,10 +1189,10 @@ def main(argv=None):
 
     if args.status:
         print(status_line())
-        failed = _read_json(_state(FAILED_NAME)) or {}
+        failed = read_json(_state(FAILED_NAME)) or {}
         if failed.get("targets"):
             print("quarantine: " + ", ".join(sorted(failed["targets"])))
-        return 0 if _read_json(_state(STATE_NAME)) else 2
+        return 0 if read_json(_state(STATE_NAME)) else 2
 
     if args.full:
         print("P0 不支持 --full；请从 explorer 重启 water-group/start-bot.pyw")

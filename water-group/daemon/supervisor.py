@@ -25,6 +25,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 import winconsole  # noqa: E402  (子进程开窗抑制，一次收口)
+from wg_daemon import logger
 from wg_paths import logs_dir, state_dir
 STATE_DIR = state_dir()
 # 每个会阻塞等待的孩子一条心跳：卡在长轮询/WS recv 里不等于进程死了，只看进程
@@ -70,13 +71,8 @@ def sanitized_env():
     return env
 
 
-def log(line):
-    try:
-        LOG.parent.mkdir(parents=True, exist_ok=True)
-        with open(LOG, "a", encoding="utf-8") as fh:
-            fh.write(f"{time.strftime('%m-%d %H:%M:%S')} {line}\n")
-    except OSError:
-        pass
+# issue #11 PB: 日志助手收口到 wg_daemon
+log = logger(LOG)
 
 
 def heartbeat_age(name):

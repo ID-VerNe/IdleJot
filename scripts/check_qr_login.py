@@ -820,11 +820,13 @@ def test_commands_dispatch_unbind_cooldown(tmp):
 
 def test_settings(_tmp):
     S = settings_for(admin_qq="123", qr_login={"daily_limit": 0})
-    check("settings: admin_qq 字符串归一成列表", S["miyoushe"]["admin_qq"] == ["123"])
-    check("settings: daily_limit=0 保留（不限流）", S["miyoushe"]["qr_login"]["daily_limit"] == 0)
+    mys = S["plugins"]["miyoushe"]["options"]
+    check("settings: admin_qq 字符串归一成列表", mys["admin_qq"] == ["123"])
+    check("settings: daily_limit=0 保留（不限流）", mys["qr_login"]["daily_limit"] == 0)
     check("settings: 缺省 qr_login 段",
           commands.settings_from({"slash_commands": {"miyoushe": {}}})
-          ["miyoushe"]["qr_login"] == {"enabled": True, "daily_limit": 5, "session_ttl": 300})
+          ["plugins"]["miyoushe"]["options"]["qr_login"]
+          == {"enabled": True, "daily_limit": 5, "session_ttl": 300})
 
 
 def main():

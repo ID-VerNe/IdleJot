@@ -306,20 +306,41 @@ def test_registry_and_merge():
 
 
 def test_settings_from():
-    print("[settings_from]")
+    print("[settings_from / 插件三态]")
     bare = commands.settings_from({})
-    check("缺省关闭", bare["sixty"]["enabled"] is False)
-    check("缺省 allow=None（用默认名单）", bare["sixty"]["allow"] is None)
-    check("缺省 max_items=5", bare["sixty"]["max_items"] == 5)
+    check("缺省关闭", bare["plugins"]["sixty"]["enabled"] is False)
+    check("缺省 allow=None（用默认名单）",
+          bare["plugins"]["sixty"]["options"]["allow"] is None)
+    check("缺省 max_items=5", bare["plugins"]["sixty"]["options"]["max_items"] == 5)
     weird = commands.settings_from({"slash_commands": {"sixty": {
         "enabled": True, "max_items": 0, "timeout": "abc", "base_url": " http://x ",
         "default_city": " 广州 ", "allow": [" 天气 ", "", "热搜"]}}})
-    check("max_items 非正数回落 5", weird["sixty"]["max_items"] == 5)
-    check("timeout 非数字回落 0", weird["sixty"]["timeout"] == 0)
-    check("base_url 去空白", weird["sixty"]["base_url"] == "http://x")
-    check("default_city 去空白", weird["sixty"]["default_city"] == "广州")
-    check("allow 去空白丢空串", weird["sixty"]["allow"] == ["天气", "热搜"])
-    check("enabled 透传", weird["sixty"]["enabled"] is True)
+    entry = weird["plugins"]["sixty"]
+    opts = entry["options"]
+    check("max_items 非正数回落 5", opts["max_items"] == 5)
+    check("timeout 非数字回落 0", opts["timeout"] == 0)
+    check("base_url 去空白", opts["base_url"] == "http://x")
+    check("default_city 去空白", opts["default_city"] == "广州")
+    check("allow 去空白丢空串", opts["allow"] == ["天气", "热搜"])
+    check("enabled 透传", entry["enabled"] is True)
+    check("旧键记为 plugins_legacy（--status 会提示可迁）",
+          weird["plugins_legacy"] == ["sixty"], str(weird["plugins_legacy"]))
+    # 群级关闭：插件总开关开着，但某个群不想看
+    scoped = commands.settings_from({
+        "slash_commands": {"sixty": {"enabled": True, "base_url": FIXTURE_BASE}},
+        "groups": {"1": {"enabled": True, "plugins": {"sixty": False}},
+                   "2": {"enabled": True}}})
+    check("群级关闭归一成 group_off",
+          scoped["plugins"]["sixty"]["group_off"] == ["1"],
+          str(scoped["plugins"]["sixty"]["group_off"]))
+    check("群级关闭的群不列 #简报", "简报" not in commands.help_text(scoped, "1"))
+    check("别的群照常列 #简报", "简报" in commands.help_text(scoped, "2"))
+    # 群白名单：只在这些群开
+    only = commands.settings_from({"plugins": {"sixty": {
+        "enabled": True, "groups": ["2"],
+        "options": {"base_url": FIXTURE_BASE}}}})
+    check("groups 白名单内放行", "简报" in commands.help_text(only, "2"))
+    check("groups 白名单外落空", "简报" not in commands.help_text(only, "3"))
 
 
 def test_gate_end_to_end():

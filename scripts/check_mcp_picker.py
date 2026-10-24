@@ -9,7 +9,9 @@ from chatlocal.store import Store
 from chatlocal.mcp_routes import install_mcp_routes
 
 def main():
-    with tempfile.TemporaryDirectory() as tmp:
+    ROOT=Path(__file__).resolve().parents[1]
+    (ROOT/'.tmp').mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=ROOT/'.tmp',prefix='mcp-picker-') as tmp:
         root=Path(tmp);store=Store(root/'chats.sqlite3')
         rows=[dict(platform=p,conversation_id=f'{p}-{i}',conversation=f'合成群{i:03}',
                    conversation_type='group',sender_id='fixture',sender='合成成员',

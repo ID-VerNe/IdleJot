@@ -10,7 +10,8 @@ Tests:
 7. Idle digest background extraction.
 8. Tier 1 (L1 Context) compact synthesized card generation (~80 tokens).
 9. Tier 2 (L2 DB Storage) query_member_dossier with group-scoped boundary enforcement.
-10. MCP integration: CHAT_TOOLS, schemas, compact_wait preservation, and tool dispatch.
+10. Group overlay + profile union: read view, read-modify-write safety, rollback backup (issue #5).
+11. MCP integration: CHAT_TOOLS, schemas, compact_wait preservation, and tool dispatch.
 """
 import json
 import os
@@ -612,6 +613,75 @@ def test_memory_cap_consistency(tmp_dir):
     print("✓ 11. 画像记忆上限统一为 MEMORY_SLOTS、复述续命与溢出淘汰测试通过 (issue #43/#60)")
 
 
+def test_group_overlay_union(tmp_dir):
+    """Issue #5: a group overlay is a snapshot, never a replacement for the profile.
+
+    The read side used to return the overlay alone whenever one existed, so the
+    caller saw a subset of the profile -- and an ``overwrite`` write, which
+    replaced the profile with exactly what the caller had read, deleted every
+    global-only fact. The view is now the deduplicated union, and a group write
+    lands in the overlay only.
+    """
+    engine = MemoryEngine(tmp_dir / "overlay_union.sqlite3")
+    uid = "123450005"
+    group = "group_union"
+    main = [f"主档事实{i}" for i in range(1, 6)]
+
+    engine.update_member_dossier(identifier=uid, primary_name="并集群友", key_memories=main)
+    # Legacy row: an overlay holding only the group slice, shorter than the
+    # profile. This is the shape issue #5 was reported against.
+    with engine.lock, engine._connect() as conn:
+        conn.execute(
+            "INSERT INTO member_group_memories (user_id, group_id, key_memories, tone_style,"
+            " interests, aliases, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (uid, group, json.dumps(["覆盖事实1"], ensure_ascii=False), "", "[]", "[]", 0, 0),
+        )
+
+    dossier = engine.query_member_dossier(uid, group_id=group)
+    seen = dossier["profile"]["key_memories"]
+    assert set(main) <= set(seen), f"query 不得再隐藏主档记忆: {seen}"
+    assert "覆盖事实1" in seen
+    assert dossier["memory_scope"] == "group"
+
+    # The card reads the same view: one overlay entry leaves room for the
+    # profile's newest fact next to it.
+    card = engine.build_l1_context(group, user_ids=[uid])[0]
+    assert "覆盖事实1" in card and "主档事实5" in card, f"L1 卡应取并集尾部: {card}"
+
+    # Read -> dedupe -> overwrite: the profile survives, the overlay becomes the
+    # snapshot the caller had just read.
+    res = engine.update_member_dossier(identifier=uid, key_memories=seen, overwrite=True, group_id=group)
+    assert res["success"] is True
+    assert res["profile"]["key_memories"] == seen, f"返回值应与读取视图一致: {res['profile']['key_memories']}"
+    with engine.lock, engine._connect() as conn:
+        main_after = json.loads(
+            conn.execute("SELECT key_memories FROM member_profiles WHERE user_id=?", (uid,)).fetchone()[0]
+        )
+        overlay_after = json.loads(
+            conn.execute(
+                "SELECT key_memories FROM member_group_memories WHERE user_id=? AND group_id=?", (uid, group)
+            ).fetchone()[0]
+        )
+    assert main_after == main, f"群内读改写不得改写主档: {main_after}"
+    assert overlay_after == seen, f"覆盖行应写入完整快照: {overlay_after}"
+    assert engine.query_member_dossier(uid, group_id=group)["profile"]["key_memories"] == seen
+
+    # A group-scoped overwrite replaces the group snapshot only; the profile is
+    # untouched and the previous snapshot is kept for rollback.
+    cleared = engine.update_member_dossier(identifier=uid, key_memories=[], overwrite=True, group_id=group)
+    assert cleared["profile"]["key_memories"] == main, f"清空本群记忆后仍应看到主档: {cleared['profile']}"
+    assert cleared["profile"]["key_memories_backup"] == seen, "收缩式覆盖必须留下上一份记忆"
+    assert engine.query_member_dossier(uid, group_id=group)["profile"]["key_memories"] == main
+
+    # `#小本本` dedups against the union and appends to the group snapshot.
+    engine.handle_explicit_command("999000111", "路人", group, "@机器人 记在小本本上 并集群友 其实爱打牌")
+    refreshed = engine.query_member_dossier(uid, group_id=group)["profile"]["key_memories"]
+    assert "爱打牌" in refreshed[-1], f"小本本应追加到并集尾部: {refreshed[-3:]}"
+    assert set(main) <= set(refreshed), f"小本本写入不得吞掉主档: {refreshed}"
+
+    print("✓ 14. 群内覆盖行与主档取并集、读改写不丢档、收缩覆盖留备份测试通过 (issue #5)")
+
+
 def test_mcp_integration():
     # 1. Check CHAT_TOOLS includes query_member_dossier, update_member_dossier, consolidate_chat_memory
     assert "query_member_dossier" in CHAT_TOOLS, "query_member_dossier must be in CHAT_TOOLS"
@@ -698,9 +768,10 @@ def main():
         test_sync_onebot_members_primary_name(tmp_dir)
         test_memory_cap_consistency(tmp_dir)
         test_per_group_memory_isolation(tmp_dir)
+        test_group_overlay_union(tmp_dir)
         test_mcp_integration()
     print("========================================================================")
-    print("✓ 全部 12 项核心测试均通过！")
+    print("✓ 全部 14 项核心测试均通过！")
     print("========================================================================")
 
 

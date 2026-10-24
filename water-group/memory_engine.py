@@ -129,9 +129,15 @@ class MemoryEngine:
                 """
             )
             # Idempotent column add for rollback backup (SQLite has no IF NOT EXISTS for ALTER).
+            # Both rows get one: a shrinking overwrite is destructive in either
+            # scope, and issue #5 showed the profile column alone was never
+            # written, so "restore from backup" was a promise with no data.
             cols = {r[1] for r in conn.execute("PRAGMA table_info(member_profiles)").fetchall()}
             if "key_memories_backup" not in cols:
                 conn.execute("ALTER TABLE member_profiles ADD COLUMN key_memories_backup TEXT")
+            group_cols = {r[1] for r in conn.execute("PRAGMA table_info(member_group_memories)").fetchall()}
+            if "key_memories_backup" not in group_cols:
+                conn.execute("ALTER TABLE member_group_memories ADD COLUMN key_memories_backup TEXT")
 
             # issue #90: an event that had to be shortened says so, instead of
             # reading like a complete quote. Existing rows keep 0/0 -- the text
@@ -324,6 +330,26 @@ class MemoryEngine:
             limit=MEMORY_SLOTS,
             refresh_restated=True,
         )
+
+    def _memory_view(self, profile):
+        """Returns the group-scoped memory view as ``(memories, scope)``.
+
+        A group overlay is one group's *snapshot*, not a replacement for the
+        cross-group profile. Reading it alone is what made issue #5 destructive:
+        rows written before the fix hold only the group-specific slice, so the
+        read returned a subset of what an ``overwrite`` write then replaced --
+        the global-only facts vanished without ever being shown. The view is the
+        deduplicated union, capped like every other write, so "what the caller
+        read" is exactly "what the caller overwrites".
+        """
+        if not isinstance(profile, dict):
+            return [], "global (legacy)"
+        global_memories = json.loads(profile.get("key_memories") or "[]")
+        group_row = profile.get("_group")
+        group_memories = json.loads((group_row or {}).get("key_memories") or "[]") if group_row else []
+        if not group_memories:
+            return global_memories, "global (legacy)"
+        return self._merge_memories(global_memories, group_memories), "group"
 
     def _upsert_group_memory(self, conn, user_id, group_id, key_memories=None, tone_style=None, interests=None, aliases=None, now=None, merge=True):
         """Upsert a group-scoped memory overlay row. No-op when group_id is empty."""
@@ -819,12 +845,12 @@ class MemoryEngine:
             tags=["小本本", "explicit_command"],
         )
 
-        # Update profile key_memories (group-scoped when group_id is present)
-        group_row = profile.get("_group") if isinstance(profile, dict) else None
-        if group_row and (group_row.get("key_memories") not in (None, "", "[]")):
-            existing_memories = json.loads(group_row["key_memories"] or "[]")
-        else:
-            existing_memories = json.loads(profile["key_memories"] or "[]")
+        # Update profile key_memories (group-scoped when group_id is present).
+        # Dedup against the merged view (issue #5): the overlay alone misses
+        # facts that live in the cross-group profile, so the same note would be
+        # appended twice. The overlay write carries the whole view as a
+        # snapshot, which keeps "read == written" true for the next caller.
+        existing_memories, _ = self._memory_view(profile)
         new_memory = f"小本本记录: {fact or content}"
         if new_memory not in existing_memories:
             updated_memories = self._merge_memories(existing_memories, [new_memory])
@@ -1060,11 +1086,13 @@ class MemoryEngine:
                 continue
             seen_uids.add(uid)
 
-            # Per-group memory overlay: prefer group-scoped memories when present.
+            # Per-group memory view: union of the cross-group profile and this
+            # group's snapshot (issue #5). Copy first -- the row came from the
+            # caller's scope and must not be rewritten in place.
             group_row = prof.get("_group") if isinstance(prof, dict) else None
-            if group_row and (group_row.get("key_memories") not in (None, "", "[]")):
-                prof = dict(prof)
-                prof["key_memories"] = group_row["key_memories"]
+            prof = dict(prof)
+            prof["key_memories"] = json.dumps(self._memory_view(prof)[0], ensure_ascii=False)
+            if group_row:
                 # Merge group-specific aliases into the card's alias list.
                 base_aliases = json.loads(prof.get("aliases") or "[]")
                 for a in json.loads(group_row.get("aliases") or "[]"):
@@ -1105,16 +1133,20 @@ class MemoryEngine:
         uid = prof["user_id"]
         traits = json.loads(prof["traits"] or "{}")
         group_row = prof.get("_group") if isinstance(prof, dict) else None
-        if group_row and (group_row.get("key_memories") not in (None, "", "[]")):
-            key_memories = json.loads(group_row["key_memories"] or "[]")
+        # Issue #5: the dossier reports the same view the L1 card renders --
+        # the union of the cross-group profile and this group's snapshot.
+        key_memories, memory_scope = self._memory_view(prof)
+        if group_row:
             interests = json.loads(group_row["interests"] or "[]") if (group_row.get("interests") or "[]") not in ("", "[]") else json.loads(prof["interests"] or "[]")
             tone = group_row["tone_style"] if (group_row.get("tone_style") or "").strip() else prof["tone_style"]
-            memory_scope = "group"
         else:
-            key_memories = json.loads(prof["key_memories"] or "[]")
             interests = json.loads(prof["interests"] or "[]")
             tone = prof["tone_style"]
-            memory_scope = "global (legacy)"
+        # The backup column is the rollback slot a shrinking overwrite fills in;
+        # report it only when it holds something, so the normal response shape
+        # is unchanged.
+        backup_row = group_row if (group_row and memory_scope == "group") else prof
+        memory_backup = json.loads((backup_row or {}).get("key_memories_backup") or "[]")
         aliases = json.loads(prof["aliases"] or "[]")
         if group_row:
             for a in json.loads(group_row["aliases"] or "[]"):
@@ -1154,7 +1186,7 @@ class MemoryEngine:
                     }
                 )
 
-        return {
+        result = {
             "found": True,
             "profile": {
                 "user_id": uid,
@@ -1171,6 +1203,10 @@ class MemoryEngine:
             "boundary_scope": f"本群专属 ({group_id})" if group_id else "全部群跨组事件",
             "reply_hint": f"调侃建议：可称呼其外号（{'/'.join(aliases[:3])}），根据其XP喜好（{'/'.join(interests[:3])}）自然插话，偶尔可用'我小本本上可记着...'翻黑料调侃。",
         }
+        if memory_backup:
+            result["profile"]["key_memories_backup"] = memory_backup
+            result["backup_hint"] = "上一份被覆盖的记忆在 profile.key_memories_backup，可据此恢复。"
+        return result
 
     def update_member_dossier(
         self,
@@ -1194,7 +1230,11 @@ class MemoryEngine:
             return {"success": False, "error": "identifier_required", "note": "必须提供群友标识（QQ号、昵称、名片或既有外号）。"}
 
         ident_str = str(identifier).strip()
-        prof = self.find_profile(ident_str)
+        gid = str(group_id).strip() if group_id else ""
+        # Issue #5: without the group id the overlay was never loaded, so a
+        # group-scoped call could neither see it nor tell which memories were
+        # global-only -- and the write below then replaced both.
+        prof = self.find_profile(ident_str, group_id=gid or None)
 
         norm_aliases = normalize_list(aliases)
         norm_interests = normalize_list(interests)
@@ -1202,6 +1242,7 @@ class MemoryEngine:
         norm_traits = dict(traits) if isinstance(traits, dict) else ({} if traits is not None else None)
 
         now = time.time()
+        backup_list = None
         with self.lock, self._connect() as conn:
             if prof:
                 uid = prof["user_id"]
@@ -1211,6 +1252,10 @@ class MemoryEngine:
                 cur_interests = json.loads(prof["interests"] or "[]")
                 cur_traits = json.loads(prof["traits"] or "{}")
                 cur_memories = json.loads(prof["key_memories"] or "[]")
+                # Group scope owns its own snapshot; the global row keeps the
+                # cross-group facts. Reading the overlay alone and writing the
+                # result back into the global row is exactly what deleted them.
+                base_memories = self._memory_view(prof)[0] if gid else cur_memories
 
                 if overwrite:
                     new_aliases = norm_aliases if norm_aliases is not None else cur_aliases
@@ -1218,13 +1263,17 @@ class MemoryEngine:
                     new_traits = norm_traits if norm_traits is not None else cur_traits
                     # Same tail-first rule as the merge path: the newest entries
                     # are the ones worth keeping when an overwrite exceeds the cap.
-                    new_memories = (norm_memories if norm_memories is not None else cur_memories)[-MEMORY_SLOTS:]
+                    new_memories = (norm_memories if norm_memories is not None else base_memories)[-MEMORY_SLOTS:]
                     new_tone = tone_style.strip() if (tone_style is not None and str(tone_style).strip()) else (prof["tone_style"] if tone_style is None else "")
+                    # A shrinking overwrite is destructive by definition; keep
+                    # the previous list so "restore" is a read, not a memory.
+                    if any(m not in new_memories for m in base_memories):
+                        backup_list = list(base_memories)
                 else:
                     new_aliases = list(dict.fromkeys(cur_aliases + (norm_aliases or [])))
                     new_interests = merge_text_list(cur_interests, norm_interests, limit=INTEREST_SLOTS)
                     new_traits = {**cur_traits, **(norm_traits or {})}
-                    new_memories = self._merge_memories(cur_memories, norm_memories)
+                    new_memories = self._merge_memories(base_memories, norm_memories)
                     new_tone = tone_style.strip() if (tone_style and str(tone_style).strip()) else prof["tone_style"]
 
                 if role:
@@ -1232,6 +1281,10 @@ class MemoryEngine:
 
                 if p_name not in new_aliases:
                     new_aliases.insert(0, p_name)
+
+                # A group-scoped call must never shrink the cross-group row; its
+                # memories land in the overlay below instead.
+                memories_for_row = cur_memories if gid else new_memories
 
                 conn.execute(
                     """
@@ -1245,7 +1298,7 @@ class MemoryEngine:
                         new_tone,
                         json.dumps(new_interests, ensure_ascii=False),
                         json.dumps(new_traits, ensure_ascii=False),
-                        json.dumps(new_memories, ensure_ascii=False),
+                        json.dumps(memories_for_row, ensure_ascii=False),
                         now,
                         uid,
                     ),
@@ -1279,21 +1332,33 @@ class MemoryEngine:
                     ),
                 )
 
-            if group_id:
-                gid = str(group_id).strip()
-                if gid:
-                    self._upsert_group_memory(
-                        conn, uid, gid,
-                        key_memories=norm_memories if norm_memories is not None else (None if key_memories is None else []),
-                        tone_style=tone_style,
-                        interests=norm_interests,
-                        aliases=norm_aliases,
-                        now=now,
-                        merge=False if overwrite else True,
+            if gid:
+                # The overlay stores the full view as a snapshot (merge=False):
+                # whatever the caller read is what a later read returns, so the
+                # "read -> edit -> overwrite" loop is idempotent.
+                self._upsert_group_memory(
+                    conn, uid, gid,
+                    key_memories=new_memories if norm_memories is not None else None,
+                    tone_style=tone_style,
+                    interests=norm_interests,
+                    aliases=norm_aliases,
+                    now=now,
+                    merge=False,
+                )
+                if backup_list is not None:
+                    conn.execute(
+                        "UPDATE member_group_memories SET key_memories_backup=? WHERE user_id=? AND group_id=?",
+                        (json.dumps(backup_list, ensure_ascii=False), uid, gid),
                     )
+            elif backup_list is not None:
+                conn.execute(
+                    "UPDATE member_profiles SET key_memories_backup=? WHERE user_id=?",
+                    (json.dumps(backup_list, ensure_ascii=False), uid),
+                )
 
-        updated_prof = self.find_profile(uid, group_id=group_id)
-        return {
+        updated_prof = self.find_profile(uid, group_id=gid or None)
+        view, scope = self._memory_view(updated_prof)
+        result = {
             "success": True,
             "user_id": uid,
             "primary_name": updated_prof["primary_name"],
@@ -1304,11 +1369,18 @@ class MemoryEngine:
                 "tone_style": updated_prof["tone_style"],
                 "interests": json.loads(updated_prof["interests"] or "[]"),
                 "traits": json.loads(updated_prof["traits"] or "{}"),
-                "key_memories": json.loads(updated_prof["key_memories"] or "[]"),
+                # Report the view, not the raw global column: the caller must
+                # see the same set it will overwrite next time (issue #5).
+                "key_memories": view,
                 "updated_at": updated_prof["updated_at"],
             },
+            "memory_scope": scope,
             "note": f"已成功更新群友【{updated_prof['primary_name']}】的小本本画像档案。",
         }
+        if backup_list is not None:
+            result["profile"]["key_memories_backup"] = backup_list
+            result["note"] += "覆盖前的一份记忆已存入 key_memories_backup，可据此恢复。"
+        return result
 
     def consolidate_chat_memory(
         self,

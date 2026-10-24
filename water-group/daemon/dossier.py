@@ -22,6 +22,17 @@ per batch: the payload is data, the plumbing lives here (issue #6). Both take `-
 for stdin, accept `--through` to advance the cursor in the same call, and refuse
 to write when the payload cannot be applied cleanly.
 
+The #19 write-boundary fix stops new pollution; these verbs deal with what it
+left behind (issue #34):
+
+  dossier.py --audit-pollution            read-only scale report, writes nothing
+  dossier.py --scrub-pollution            drop group-owned facts from the cross-group rows
+  dossier.py --restore-pollution          put a scrub back, from key_memories_backup
+
+All three take --json for a machine-readable report, and the two writers take
+--dry-run. --scrub-pollution removes only what the group snapshot already holds,
+so no group's memory view changes; the cross-group row is what shrinks.
+
 The caller is expected to turn `--dump` into `consolidate_chat_memory` records and
 then call `--mark`. Marking without summarising just loses the material, so it is
 kept out of `--check`.
@@ -430,6 +441,78 @@ def cmd_apply(source, group, dry_run=False):
     return 0
 
 
+def emit(report, as_json, lines):
+    """One report, two shapes: --json for scripts, text for a terminal."""
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False))
+    else:
+        for line in lines:
+            print(line)
+
+
+def cmd_audit_pollution(as_json=False):
+    """Read-only scale report for the pre-#19 cross-group pollution (issue #34)."""
+    report = engine().audit_pollution()
+    groups = "/".join(report["groups"]) or "-"
+    lines = [
+        "=== 跨群主档污染审计（只读，未写库） ===",
+        f"profile 行数 {report['profiles_total']}，有覆盖行 {report['members_with_overlay']}，"
+        f"无覆盖行 {report['no_overlay_members']}，涉及群 {groups}",
+        f"主档记忆总数 {report['global_memories_total']}，其中覆盖行已持有（可证明污染）"
+        f"{report['provable_pollution_total']} 条",
+        f"其中在 scope 内、可安全剔除 {report['scrubbable_total']} 条",
+        f"仅主档持有（保守保留）{report['global_only_total']} 条，"
+        f"其中有覆盖行群友的 {report['global_only_with_overlay_total']} 条（可人工复核是否并入覆盖行）",
+        f"越 scope 群友（跳过不清理）{report['out_of_scope_members']} 位",
+    ]
+    affected = [m for m in report["members"] if m["overlay_groups"]]
+    if affected:
+        lines.append("有覆盖行的群友：")
+        for m in affected:
+            flag = "" if m["in_scope"] else "  [越 scope，跳过]"
+            lines.append(
+                f"  {m['primary_name']} [{ '/'.join(m['overlay_groups']) }] "
+                f"主档 {m['global_memories']} / 可剔 {m['provable_pollution']} / "
+                f"保留 {m['global_only']}{flag}"
+            )
+    emit(report, as_json, lines)
+    return 0
+
+
+def cmd_scrub_pollution(as_json=False, dry_run=False):
+    report = engine().scrub_pollution(dry_run=dry_run)
+    verb = "将剔除" if dry_run else "已剔除"
+    lines = [
+        f"=== 跨群主档污染清理（{'预演，未写库' if dry_run else '已写库'}） ===",
+        f"{verb}群友 {report['scrubbed_members']} 位，"
+        f"剔除 {report['removed_total']} 条，保留 {report['kept_total']} 条",
+    ]
+    for s in report["skipped"]:
+        lines.append(f"  跳过 {s['primary_name']}：{s['reason']}（{s['would_remove']} 条待人工确认）")
+    for m in report["members"]:
+        lines.append(
+            f"  {m['primary_name']} 剔除 {m['removed']} 条 / 保留 {m['kept']} 条"
+            + ("（覆盖了旧备份）" if m["backup_overwritten"] else "")
+        )
+    if not dry_run and report["scrubbed_members"]:
+        lines.append("原主档列表已写入 key_memories_backup，--restore-pollution 可还原。")
+    emit(report, as_json, lines)
+    return 0
+
+
+def cmd_restore_pollution(as_json=False, dry_run=False):
+    report = engine().restore_pollution(dry_run=dry_run)
+    verb = "将还原" if dry_run else "已还原"
+    lines = [
+        f"=== 还原跨群主档（{'预演，未写库' if dry_run else '已写库'}） ===",
+        f"{verb}群友 {report['restored_members']} 位，共 {report['restored_total']} 条",
+    ]
+    for m in report["members"]:
+        lines.append(f"  {m['primary_name']} 还原 {m['restored_memories']} 条")
+    emit(report, as_json, lines)
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="在没人 @ 的时候沉淀群友画像")
     parser.add_argument("--check", action="store_true", help="该提炼了吗")
@@ -443,6 +526,13 @@ def main():
                         help="把一段正文作为群级沉淀入库；- 读 stdin")
     parser.add_argument("--apply", metavar="JSON",
                         help="按 JSON 载荷批量写画像/事件；- 读 stdin")
+    parser.add_argument("--audit-pollution", action="store_true",
+                        help="只读审计 #19 修复前落库的跨群主档污染规模（issue #34）")
+    parser.add_argument("--scrub-pollution", action="store_true",
+                        help="剔除主档中覆盖行已持有的群内事实，原列表入 key_memories_backup")
+    parser.add_argument("--restore-pollution", action="store_true",
+                        help="按 key_memories_backup 还原上一次 scrub")
+    parser.add_argument("--json", action="store_true", help="机器可读输出（配合上面三个动词）")
     parser.add_argument("--group", metavar="ID",
                         help="群号；缺省取活动会话或载荷里的 group_id")
     parser.add_argument("--dry-run", action="store_true", help="只校验并打印计划，不写库")
@@ -457,13 +547,20 @@ def main():
         return cmd_ingest(args.ingest, args.group, args.through, args.dry_run)
     if args.apply is not None:
         return cmd_apply(args.apply, args.group, args.dry_run)
+    if args.audit_pollution:
+        return cmd_audit_pollution(args.json)
+    if args.scrub_pollution:
+        return cmd_scrub_pollution(args.json, args.dry_run)
+    if args.restore_pollution:
+        return cmd_restore_pollution(args.json, args.dry_run)
     if args.digest:
         return cmd_digest()
     if args.dump is not None:
         return cmd_dump(cfg, args.dump or cfg["max_material"])
     if args.check:
         return cmd_check(cfg)
-    parser.error("需要 --check / --dump / --mark / --digest / --ingest / --apply 之一")
+    parser.error("需要 --check / --dump / --mark / --digest / --ingest / --apply / "
+                 "--audit-pollution / --scrub-pollution / --restore-pollution 之一")
 
 
 if __name__ == "__main__":

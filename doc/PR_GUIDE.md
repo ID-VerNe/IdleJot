@@ -94,13 +94,25 @@ type/<issue 号>-p<字母>[-<数字>]-<slug>   # 多分节时，如 feat/41-pe4-
 
 1. 本地跑相关门禁子集 + `uv run python scripts/check_publication.py --history`（发布门禁：全部文件 + commit 身份/文案，规则见 AGENTS.md §5.3）。**PR 标题与正文先存草稿，`--text <草稿>` 过了再发**；commit message 由 `commit-msg` 钩子自动拦。
 2. **本机红线先跑基线**：同一脚本在未打补丁 base 上复跑一遍，确认是代码问题还是环境问题——环境问题不进修复（既有先例：`check_mcp_chat_turns` 本机端口/websocket 冲突必挂、CI 绿，归环境）。
-3. 确认分支基于最新 `slim`，`git fetch origin slim` 后无落后。
+3. 本机跑一次 `uv run python scripts/check_repo_settings.py`（平台侧只读探测：分支保护 / `delete_branch_on_merge` / `core.hooksPath`）。红说明仓库设置漂了，先按它打印的命令修好再推；CI 的 `GITHUB_TOKEN` 读 protection 会 403，这门禁只在 `manual` 档。
+4. 确认分支基于最新 `slim`，`git fetch origin slim` 后无落后。
 
 ## 合并条件（三条全满足才合）
 
-1. **CI 全绿**（`ci.yml` 全部门禁）。
+1. **CI 全绿**（`ci.yml` 全部门禁）。平台侧已强制：`slim` 开了分支保护，required status check 为 `checks`，CI 没绿时 GitHub 直接把合并按钮判成 `BLOCKED`——这条不再只靠自觉（issue #58）。
 2. **无冲突**：GitHub 显示可合并；有冲突不强行合——在 worktree 里 `git merge origin/slim`（或 rebase）解决，重跑门禁后再推。
 3. 适用时有 `## 基线验证` 段。
+
+分支保护同时禁了强推与删分支；合并后远端分支由 `delete_branch_on_merge=true` 自动清掉。三项设置各有复现命令，探测脚本 `scripts/check_repo_settings.py` 红时会直接打印：
+
+```powershell
+# 分支保护（strict + required check `checks`，不设 review 人数、不开 enforce_admins）
+gh api -X PUT repos/:owner/:repo/branches/slim/protection --input -   # 正文见脚本 PROTECTION_FIX
+# 合并后自动删源分支
+gh api -X PATCH repos/:owner/:repo -F delete_branch_on_merge=true
+# 钩子目录（发布门禁的 commit-msg / pre-push）
+git config core.hooksPath .githooks
+```
 
 合并方式跟随仓库现状（merge commit，见 #102/#105）；远端 commit sha 与本地对不上是正常的（GitHub 重签），核对内容以 **tree sha** 为准。
 

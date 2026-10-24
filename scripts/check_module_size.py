@@ -37,7 +37,6 @@ ADVISORY_FILE_LINES = 700
 # Violators pinned at gate creation, each removed by one issue #11 section.
 # Keep this list honest: a stale entry hides real growth.
 EXEMPTIONS = {
-    'water-group/daemon/reload.py': 'PD: split plan analysis from restart execution',
     # Crossed the wall via issue #9 (forward-wake touched up.py): 926 -> 1010
     # lines. Its split is NOT in the PA-PD plan; tracked as debt on issue #11
     # until a section is scheduled. Do not let this entry rot silently.

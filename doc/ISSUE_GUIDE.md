@@ -85,6 +85,15 @@ gh issue create --title "<标题>" --body-file issue-draft.md
 
 门禁从私有库（`~/.water-group`）**实时派生**真实号码与花名，仓库里不写死任何名单；通用词例外放私有 `publication_allow.txt`。同一个门禁也跑 commit message（`commit-msg` 钩子）和 push（`pre-push` 钩子），规则见 [AGENTS.md](../AGENTS.md) §5.3。
 
+## 关闭：行为类靠回签，不靠合并
+
+issue 的关闭点跟着「验收」走，不跟着「合并」走：
+
+- 纯文档 / 纯重构 PR 可以 `Closes #NN`，合并即关闭。
+- 行为类 PR（`fix` / `feat` / `perf`，以及任何改运行时代码的 PR）正文用 `Refs #NN`；合并后 issue 保持打开并贴 `needs-live-verify`，等回签。
+- **回签**由发现者（或全新上下文的验证 agent）执行，按 [PR_GUIDE.md](PR_GUIDE.md)「合并后：对账与回签」的模板贴复现命令、实际输出与实机证据；结论为「症状消失」才摘标签并关闭，仍复现则摘标签留 issue 并补证据。修复者不能给自己回签。
+- 发现者的职责不止提供原始日志：修复结果必须回到 issue 里，被同一条复现命令验一遍。
+
 ## 记录三件套（用 issue 做项目记忆）
 
 | 类型 | 用途 | 范例 |
@@ -101,6 +110,7 @@ gh issue create --title "<标题>" --body-file issue-draft.md
 - 只有结论没有证据——按 §2.6 退回。
 - 把 issue 当聊天记录/进度播报——过程写 PR 评论，结论写 issue。
 - 修完直接推主干——必须走 PR（见 [PR_GUIDE.md](PR_GUIDE.md)）。
+- 行为类 issue 用 `Closes` 合并即关——症状没被复现命令验过，关闭只是修复者的自述。
 
 ## 模板（可直接抄）
 

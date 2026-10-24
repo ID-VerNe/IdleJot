@@ -78,6 +78,7 @@ jobs:
             'check_slash_commands.py',
             'check_miyoushe.py',
             'check_sixty.py',
+            'check_plugin_registry.py',
             'check_qr_login.py',
             'check_log_encoding.py',
             'check_watchdog_token.py',

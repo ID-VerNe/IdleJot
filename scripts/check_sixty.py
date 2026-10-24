@@ -294,10 +294,13 @@ def test_registry_and_merge():
     check("commands.HANDLERS 含米游社指令", "公告" in commands.HANDLERS)
     check("commands.HANDLERS 含资讯指令", "简报" in commands.HANDLERS)
     check("FETCH_ERRORS 含 SixtyError", sixty.SixtyError in commands.FETCH_ERRORS)
-    # 模块级接线：导入没报错 + 十四条 handler 都合并进 commands（启动日志的 handlers/sixty
-    # 计数就靠这两个值，跑起来对不上说明进程是旧的，见 issue #68）
-    check("sixty 导入无错", commands._SIXTY_LOAD_ERROR == "")
-    check("commands 合并到十四条资讯 handler", len(commands._SIXTY_HANDLERS) == 14)
+    # 模块级接线：导入没报错 + 十四条 handler 都合并进 commands（启动日志的
+    # handlers/plugins 计数就靠这两个值，跑起来对不上说明进程是旧的，见 issue #68）
+    plugin = commands.PLUGINS.get("sixty")
+    check("sixty 导入无错", commands.PLUGINS.load_errors.get("sixty", "") == "")
+    check("commands 合并到十四条资讯 handler",
+          plugin is not None and len(plugin.commands) == 14
+          and all(cmd.name in commands.HANDLERS for cmd in plugin.commands))
     # #KFC 全是 ASCII，手机英文键盘常打小写：匹配必须大小写不敏感
     check("#kfc 命中 #KFC", commands.match_handler("kfc") == ("KFC", ""))
 

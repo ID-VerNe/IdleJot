@@ -15,10 +15,11 @@ slash_commands 映射，经 OneBot HTTP 直接回群（带原生引用）。
 chatlocal、不碰 SQLite、不调 MCP；与 collector 各持各的 WS 客户端（NapCat 向所有
 WS 客户端广播事件，已实测：第二个客户端并发在线时事件照收，原连接无感）。
 
-回复内容四个来源：config 的静态映射（slash_commands.commands）、miyoushe.py 的
-动态 handler（米游社取数，issue 方案 D）、sixty.py 的动态 handler（60s 资讯，
-issue #53 方案 A；handler 优先，静态条目可覆盖同名以外的词）、qr_login.py 的
-登录指令（#登录/#登录状态/#解绑，issue #6：每用户扫码绑定）。
+回复内容四个来源：config 的静态映射（slash_commands.commands）、插件注册表的
+动态 handler（米游社取数 issue 方案 D、60s 资讯 issue #53 方案 A，都经
+``plugins/`` 适配器注册）、qr_login.py 的登录指令（#登录/#登录状态/#解绑，
+issue #6：每用户扫码绑定）。本文件只留传输与仲裁（前缀、冷却、去重、引用、
+凭证链路、发送），域知识一律在插件里（issue #4 PA）。
 
 issue #6 的两条硬规则：
   - §4.2 隐私缺口：取数 ctx 带用户维度，未绑定的群友**不再**回落全局 CK
@@ -32,7 +33,6 @@ import json
 import os
 import re
 import sys
-import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -73,58 +73,6 @@ DEFAULTS = {
     "groups": set(),
 }
 
-try:
-    import miyoushe as mys_api
-    from miyoushe import HANDLERS, MiyousheError
-except Exception as _exc:  # noqa: BLE001  取数模块坏了不该拖垮静态指令
-    HANDLERS, MiyousheError, mys_api = {}, None, None
-    _HANDLER_LOAD_ERROR = f"{type(_exc).__name__}: {_exc}"
-else:
-    _HANDLER_LOAD_ERROR = ""
-
-try:
-    import sixty
-    from sixty import HANDLERS as _SIXTY_HANDLERS, SixtyError
-except Exception as _exc:  # noqa: BLE001  资讯模块坏了不该拖垮取数与静态指令
-    sixty, _SIXTY_HANDLERS, SixtyError = None, {}, None
-    _SIXTY_LOAD_ERROR = f"{type(_exc).__name__}: {_exc}"
-else:
-    _SIXTY_LOAD_ERROR = ""
-
-# 动态 handler 合成一张表（米游社取数 + 60s 资讯，issue #53）。合并成模块级
-# 名字而不是在 resolve_reply 里现拼：测试直接改 commands.HANDLERS 打桩。
-HANDLERS = dict(HANDLERS)
-HANDLERS.update(_SIXTY_HANDLERS)
-
-# 取数层异常的统一出口：两个模块的异常都走「str(exc) 当回复」。 SixtyError 永远
-# 在；MiyousheError 可能因 import 失败而是 None，过滤掉免得 except 收到空元组。
-FETCH_ERRORS = tuple(e for e in (MiyousheError, SixtyError) if e is not None)
-
-try:
-    import qr_login
-    import user_store
-except Exception as _exc:  # noqa: BLE001  登录模块坏了不该拖垮取数与静态指令
-    qr_login, user_store = None, None
-    _LOGIN_LOAD_ERROR = f"{type(_exc).__name__}: {_exc}"
-else:
-    _LOGIN_LOAD_ERROR = ""
-
-# §4.2：未绑定群友的取数指令统一回这句，不再拿管理员的全局 CK 顶。
-BIND_HINT = "该指令需要绑定：发 #登录 扫码绑定米游社账号（凭证只存本机，#解绑 可删）"
-# 米游社的「未登录 / CK 失效」一族（issue #2 §13.1）。命中就给本人发一次重扫提醒。
-CK_INVALID_CODES = (-1, -100, 1001, 10001, 10103)
-
-# 扫码登录指令（issue #6 §4.5）。#解绑 是两步确认（60 秒内再发一次即生效，见
-# qr_login.unbind）——只认字面量「确认」会把群友卡在提示里，实机踩过；
-# #绑定 只改 active_uid——UID 是取数参数不是凭证，没 CK 时单绑 UID 取不到数据。
-LOGIN_DESCS = {
-    "登录": "扫码绑定米游社账号（凭证只存本机）",
-    "登录状态": "查看自己的绑定情况",
-    "绑定": "绑定/切换游戏 UID（需先 #登录）",
-    "解绑": "解绑米游社账号（再发一次即确认）",
-}
-
-
 def log(line):
     try:
         LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -132,6 +80,43 @@ def log(line):
             fh.write(f"{time.strftime('%m-%d %H:%M:%S')} {line}\n")
     except OSError:
         pass
+
+
+# 插件在 import 期装配（issue #4 PA）：契约在 plugins/base.py，注册表在
+# plugins/registry.py，米游社/60s 的适配器在 plugins/*_plugin.py。
+# 显式静态 import 是硬要求——check_hot_reload 靠 AST 闭包把改动映射到进程。
+import plugins  # noqa: E402
+
+PLUGINS = plugins.load_all(log=log)
+
+# 动态 handler 合成一张表（米游社取数 + 60s 资讯，issue #53）。合并成模块级
+# 名字而不是在 resolve_reply 里现拼：测试直接改 commands.HANDLERS 打桩。
+HANDLERS = PLUGINS.commands()
+
+# 取数层异常的统一出口：插件声明自己的域异常，宿主统一「str(exc) 当回复」。
+FETCH_ERRORS = PLUGINS.error_types()
+
+# §4.2：未绑定群友的取数指令统一回这句，不再拿管理员的全局 CK 顶。
+BIND_HINT = plugins.BIND_HINT
+
+try:
+    import qr_login
+except Exception as _exc:  # noqa: BLE001  登录模块坏了不该拖垮取数与静态指令
+    qr_login = None
+    _LOGIN_LOAD_ERROR = f"{type(_exc).__name__}: {_exc}"
+else:
+    _LOGIN_LOAD_ERROR = ""
+
+# 扫码登录指令（issue #6 §4.5）。#解绑 是两步确认（60 秒内再发一次即生效，见
+# qr_login.unbind）——只认字面量「确认」会把群友卡在提示里，实机踩过；
+# #绑定 只改 active_uid——UID 是取数参数不是凭证，没 CK 时单绑 UID 取不到数据。
+# PC 会把这一整块迁成插件；本轮保留原样，先把契约与两个取数插件落地。
+LOGIN_DESCS = {
+    "登录": "扫码绑定米游社账号（凭证只存本机）",
+    "登录状态": "查看自己的绑定情况",
+    "绑定": "绑定/切换游戏 UID（需先 #登录）",
+    "解绑": "解绑米游社账号（再发一次即确认）",
+}
 
 
 def beat():
@@ -295,9 +280,11 @@ def _positive(value, fallback):
 def load_settings():
     if str(ROOT / "water-group" / "daemon") not in sys.path:
         sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
-    import up  # noqa: PLC0415  与 reply.py 等同仁的导入方式：配置只读一份
+    # 只读配置，不 import up：那句 `import up` 会把整个 guard 树拖进本进程的
+    # AST 闭包（issue #4 PA0，实测 26 个文件），改记忆引擎会连带重启指令守护。
+    import wg_config  # noqa: PLC0415
 
-    return settings_from(up.config())
+    return settings_from(wg_config.config())
 
 
 def plain_text(event):
@@ -366,13 +353,12 @@ def mark_handled(state, message_id):
     return True
 
 
-def help_text(settings):
+def help_text(settings, group_id=""):
     entries = dict(settings["commands"] or {})
-    sixty_cfg = settings.get("sixty") or {}
     for key, (desc, _fn) in HANDLERS.items():
-        # 资讯指令没过白名单就不该出现在帮助里：列了却不回，比不列更烦
-        if key in _SIXTY_HANDLERS and not (
-                sixty is not None and sixty.allowed(key, sixty_cfg)):
+        # 插件门控（60s 白名单一类）没过就不该出现在帮助里：列了却不回，
+        # 比不列更烦。与 resolve_reply 共用 registry.available，不再各写一遍。
+        if not PLUGINS.available(key, settings, group_id):
             continue
         entries.setdefault(key, {"desc": desc})
     for key, desc in LOGIN_DESCS.items():
@@ -445,16 +431,16 @@ def resolve_reply(key, settings, event=None, args=""):
     image 是 OneBot image 段）。优先登录指令，再动态 handler（米游社取数），
     再静态配置，最后 unknown_reply。
     """
+    group_id = str((event or {}).get("group_id") or "")
     if key in settings["help_keywords"]:
-        return help_text(settings)
+        return help_text(settings, group_id)
     if key in LOGIN_DESCS:
         return login_reply(key, args, settings, event)
     handler_key, rest = match_handler(key)
     if handler_key:
-        # 60s 资讯指令的白名单闸门（issue #53）：没开配置就静默落空，
-        # 不走 unknown_reply 的吵人提示，也不冒充"未知指令"。
-        if (sixty is not None and handler_key in _SIXTY_HANDLERS
-                and not sixty.allowed(handler_key, settings.get("sixty") or {})):
+        # 插件门控（issue #53 的 60s 白名单）：没开配置就静默落空，不走
+        # unknown_reply 的吵人提示，也不冒充"未知指令"。
+        if not PLUGINS.available(handler_key, settings, group_id):
             return settings["unknown_reply"] or None
         full_args = (rest + " " + args).strip() if (rest or args) else ""
         return run_handler(handler_key, HANDLERS[handler_key][1], settings, event, full_args)
@@ -501,100 +487,71 @@ def run_handler(key, fn, settings, event, args):
     绑定检查**只针对需要凭证的 handler**（`fn.need_ck`，缺省 True）：#公告 / #活动 /
     #资讯 / #兑换码 / #米游社 / #攻略 / #抽卡记录 都是免登录接口（issue #2 附录 A
     §4/§6.2/§7），未绑定的群友照样能用——把它们一起拦掉是 P0 修复的过度收紧。
+
+    凭证链路留在宿主（``plugins.host.resolve_credentials``）：测试探针 handler
+    不在注册表里，也必须拿到 ctx.ck/uid 并触发 BIND_HINT。插件只在
+    ``precheck`` / ``note_error`` 两个口子上补自己的域逻辑。
     """
     event = event or {}
-    mys = settings.get("miyoushe") or {}
     user_id = str(event.get("user_id") or "")
     need_ck = getattr(fn, "need_ck", True)
+    owner = PLUGINS.owner(key)
     ctx = {"ck": [], "uid": "",
-           "group_id": str(event.get("group_id") or ""), "user_id": user_id,
-           # 60s 资讯指令的运行期配置（issue #53）；米游社 handler 忽略这个键
-           "sixty": settings.get("sixty") or {}}
-    record = user_store.load_user(user_id) if (user_store is not None and user_id) else None
-    if record:
-        ck = user_store.ck_string(record)
-        ctx["ck"] = [ck] if ck else []
-        ctx["uid"] = user_store.active_uid(record)
-        _maybe_renew(user_id, record)
-    elif user_store is None:
-        # 登录模块没加载起来（理论上只在非 Windows 发生）：退回旧行为，别把取数全掐死
-        ctx["ck"] = mys.get("ck") or []
-        ctx["uid"] = mys.get("uid") or ""
-    elif not need_ck:
-        pass  # 免登录指令：空 ctx 正常跑，不看绑定也不发全局 CK
-    elif user_id and user_id != "0" and user_id not in set(mys.get("admin_qq") or []):
-        return BIND_HINT
-    else:
-        # 管理员白名单与 --test 合成事件（user_id=0）：全局 CK 只留这两个口子
-        ctx["ck"] = mys.get("ck") or []
-        ctx["uid"] = mys.get("uid") or ""
-    try:
-        blocked = _risk_blocked(ctx)
+           "group_id": str(event.get("group_id") or ""), "user_id": user_id}
+    hint = plugins.host.resolve_credentials(
+        ctx, settings, user_id, need_ck, owner,
+        provider=PLUGINS.credential_provider(settings))
+    if hint:
+        return hint
+    precheck = owner.hooks.precheck if owner is not None else None
+    if precheck is not None:
+        blocked = precheck(ctx, settings)
         if blocked:
             return blocked
+    try:
         return fn(args, ctx)
     except FETCH_ERRORS as exc:
-        _note_risk(ctx, exc)
-        _note_ck_invalid(settings, ctx, user_id, exc)
+        # 一次调用拿到全部副作用与通知：插件的失效提醒是**一次性**的
+        # （mark_invalid 第二次返回 False），拆成两次调用会把提醒吃掉。
+        notice = _note_error(ctx, settings, exc)
+        if notice:
+            notify_login(settings, ctx.get("group_id") or "", user_id, notice)
         return str(exc)
     except Exception as exc:  # noqa: BLE001  handler 炸了不能杀死监听
         log(f"handler #{key} failed: {type(exc).__name__}: {exc}")
         return "指令执行出错，稍后再试"
 
 
-def _maybe_renew(qq, record):
-    """取数前顺手续期（#6 §6 P2）：半个月没换过票就后台换一次，不阻塞本条指令。"""
-    if qr_login is None or not qr_login.should_renew(record):
-        return
-
-    def worker():
-        try:
-            qr_login.renew(qq, record)
-        except Exception as exc:  # noqa: BLE001  续期失败不能冒到 WS 循环
-            log(f"renew failed qq={qq}: {type(exc).__name__}")
-
-    threading.Thread(target=worker, name="qr-renew", daemon=True).start()
-
-
 def _risk_blocked(ctx):
     """风控冷却期内不发请求，直接回文案（#55-C）。
 
-    米游社的 1034/5003 是**账号级**状态，继续重试只会拖长风控时间
-    （miao-plugin #396 的做法就是「把出验证的 ck 暂时屏蔽掉」）。
-    返回空串表示放行。
+    实现搬进米游社插件（``Hooks.cooldown``）；这个符号保留给
+    ``check_miyoushe.py`` 直接调用，别删。
     """
-    if mys_api is None:
-        return ""
-    ck = (ctx.get("ck") or [""])[0]
-    left = mys_api.risk_wait(ck)
-    if not left:
-        return ""
-    return (f"这个号刚被米游社风控挡住，还要等约 {max(1, left // 60)} 分钟；"
-            "反复查只会更久。去米游社 App「我的 → 我的角色」过一次验证可以立刻解开")
+    hook = PLUGINS.hook("cooldown")
+    return hook(ctx) if hook is not None else ""
+
+
+def _note_error(ctx, settings, exc):
+    """域异常的统一出口：副作用（风控冷却 / 失效标记）在插件里，宿主只负责发通知。"""
+    hook = PLUGINS.hook("note_error")
+    return hook(ctx, settings, exc) if hook is not None else None
 
 
 def _note_risk(ctx, exc):
-    """命中 1034/10035/5003/10041 → 该账号进冷却，顺手换掉被标记的指纹。"""
-    if mys_api is None:
-        return
-    code = getattr(exc, "code", None)
-    if code not in mys_api.RISK_CODES:
-        return
-    ck = (ctx.get("ck") or [""])[0]
-    if mys_api.note_risk(ck, code):
-        log(f"risk cooldown code={code} bucket={mys_api.fp_bucket(ck)[:6]}…"
-            f" {mys_api.RISK_COOLDOWN // 60}min")
+    """命中 1034/10035/5003/10041 → 该账号进冷却，顺手换掉被标记的指纹。
+
+    保留给 ``check_miyoushe.py`` 直接调用；``run_handler`` 走 ``_note_error``，
+    不再分两次调用（失效提醒是一次性的，第二次会返回 False）。
+    """
+    _note_error(ctx, {}, exc)
 
 
 def _note_ck_invalid(settings, ctx, qq, exc):
     """凭证失效（1001/10001/10103…）→ 标记 + 24h 内最多提醒一次。"""
-    if qr_login is None or not qq or qq == "0":
-        return
-    if getattr(exc, "code", None) not in CK_INVALID_CODES:
-        return
-    if qr_login.mark_invalid(qq):
-        notify_login(settings, ctx.get("group_id") or "", qq,
-                     "你的米游社凭证失效了（可能过期或被解绑），发 #登录 重新扫码")
+    notice = _note_error(ctx, settings, exc)
+    if notice:
+        notify_login(settings, ctx.get("group_id") or "", qq, notice)
 
 
 def send_group_msg(settings, group_id, segments):
@@ -681,11 +638,18 @@ def serve():
         release_lock()
 
 
+def plugin_counts():
+    """启动日志里的插件指纹：``miyoushe:17,sixty:14``。缺项 = 那个插件没加载起来。"""
+    return ",".join(f"{plugin.name}:{len(plugin.commands)}"
+                    for plugin in PLUGINS.plugins())
+
+
 def _serve(settings, connect, ConnectionClosed, box=None):
     # handler 计数写进启动日志：进程是不是旧代码，看这行数字对不对就知道（issue #68）。
+    # 插件计数按 `名字:指令数` 列出（issue #4 PA），坏掉的插件在这里是 0 或缺项。
     log(f"commands start, prefix={settings['prefix']!r} "
         f"keywords={sorted(settings['commands'])} groups={sorted(settings['groups'])} "
-        f"handlers={len(HANDLERS)} sixty={len(_SIXTY_HANDLERS)}")
+        f"handlers={len(HANDLERS)} plugins={plugin_counts()}")
     self_ids = {settings["self_account"]} - {""}
     state = new_state()
     backoff = 1
@@ -795,10 +759,8 @@ def main():
     parser.add_argument("--test", metavar="关键词",
                         help="合成事件直跑一个关键词（可带参数），回复发到首个启用群")
     args = parser.parse_args()
-    if _HANDLER_LOAD_ERROR:
-        log(f"miyoushe handlers unavailable: {_HANDLER_LOAD_ERROR}")
-    if _SIXTY_LOAD_ERROR:
-        log(f"sixty handlers unavailable: {_SIXTY_LOAD_ERROR}")
+    for name, error in PLUGINS.load_errors.items():
+        log(f"plugin {name} unavailable: {error}")
     if _LOGIN_LOAD_ERROR:
         log(f"qr login unavailable: {_LOGIN_LOAD_ERROR}")
     if args.test:

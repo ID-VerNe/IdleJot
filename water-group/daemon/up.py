@@ -31,10 +31,11 @@ ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收口)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
+import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #4 PA0)
 import wg_images  # noqa: E402  (图片标记渲染，与 reply/look 同一份实现)
 from wg_paths import logs_dir, state_dir
 STATE = state_dir()
-CONFIG = ROOT / "water-group" / "config.json"
+CONFIG = wg_config.CONFIG
 
 NAPCAT_PORTS = (43000, 43001)
 BACKEND_PORTS = (47860, 48777)
@@ -105,10 +106,8 @@ def read_text(path):
 
 
 def config():
-    try:
-        return json.loads(CONFIG.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    """委托 ``wg_config``：配置只有一份实现（issue #4 PA0）。"""
+    return wg_config.config()
 
 
 def onebot_token():
@@ -831,6 +830,12 @@ def report(exclude_pids=None, resident_pid=None):
     print(f"守护      : {guard}  心跳 {beat}")
     print(f"监听      : {listener}")
     print(f"#指令     : {command}")
+    try:
+        import commands as wg_commands  # noqa: PLC0415  只读：拿插件状态与设置
+        plugin_line = wg_commands.PLUGINS.status_line(wg_commands.load_settings())
+    except Exception as exc:  # noqa: BLE001  status must not fail because a plugin is broken
+        plugin_line = f"状态不可读（{type(exc).__name__}: {exc}）"
+    print(f"插件      : {plugin_line}")
     try:
         reload_line = load_reload().status_line()
     except Exception as exc:  # noqa: BLE001  status must not fail because reload is broken

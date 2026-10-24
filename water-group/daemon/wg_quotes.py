@@ -29,6 +29,19 @@ REASONS = {
     "detail_limit": "引用超过单条上限，未展开",
 }
 
+# 合并转发的后缀（issue #9）。唤醒行只印 `content` 时这里是 `[合并转发]` 五个字，
+# 看不出几条、说了什么；段在就必须给出一行可判断的信息，拿不到就明说状态。
+FORWARD_CHARS = 60
+MAX_FORWARDS = 2
+FORWARD_REASONS = {
+    "unavailable": "正文不可得",
+    "budget_exhausted": "取正文超时",
+    "cancelled": "取正文已取消",
+    "detail_limit": "超过单条上限，未展开",
+    "unresolved": "正文未解析",
+    "not_local": "正文不在本地缓存",
+}
+
 
 def _fit(value, limit):
     """显示用截断：折叠空白再按字数裁。截断只影响这一行，不回流到数据。"""
@@ -57,10 +70,46 @@ def _line(ref_id, state, sender="", text=""):
     return f"↪ 引用 {ref_id or '?'}（{reason}）"
 
 
+def _forwards(payload):
+    """这条消息带了几个合并转发——与 `_replies` 同一前提：段在 = 有转发。
+
+    超过 `MAX_FORWARDS` 的只印一句汇总，别让唤醒行被转发撑成一屏。
+    """
+    found = [s for s in payload.get("segments") or [] if s.get("type") == "forward"]
+    return found[:MAX_FORWARDS], max(0, len(found) - MAX_FORWARDS)
+
+
+def _forward_line(detail):
+    """一个转发的后缀：几条 + 首条谁说了什么；拿不到就明说状态（issue #9）。
+
+    `detail` 可能是 `referenced_messages` 里已展开的条目（带 state/total_nodes），
+    也可能是 `chat_inbox.details` 里的原始 ref（只有 id / nodes），两种都认。
+    """
+    if not isinstance(detail, dict):
+        return "⤴ 转发（正文未展开）"
+    nodes = detail.get("nodes") or []
+    state = str(detail.get("state") or ("available" if nodes else "unavailable"))
+    if state == "available" and nodes:
+        first = nodes[0] if isinstance(nodes[0], dict) else {}
+        total = detail.get("total_nodes")
+        count = total if isinstance(total, int) and total > 0 else len(nodes)
+        body = _fit(first.get("content") or "", FORWARD_CHARS)
+        who = _fit(first.get("sender") or "", SENDER_CHARS)
+        if not body:
+            return f"⤴ 转发 {count} 条（正文为空）"
+        return f"⤴ 转发 {count} 条：{who}: {body}" if who else f"⤴ 转发 {count} 条：{body}"
+    if state == "available":
+        return "⤴ 转发（正文为空）"
+    return f"⤴ 转发（{FORWARD_REASONS.get(state) or '正文未展开'}）"
+
+
 def render_event(event):
     """wg_events 那条路：服务端已展开，按 onebot_message_id 对齐到段。"""
     details = {str(d.get("onebot_message_id") or ""): d
                for d in event.get("referenced_messages") or [] if isinstance(d, dict)}
+    forward_details = {d.get("forward_index"): d
+                       for d in event.get("referenced_messages") or []
+                       if isinstance(d, dict) and d.get("type") == "forward"}
     parts = []
     for ref_id in _replies(event):
         detail = details.get(ref_id)
@@ -70,6 +119,11 @@ def render_event(event):
         else:
             parts.append(_line(ref_id, str(detail.get("state") or "unavailable"),
                                detail.get("sender") or "", detail.get("content") or ""))
+    forwards, extra = _forwards(event)
+    for seg in forwards:
+        parts.append(_forward_line(forward_details.get(seg.get("forward_index"))))
+    if extra:
+        parts.append(f"（另有 {extra} 个转发未展开）")
     return "".join(parts)
 
 
@@ -88,4 +142,21 @@ def render_payload(db, session, payload):
             continue
         state = "recalled" if parent.get("recalled") else "available"
         parts.append(_line(ref_id, state, parent.get("sender") or "", parent.get("content") or ""))
+    # 转发：details 列里按 forward_index 取（顺序与入库时 details.append 一致）；
+    # 行已滚出缓存或 details 为空时，_forward_line 会明说「正文未展开」。
+    stored = []
+    try:
+        mid = str(payload.get("onebot_message_id") or "")
+        if mid:
+            row = db.execute("SELECT details FROM chat_inbox WHERE session_id=? AND message_id=?",
+                             (session, mid)).fetchone()
+            stored = json.loads(row[0]) if row else []
+    except (sqlite3.Error, ValueError, TypeError):
+        stored = []
+    refs = {i: d for i, d in enumerate(stored) if isinstance(d, dict) and d.get("type") == "forward"}
+    forwards, extra = _forwards(payload)
+    for seg in forwards:
+        parts.append(_forward_line(refs.get(seg.get("forward_index"))))
+    if extra:
+        parts.append(f"（另有 {extra} 个转发未展开）")
     return "".join(parts)

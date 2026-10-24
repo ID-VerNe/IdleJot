@@ -249,6 +249,28 @@ def 唤醒行不靠不印来表达失败():
 
 
 @case
+def 唤醒行印出转发条数与首条摘要():
+    """issue #9：转发段必须给出「几条 + 谁说了什么」，不能只留 [合并转发]。"""
+    event = {"segments": [{"type": "forward", "forward_index": 0}],
+             "referenced_messages": [{"type": "forward", "state": "available", "forward_index": 0,
+                                      "total_nodes": 5, "nodes": [
+                                          {"sender": "甲", "content": "第一条正文"},
+                                          {"sender": "乙", "content": "第二条正文"}]}]}
+    text = wg_quotes.render_event(event)
+    return "转发 5 条" in text and "甲" in text and "第一条正文" in text
+
+
+@case
+def 转发不可得时明说状态():
+    """拿不到正文时印状态词，而不是空串或 0 条（#94 的同一口径）。"""
+    event = {"segments": [{"type": "forward", "forward_index": 0}],
+             "referenced_messages": [{"type": "forward", "state": "unavailable",
+                                      "forward_index": 0, "nodes": []}]}
+    text = wg_quotes.render_event(event)
+    return "转发" in text and "正文不可得" in text and "0 条" not in text
+
+
+@case
 def 上下文能本地反查原文():
     return PARENT_TEXT in wg_quotes.render_payload(connect(), SID, QUOTED)
 

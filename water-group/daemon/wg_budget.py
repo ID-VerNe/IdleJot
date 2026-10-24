@@ -6,7 +6,7 @@
 还在等。2026-10-24 的 #79（`reply.py --wait` 默认 240s）和 #83（`listen.py` 常驻
 周期 300s、文档示例 300/240）是同一个根因的两例。
 
-所以三个数只在这里写一次，`reply.py` / `listen.py` 都从这里取：
+所以三个数只在这里写一次，`reply.py` / `listen.py` / `watch.py` 都从这里取：
 
     AGENT_TOOL_TIMEOUT  120   宿主常见默认超时
     SEND_BUDGET          30   发送 / 启动 / 记账 / 进程退出的实测余量

@@ -133,13 +133,13 @@ python scripts/check_gate_change_review.py --base origin/slim --body-file <PR �
 
 没有 PR 上下文（本机 parity、`push` 事件）时它打印 `SKIP` 并放行——校验只在有正文的 PR 上有意义。
 
-> 单人维护下不建 `CODEOWNERS`（等价于自己给自己放行）；复核靠「不同上下文的 agent + 结论贴 PR」这一条。出现第二个维护者后再上平台级强制。
+> 平台侧强制由 `scripts/check_repo_settings.py` 钉住（`manual` 档，合并前后本机跑，`--self-test` 离线验夹具）：可合并维护者（有 push 权限的 collaborator）只有 1 人时，断言「分支保护不要求 review、`.github/CODEOWNERS` 不覆盖门禁路径」——单人下建 CODEOWNERS 等价于自己给自己放行，没要求 review 时它更不产生强制、只制造虚假安全感；此时复核靠「不同上下文的 agent + 结论贴 PR」这一条。出现第二个维护者时该门禁转红，按它打印的命令翻转：CODEOWNERS 把 `/scripts/check_*.py`、`/scripts/gates.json`、`/scripts/run_gates.py`、`/.github/workflows/ci.yml` 归维护者，分支保护 `required_pull_request_reviews` 至少 1 人。翻转后平台强制生效，两态断言随维护者数量自动切换，设置漂移即红（issue #78）。
 
 ## 开 PR 前自查
 
 1. 本地跑 `uv run python scripts/check_pr_parity.py`（issue #61）：在**干净 worktree + 空数据根**里复跑门禁，证明「本地绿」不是靠开发机私有状态绿出来的（CI 等价条件；`--shard static` 只跑一片）。它与 `uv run python scripts/check_publication.py --history`（发布门禁：全部文件 + commit 身份/文案，规则见 AGENTS.md §5.3）一起由 `pre-push` 钩子自动执行。**PR 标题与正文先存草稿，`--text <草稿>` 过了再发**；commit message 由 `commit-msg` 钩子自动拦。
 2. **本机红线先跑基线**：同一脚本在未打补丁 base 上复跑一遍，确认是代码问题还是环境问题——环境问题不进修复（既有先例：`check_mcp_chat_turns` 本机端口/websocket 冲突必挂、CI 绿，归环境）。
-3. 本机跑一次 `uv run python scripts/check_repo_settings.py`（平台侧只读探测：分支保护 / `delete_branch_on_merge` / `core.hooksPath`）。红说明仓库设置漂了，先按它打印的命令修好再推；CI 的 `GITHUB_TOKEN` 读 protection 会 403，这门禁只在 `manual` 档。
+3. 本机跑一次 `uv run python scripts/check_repo_settings.py`（平台侧只读探测：分支保护 / `delete_branch_on_merge` / `core.hooksPath` / 复核两态政策）。红说明仓库设置漂了，先按它打印的命令修好再推；CI 的 `GITHUB_TOKEN` 读 protection 会 403，这门禁只在 `manual` 档。
 4. 确认分支基于最新 `slim`，`git fetch origin slim` 后无落后。
 5. **门禁链改动先自检**：diff 触及门禁链时，先跑 `python scripts/check_gate_change_review.py --base origin/slim --body-file <PR 草稿>`，确认「段存在 + 每个被改文件都被列出」不靠 CI 提醒。
 

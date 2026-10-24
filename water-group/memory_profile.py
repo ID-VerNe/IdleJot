@@ -154,6 +154,44 @@ class MemoryProfileMixin:
                 loose.append(r)
         return by_name + by_alias, loose
 
+    def alias_index(self, group_id=None, min_len=2):
+        """Every known name in the dossier, as ``{name: (user_id, primary_name)}``.
+
+        Rendering layers need to answer "who does this nickname point at" for a
+        whole line of chatter, not one profile at a time (issue #30): a per-line
+        ``match_profiles`` hands back full rows (key_memories included), and a
+        wake batch would hit the database once per message. This is one read of
+        the same view ``query_member_dossier`` reports -- the cross-group
+        profile unioned with this group's overlay (issue #5) -- shaped for
+        scanning instead of for one lookup.
+
+        Generic placeholders (「领导」「群友」) and anything shorter than
+        ``min_len`` are dropped: they name nobody, and matching them would
+        invent pointers nobody asked for. On an alias collision the first
+        profile in table order wins, same as ``find_profile`` taking [0]; a
+        rendering hint does not need to relitigate ties.
+        """
+        with self.lock, self._connect() as conn:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT user_id, primary_name, aliases FROM member_profiles").fetchall()]
+            overlays = {}
+            gid = str(group_id).strip() if group_id else ""
+            if gid:
+                for r in conn.execute(
+                        "SELECT user_id, aliases FROM member_group_memories WHERE group_id=?",
+                        (gid,)).fetchall():
+                    overlays[str(r["user_id"])] = json.loads(r["aliases"] or "[]")
+        index = {}
+        for r in rows:
+            uid = str(r["user_id"])
+            names = [str(r["primary_name"])] + [str(a) for a in json.loads(r["aliases"] or "[]")]
+            names += [str(a) for a in overlays.get(uid) or []]
+            for name in dict.fromkeys(n for n in names if n and n.strip()):
+                if len(name) < min_len or name in GENERIC_ALIASES:
+                    continue
+                index.setdefault(name, (uid, str(r["primary_name"])))
+        return index
+
     def find_profile(self, identifier, group_id=None):
         """Finds a member profile by user_id, primary_name, or alias.
 

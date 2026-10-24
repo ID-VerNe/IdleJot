@@ -33,7 +33,7 @@ import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #4 PA0)
 import wg_images  # noqa: E402  (图片标记渲染，与 reply/look 同一份实现)
-from wg_paths import logs_dir, state_dir
+from wg_paths import data_dir, logs_dir, state_dir
 STATE = state_dir()
 CONFIG = wg_config.CONFIG
 
@@ -855,6 +855,36 @@ def wake_state(event, rows, ledger):
     return "待回"
 
 
+def app_plugins_line():
+    """app 侧插件摘要，一行。
+
+    **不能 `import chatlocal`**：`chatlocal/config.py` 在模块级建数据目录并把
+    进程的 TEMP/TMP 改到数据根，而 `--status` 的契约是「只看不动」。所以按
+    文件载入 `chatlocal/app_plugins/spec.py`——它是纯数据的叶子模块（issue #4
+    PD 就是这么切的），exec 一次不会拉起 chatlocal 包。开关直接读数据根下的
+    policy 文件，路径与 app 侧 `Access.path` 同目录。
+    """
+    import importlib.util
+    import json
+
+    spec_path = ROOT / 'chatlocal' / 'app_plugins' / 'spec.py'
+    module_spec = importlib.util.spec_from_file_location('wg_app_plugin_spec', spec_path)
+    spec = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(spec)
+    parts = []
+    for plugin in spec.PLUGINS:
+        policy = data_dir() / plugin['policy'] if plugin.get('policy') else None
+        state = '已启用'
+        if policy is not None and policy.exists():
+            try:
+                # 只说开/关，不在这里复述 app 侧的完整校验（那份在 policy() 里）。
+                state = '已启用' if json.loads(policy.read_text('utf-8-sig')).get('enabled', True) else '停用'
+            except (OSError, ValueError, TypeError):
+                state = '配置无效（app 会停用自己）'
+        parts.append(f"{plugin['name']} {state}（{plugin['tool']} / 授权位 {plugin['scope']} / 表达 {plugin['expression']}）")
+    return ' / '.join(parts) if parts else '（未注册）'
+
+
 def report(exclude_pids=None, resident_pid=None):
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
@@ -915,6 +945,11 @@ def report(exclude_pids=None, resident_pid=None):
     except Exception as exc:  # noqa: BLE001  status must not fail because a plugin is broken
         plugin_line = f"状态不可读（{type(exc).__name__}: {exc}）"
     print(f"插件      : {plugin_line}")
+    try:
+        app_line = app_plugins_line()
+    except Exception as exc:  # noqa: BLE001  status must not fail because a plugin is broken
+        app_line = f"状态不可读（{type(exc).__name__}: {exc}）"
+    print(f"app 插件  : {app_line}")
     try:
         reload_line = load_reload().status_line()
     except Exception as exc:  # noqa: BLE001  status must not fail because reload is broken

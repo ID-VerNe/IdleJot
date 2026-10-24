@@ -148,4 +148,15 @@ MCP 这边的可选能力（工具 + 授权位 + 实时事件）走一套独立�
 注册一行。**不许**去 `mcp_chat` / `mcp_tools` 里加 `if name == ...`：
 `scripts/check_app_plugins.py` 会扫出来。
 
+看当前有哪些插件、各自开关状态：
+
+```bash
+uv run python water-group/daemon/up.py --status     # 「插件」与「app 插件」两行
+uv run python scripts/check_plugin_registry.py      # daemon + app 两套协议的注册表门禁
+```
+
+`up.py --status` 那行**不 import `chatlocal`**：`chatlocal/config.py` 在模块级建数据目录
+并把进程的 `TEMP`/`TMP` 改到数据根，而 `--status` 的契约是「只看不动」。它按文件载入
+`app_plugins/spec.py`（纯数据叶子模块），开关读数据根下的 policy 文件。
+
 协议钩子的逐条说明与调用时机见 [消息回应说明 · 归属](MCP_REACTIONS.md#归属issue-4-pd)。

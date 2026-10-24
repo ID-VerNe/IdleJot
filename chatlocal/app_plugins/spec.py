@@ -15,6 +15,9 @@ REACTIONS = dict(
     scope='chat_reactions',
     expression='reaction',
     open_world=True,
+    # 本地开关文件名，与 Access.path（data/mcp-access.sqlite3）同目录。
+    # 放在这里是为了让只读状态（up.py --status）不必 import 功能模块。
+    policy='mcp-reactions.json',
 )
 
 PLUGINS = (REACTIONS,)

@@ -363,16 +363,17 @@ class WGTools:
         waiting = name == 'wait_chat_messages'
         if waiting and not self.chat_slots.acquire(blocking=False):
             return self.result(dict(error='持续聊天等待通道繁忙；普通工具仍可使用。',error_code='chat_busy'))
-        started=time.monotonic();call_id=None;status='error';count=0;learning_receipt=None
+        started=time.monotonic();call_id=None;status='error';count=0;durable=handed=None
         owner=self.chat.apps.tool_owner(name)
         try:
             call_id=self.access.begin_call(grant['id'],name)
             timing.note(call_id=call_id)
             if cancel.is_set():raise ValueError('调用已取消。')
             data=self.chat.call(grant,name,arguments,cancel)
-            if name in ('claim_chat_learning','submit_chat_learning'):
-                if name=='submit_chat_learning' and data.get('state')!='rejected':learning_receipt=dict(data)
-                data=self.chat.learning.handoff(grant,data,arguments['session_id'],cancel)
+            if owner:
+                durable=owner.durable(data,name)
+                handed=owner.handoff(grant,data,name,arguments,cancel)
+                if handed is not None:data=handed
             if name in ('plan_chat_reply','send_chat_reply','send_chat_message') or (owner and owner.owns_receipt()):
                 data=self.chat.refresh_rejected(grant,data,arguments['session_id'],cancel)
             if name=='wait_chat_messages' and arguments.get('response_format','compact')=='compact':
@@ -390,9 +391,9 @@ class WGTools:
             # A revocation after dispatch stops future actions; it cannot turn
             # this operation's durable receipt into a false "not executed".
             if 'updated_chat' in data or (name not in ('send_chat_reply','send_chat_message') and not (owner and owner.owns_receipt())):self.access.ensure_revision(grant)
-            if name in ('claim_chat_learning','submit_chat_learning'):self.chat.validate(arguments['session_id'],grant['id'])
+            if handed is not None:self.chat.validate(arguments['session_id'],grant['id'])
             if cancel.is_set() and name not in ('send_chat_reply','send_chat_message','stop_chat_session') and not (owner and owner.exempt_cancel()):
-                if learning_receipt is not None:raise ValueError('学习提交后的交接已取消。')
+                if durable is not None:raise ValueError(durable['cancel_note'])
                 data=dict(event='cancelled',messages=[],note='本次调用已取消；需要结束聊天请停止会话。')
                 images=[]
             status=data.get('state','ok').lower();count=len(data.get('messages',[]))
@@ -401,10 +402,9 @@ class WGTools:
             if owner:return self.result(owner.rejected(arguments,'rate_limited',str(exc)))
             return self.result(dict(error=str(exc),error_code='rate_limited'))
         except (ValueError,OSError,sqlite3.Error) as exc:
-            if learning_receipt is not None:
-                status=learning_receipt['state']
-                return self.result({k:v for k,v in learning_receipt.items() if k not in ('next_call','continue_waiting','note')} |
-                    dict(chat_error='handoff_unavailable',note='学习提交状态已记录；聊天材料未交付。核对会话与授权后接续，不要重做已保存阶段。'))
+            if durable is not None:
+                status=durable['receipt']['state']
+                return self.result({**durable['receipt'],'chat_error':'handoff_unavailable','note':durable['failure_note']})
             if not isinstance(exc,ValueError):raise
             if owner:return self.result(owner.rejected(arguments,'chat_rejected',str(exc)))
             return self.result(dict(error=str(exc),error_code='chat_rejected'))

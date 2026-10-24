@@ -142,14 +142,18 @@
 `mcp_chat_output` / `mcp_connect` / `mcp_server` 里不再有它的名字——
 `scripts/check_app_plugins.py` 会扫 `chatlocal/*.py`，出现硬编码即失败。
 
-协议 12 个钩子（`name` / `tool_names` / `scope_flag` / `expression` 为类属性）：
+语言学习（issue #4 PD2b）是第二个 app 侧插件：适配器 `chatlocal/app_plugins/language.py`，
+功能模块 `chatlocal/mcp_language_learning.py` **原地不动**（七个语言门禁钉死其路径）。两者
+共存于同一注册表，宿主对两个插件共用同一套钩子，没有任何按名字的分支。
+
+协议钩子（`name` / `tool_names` / `scope_flag` / `expression` / `wake_event` 为类属性）：
 
 | 钩子 | 宿主何时调用 |
 | --- | --- |
 | `enabled()` | 决定工具是否出现、授权位是否保留 |
 | `scope(scope, row)` | 每批算出有效授权位（私聊或停用时清掉自己） |
 | `schemas(tool, scope)` | 组装 MCP 工具清单（两处调用点合一） |
-| `dispatch(grant, args, cancel)` | 气泡队列派发到该表达 |
+| `dispatch(grant, name, args, cancel)` | 工具执行：无 `expression` 的插件在 `permission()` 前直派（自授权）；表达型工具由气泡队列派发，`name` 由调用方补回 |
 | `rejected(args, code, note)` | 统一拒绝回执（未开放/限流/取消） |
 | `deny(grant, target, row)` | 规划阶段的预检拒绝 |
 | `owns_receipt()` | 回执已自持：不刷新聊天视图、不推进 revision |
@@ -157,10 +161,17 @@
 | `hint(scope)` / `batch(grant,row)` / `decorate(packet,data)` | 提示与批次数据 |
 | `wake_hint(data)` / `brief()` | 本批因它而醒时的提示（完整/精简两处） |
 | `stamp()` / `receive(event)` / `wake(row)` / `reset()` | 连接戳、事件、唤醒、断线重置 |
+| `resume()` / `close()` / `suspend()` | 服务恢复/挂起/停止（`suspend` 在宿主持锁内，只 drop 连接派生态，不轮转 epoch） |
+| `on_stored(row,payload)` / `stopped(sid)` | 消息落库后 / 单会话停止 |
+| `wake_signal(grant,row)` | 等待循环的唤醒描述子：`{kind,ready,payload,next_call,note}`，宿主不知线报名 |
+| `plan_context(p)` / `select(grant,p,ids)` | READY 计划的上下文档子与行内表达选择（拒绝返 `(code,note)`） |
+| `handoff(grant,data,name,args,cancel)` / `durable(data,name)` | 工具边界的聊天交接；交接失败/取消时仍成立的阶段回执 |
 
 入箱戳从 `reaction_epoch` 改为 `app_epochs: {插件名: 连接戳}`，旧行没有该键即视为
 过期（与重启同义）。`ChatReactions` 仍挂在 `chat.reactions` 上，但它是**写穿属性**
 （`chat.reactions is chat.apps.get('reactions')`），给现有门禁直接检查用，不会产生第二份状态。
+PD2b 起 `chat.learning` 同样是写穿属性（`chat.learning is chat.apps.get('language')`），
+本地 HTTP 界面（`mcp_routes`）经它转调，与门禁共用同一实例。
 
 ## 迁移与回退
 

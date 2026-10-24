@@ -156,14 +156,14 @@ class ChatWaitMixin:
                         db.execute("UPDATE chat_turn_plans SET state='CANCELLED',reason='input_unavailable' WHERE session_id=? AND state='WAITING'", (sid,))
                     waiting = None
                 deferred = bool(waiting and time.time() < waiting['not_before'] and not new_input)
-                learning = self.learning.wake(grant, row) if allow_learning and not pending and not notices and now >= earliest else dict(ready=False)
+                signal = self.apps.wake_signal(grant, row) if allow_learning and not pending and not notices and now >= earliest else None
 
                 ready_to_return = False
                 if mention_only:
                     if (has_mention or is_in_dialogue) and (len(pending) > limit or collection['ready']):
                         ready_to_return = True
                 else:
-                    if (len(pending) > limit or collection['ready']) or (notices and now - changed_at >= quiet) or learning['ready']:
+                    if (len(pending) > limit or collection['ready']) or (notices and now - changed_at >= quiet) or (signal is not None and signal['ready']):
                         ready_to_return = True
 
                 if (now >= earliest and pending and not deferred and ready_to_return) or now >= end:
@@ -193,7 +193,7 @@ class ChatWaitMixin:
                             db.executemany('UPDATE chat_inbox SET delivered=1 WHERE session_id=? AND id=?',[(sid,m['id']) for m in items])
                     status=self.receiver.status()
                     ready=status['state']=='connected' and status['account']==row['conversation_id'].split(':')[0]
-                    kind='messages' if items else wake_kind if notices and ready else 'learning_ready' if learning['ready'] and ready else 'idle' if ready else 'source_unavailable'
+                    kind='messages' if items else wake_kind if notices and ready else signal['kind'] if signal is not None and signal['ready'] and ready else 'idle' if ready else 'source_unavailable'
                     if kind == 'idle':
                         try:
                             from water_group.memory_engine import get_memory_engine
@@ -219,10 +219,10 @@ class ChatWaitMixin:
                     if result['decision_required'] and not result['has_more']:
                         result['next_call']=result['input_batch']['plan_call']
                     if deferred:result['deferred_until']=waiting['not_before']
-                    if kind=='learning_ready':
-                        result['learning_ready']=learning
-                        result['next_call']=learning['next_call']
-                        result['note']='领取并提交一个学习阶段；附 updated_chat 时沿 next_call 先聊天，否则回 wait，潜水不结束循环。'
+                    if signal is not None and kind==signal['kind']:
+                        result[signal['kind']]=signal['payload']
+                        result['next_call']=signal['next_call']
+                        result['note']=signal['note']
                     if not result['decision_required']:
                         result['input_batch']['phase']='WAITING'
                         result['input_batch']['next']='本轮没有待处理输入；直接 next_call，不需要 plan_chat_reply。'

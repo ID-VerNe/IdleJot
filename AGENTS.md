@@ -362,9 +362,12 @@ uv run python scripts/check_forward_wake.py
 #     700+ 行进提示带；豁免名单逐条注明由哪个分节消除，清空即拆分完成
 uv run python scripts/check_module_size.py
 
-# 27. app 侧插件协议（issue #4 PD）：工具名/授权位/表达三张静态表与宿主常量一致；
-#     停用即降级（工具消失 + 授权位清空）；私聊自动关掉自己；不吃别人的事件；
-#     `chatlocal/*.py` 里不得再出现插件名硬编码（宿主只认注册表）
+# 27. app 侧插件协议（issue #4 PD/PD2b）：工具名/授权位/表达三张静态表与宿主常量一致
+#     （scope 可为 None，SCOPE_BY_TOOL 恰好覆盖有授权位的工具）；停用即降级（工具消失
+#     + 授权位清空）；私聊自动关掉自己；不吃别人的事件；宿主无名字分支——插件工具名
+#     （reactions 与 language 四个）不得出现在 `chatlocal/*.py`（功能模块自身与
+#     `mcp_chat.py` 的 `chat.reactions`/`chat.learning` 写穿兼容属性除外）；注册表
+#     断言 language 四工具同一 owner、`wake_event` 是线报名而不是插件名
 uv run python scripts/check_app_plugins.py
 
 # 28. 跨群主档污染审计/清理/还原（issue #34）：--audit-pollution 纯只读且数值

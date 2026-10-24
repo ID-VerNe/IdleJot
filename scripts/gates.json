@@ -64,7 +64,8 @@
     {"name": "check_napcat_qq_probe.py", "why": "NapCat 探针契约：假消息 + loopback HTTP"},
     {"name": "check_qq_account_diagnostics.py", "why": "QQ 账号诊断：目录夹具、失败分类、隐私"},
     {"name": "check_upgrade.py", "why": "升级用真实 SQLite/WAL 夹具"},
-    {"name": "check_hot_reload.py", "why": "全栈热重载：闭包覆盖、target 映射、debounce、quarantine、不 spawn（#58）"}
+    {"name": "check_hot_reload.py", "why": "全栈热重载：闭包覆盖、target 映射、debounce、quarantine、不 spawn（#58）"},
+    {"name": "check_protection_probe.py", "why": "issue #58 一次性探针：故意登记不存在的门禁，验证分支保护能否拦住红 PR"}
   ],
   "manual": [
     {"name": "check_console_window.py", "why": "需要真实桌面会话；--self-test 会故意闪两次黑框做 A/B 对照"},

@@ -341,6 +341,10 @@ uv run python scripts/check_tmp_hygiene.py
 # 25. 转发体唤醒（issue #9）：合并转发里的 @ 与关键词必须参与 wake_reason；
 #     首层/嵌套两层、不可得时不猜、节点 100/字符 4000 封顶、# 指令闸门优先
 uv run python scripts/check_forward_wake.py
+
+# 26. 模块体量红线（issue #11）：单文件 >1000 行或单类 >800 行即 fail，
+#     700+ 行进提示带；豁免名单逐条注明由哪个分节消除，清空即拆分完成
+uv run python scripts/check_module_size.py
 ```
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

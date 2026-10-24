@@ -71,15 +71,19 @@ async def protocol(svc, token, sid, eid):
                 assert tools['send_chat_sticker'].annotations.openWorldHint
                 result=await c.call_tool('read_chat_image',dict(session_id=sid,event_id=eid))
                 assert not result.isError,result
-                assert len([x for x in result.content if x.type=='image'])==3
+                # 默认只交付单帧（每多一帧都是重复 token 成本）；frames='all' 才补采样帧。
+                assert len([x for x in result.content if x.type=='image'])==1
                 assert result.structuredContent['total_frames']==3
-                for img in result.content[1:]:Image.open(io.BytesIO(base64.b64decode(img.data))).verify()
+                for img in result.content:
+                    if img.type=='image':Image.open(io.BytesIO(base64.b64decode(img.data))).verify()
                 assert 'https://' not in result.model_dump_json()
 
 
 def main():
     animated=fixture_image(True)
-    assert pixels(animated)[0]['frame_indices']==[0,1,2]
+    # 默认单帧（中位帧）；只有 frames='all' 明确要看动作时才给 3 个采样帧。
+    assert pixels(animated)[0]['frame_indices']==[1]
+    assert pixels(animated,frames='all')[0]['frame_indices']==[0,1,2]
     assert 'file' not in image_ref({'file':'C:/private/secret.png'})
     for url in ('file:///C:/secret','http://127.0.0.1/a','https://qq.com.evil.invalid/a','https://qpic.cn@evil.invalid/a'):
         try:download(url,threading.Event());raise AssertionError(url)

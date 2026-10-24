@@ -176,7 +176,8 @@ def main():
                     DetailBot.image={'url':'https://gchat.qpic.cn/reuse'}
                     with patch('chatlocal.mcp_chat_media.download',return_value=animated) as download:
                         out=call('read_chat_image',session_id=sid,event_id=thumb,prefer_original=True)
-                        assert not out.isError and out.structuredContent['frame_indices']==[0,1,2],out
+                        # 默认单帧（中位帧）；frames='all' 才给 3 个采样帧。
+                        assert not out.isError and out.structuredContent['frame_indices']==[1],out
                         assert out.structuredContent['representation']['source']=='remote' and download.call_count==1
                     print('PASS: indexed history originals/thumbnails, exact hash and scope, real MCP pixels, original preference; lookup max_ms='+str(round(max(times),2)))
                     # Quoted and forwarded originals can predate the parent event.

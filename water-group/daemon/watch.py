@@ -11,6 +11,12 @@ follow-up window is open (追问窗口插件，issue #4 PD2a) ordinary chatter a
 last reply counts too, read straight from chat_inbox. They never overlap — a
 mention always wins — and the window closes itself once the group goes quiet.
 
+A wake that aged out while nobody was listening is not reported as a wake (the
+cold start would replay days of dead mentions), but it is no longer silent
+either: the timeout block ends with an ``EXPIRED:`` count and its ids, so
+"nobody watched for two hours" and "the group said nothing" stop looking the
+same (issue #69).
+
 Exit codes:
   0  a wake was printed
   2  timed out with nothing new (call again)
@@ -40,6 +46,8 @@ from wg_paths import state_dir
 STATE = state_dir()
 CURSOR = STATE / "wg_watch.txt"
 POLL = 1.5
+# 过期未回唤醒的报告里最多列几个 id：一行报得下，又不至于把整块输出撑成清单。
+EXPIRED_SHOWN = 5
 
 
 def read_cursor():
@@ -58,6 +66,37 @@ def write_cursor(value):
 
 def latest_id(rows):
     return max((r.get("id") or 0) for r in rows) if rows else 0
+
+
+def report_expired(rows, start_cursor):
+    """把「因过期被丢掉、且从没回过」的唤醒说出来（issue #69）。
+
+    它们不写账本、不进 fresh（冷启动后整批陈年 @ 会变成「新唤醒」，见
+    check_pending_reply 的契约），但也**不能什么都不说**：监听掉线超过
+    pending_reply_ttl 后，那段时间的 @ 在输出里与「从没来过」完全一样，Agent
+    没有任何线索知道自己错过了什么。计数带上 id，补不补由 Agent 决定（
+    reply.py <id> --force）。
+
+    只算 `start_cursor` 之后新到的：本轮开始时就已在文件里的历史积压，正是
+    冷启动不该被翻出来的那批，保持静默。游标归零就是冷启动——那时「过期」
+    只能说明文件里有陈年旧账，不能说明这次监听错过了什么。
+    """
+    if not start_cursor:
+        return
+    ledger = up.replied_ids()
+    expired = [e for e in rows
+               if (e.get("id") or 0) > start_cursor
+               and up.wake_reason(e)
+               and not up.replied_after(e.get("id"), rows, ledger)
+               and up.wake_expired(e)]
+    if not expired:
+        return
+    ids = "、".join(str(e.get("id")) for e in expired[:EXPIRED_SHOWN])
+    if len(expired) > EXPIRED_SHOWN:
+        ids += f" 等 {len(expired)} 条"
+    print(f"EXPIRED: {len(expired)} 条未回唤醒已超过待回时效"
+          f"（TTL {up.pending_reply_ttl()}s），未计入唤醒：{ids}")
+    print("         要补旧话题就单独回：reply.py <id> --force")
 
 
 def require_wake_identity():
@@ -108,6 +147,9 @@ def main():
         return 1
 
     cursor = 0 if args.replay else (args.after if args.after is not None else read_cursor())
+    # 本轮起点：过期统计只算这之后新到的唤醒。冷启动（0）不报，历史积压
+    # 仍按 check_pending_reply 的契约静默（issue #69）。
+    start_cursor = cursor
     deadline = time.time() + args.timeout
     ledger = up.replied_ids()
 
@@ -189,6 +231,7 @@ def main():
                 write_cursor(cursor)
 
         if time.time() >= deadline:
+            report_expired(rows, start_cursor)
             print("TIMEOUT")
             return 2
         time.sleep(POLL)

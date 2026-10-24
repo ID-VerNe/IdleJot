@@ -657,29 +657,50 @@ def discard_session(qq):
     return True
 
 
+_POLLERS = []      # [(thread, stop_event)]：start/stop 对称，插件生命周期要能收回去
+
+
 def start_poller(notify, cfg_getter=None, interval=POLL_INTERVAL):
-    """单轮询线程（§4.3）。notify(group_id, qq, text) 由 commands.py 接线发送。
+    """单轮询线程（§4.3）。notify(group_id, qq, text) 由宿主接线发送。
 
     `cfg_getter()` 每 tick 重读 config：`qr_login.enabled` 热重载后开关立即生效
-    （开→继续轮询，关→空转 sleep）。线程本身常驻，不做启停，避免重启栈才能改配置
+    （开→继续轮询，关→空转等待）。线程本身常驻，不做重启，避免改配置要重启栈
     （#41-D2）。
+
+    等待用 ``Event.wait`` 而不是 ``sleep``：``stop_poller`` 要能立刻收回线程
+    （issue #4 PC 的 ``Plugin.stop()``），否则停栈时白等一个轮询周期。
     """
+    stop = threading.Event()
+
     def loop():
-        while True:
+        while not stop.is_set():
             try:
                 cfg = (cfg_getter() if cfg_getter else None) or {}
                 if not cfg.get("enabled", True):
-                    time.sleep(interval)
+                    stop.wait(interval)
                     continue
                 for group_id, qq, text in poll_once():
                     notify(group_id, qq, text)
             except Exception as exc:  # noqa: BLE001  轮询线程不许死
                 audit(f"poller tick error: {type(exc).__name__}")
-            time.sleep(interval)
+            stop.wait(interval)
 
     thread = threading.Thread(target=loop, name="qr-login-poller", daemon=True)
     thread.start()
+    _POLLERS.append((thread, stop))
     return thread
+
+
+def stop_poller(timeout=2.0):
+    """停掉所有还在跑的轮询线程（后起的先停）。返回停掉的个数。"""
+    stopped = 0
+    while _POLLERS:
+        thread, stop = _POLLERS.pop()
+        stop.set()
+        if thread.is_alive():
+            thread.join(timeout)
+        stopped += 1
+    return stopped
 
 
 # ---------------------------------------------------------------- 续期与失效

@@ -21,6 +21,7 @@
 """
 import json
 import sys
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -98,7 +99,7 @@ def test_help_is_answerable():
         if key:
             listed.append(key)
     check("#帮助 有内容", bool(listed), text[:120])
-    static = set(settings["commands"] or {}) | set(commands.LOGIN_DESCS) | set(settings["help_keywords"])
+    static = set(settings["commands"] or {}) | set(settings["help_keywords"])
     for key in listed:
         if key in static:
             continue
@@ -159,6 +160,32 @@ def test_plugin_config():
           commands.PLUGINS.status_line(only))
 
 
+def test_lifecycle():
+    print("[生命周期 / 登录指令归属]")
+    owner = commands.PLUGINS.owner("登录")
+    check("登录指令归属 miyoushe 插件",
+          owner is not None and owner.name == "miyoushe", getattr(owner, "name", "None"))
+    for key in ("登录", "登录状态", "绑定", "解绑"):
+        check(f"#{key} 在 HANDLERS", key in commands.HANDLERS)
+    text = commands.help_text(commands.settings_from({}))
+    check("#帮助 里四条登录指令都在",
+          all(f"#{key}" in text for key in ("登录", "登录状态", "绑定", "解绑")), text[:200])
+
+    # start_all / stop_all 对称：轮询线程起得来、收得回去、重入不重复起
+    def pollers():
+        return [t for t in threading.enumerate() if t.name == "qr-login-poller"]
+
+    commands.SETTINGS_BOX["settings"] = commands.settings_from({})
+    commands.PLUGINS.start_all()
+    check("start_all 起轮询线程", len(pollers()) == 1, str(len(pollers())))
+    commands.PLUGINS.start_all()
+    check("start_all 幂等（不重复起线程）", len(pollers()) == 1, str(len(pollers())))
+    commands.PLUGINS.stop_all()
+    check("stop_all 收回线程", not pollers(), str(len(pollers())))
+    check("--status 有登录轮询一行",
+          "登录轮询" in commands.PLUGINS.status_line(commands.SETTINGS_BOX["settings"]))
+
+
 def test_duplicate():
     print("[重名 fail-fast]")
     registry = Registry()
@@ -210,6 +237,7 @@ def main():
     test_config_names()
     test_help_is_answerable()
     test_plugin_config()
+    test_lifecycle()
     test_duplicate()
     test_static_reachable()
     print()

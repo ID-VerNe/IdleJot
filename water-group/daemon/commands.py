@@ -15,11 +15,10 @@ slash_commands 映射，经 OneBot HTTP 直接回群（带原生引用）。
 chatlocal、不碰 SQLite、不调 MCP；与 collector 各持各的 WS 客户端（NapCat 向所有
 WS 客户端广播事件，已实测：第二个客户端并发在线时事件照收，原连接无感）。
 
-回复内容四个来源：config 的静态映射（slash_commands.commands）、插件注册表的
-动态 handler（米游社取数 issue 方案 D、60s 资讯 issue #53 方案 A，都经
-``plugins/`` 适配器注册）、qr_login.py 的登录指令（#登录/#登录状态/#解绑，
-issue #6：每用户扫码绑定）。本文件只留传输与仲裁（前缀、冷却、去重、引用、
-凭证链路、发送），域知识一律在插件里（issue #4 PA）。
+回复内容三个来源：config 的静态映射（slash_commands.commands）、插件注册表的
+动态 handler（米游社取数 issue 方案 D、60s 资讯 issue #53 方案 A、扫码登录
+issue #6，都经 ``plugins/`` 适配器注册）。本文件只留传输与仲裁（前缀、冷却、
+去重、引用、凭证链路、发送），域知识一律在插件里（issue #4 PA–PC）。
 
 issue #6 的两条硬规则：
   - §4.2 隐私缺口：取数 ctx 带用户维度，未绑定的群友**不再**回落全局 CK
@@ -88,9 +87,23 @@ def log(line):
 # 显式静态 import 是硬要求——check_hot_reload 靠 AST 闭包把改动映射到进程。
 import plugins  # noqa: E402
 
-PLUGINS = plugins.load_all(log=log)
+# 插件与轮询线程共享的最新设置（issue #4 PC）：热重载只换这里的引用，线程不用
+# 重启。`load_all` 在 import 期跑，所以传的是取值函数而不是当时的 settings。
+SETTINGS_BOX = {"settings": {}}
 
-# 动态 handler 合成一张表（米游社取数 + 60s 资讯，issue #53）。合并成模块级
+
+def _send_via_onebot(settings, group_id, payload):
+    """宿主发送通道：插件给的 payload 与 handler 返回值同形状（str / {"text","image"}）。"""
+    send_group_msg(settings, group_id, segments_for(payload))
+
+
+PLUGINS = plugins.load_all(
+    log=log,
+    settings_provider=lambda: SETTINGS_BOX["settings"],
+    sender=_send_via_onebot,
+)
+
+# 动态 handler 合成一张表（米游社取数 + 登录 + 60s 资讯）。合并成模块级
 # 名字而不是在 resolve_reply 里现拼：测试直接改 commands.HANDLERS 打桩。
 HANDLERS = PLUGINS.commands()
 
@@ -99,25 +112,6 @@ FETCH_ERRORS = PLUGINS.error_types()
 
 # §4.2：未绑定群友的取数指令统一回这句，不再拿管理员的全局 CK 顶。
 BIND_HINT = plugins.BIND_HINT
-
-try:
-    import qr_login
-except Exception as _exc:  # noqa: BLE001  登录模块坏了不该拖垮取数与静态指令
-    qr_login = None
-    _LOGIN_LOAD_ERROR = f"{type(_exc).__name__}: {_exc}"
-else:
-    _LOGIN_LOAD_ERROR = ""
-
-# 扫码登录指令（issue #6 §4.5）。#解绑 是两步确认（60 秒内再发一次即生效，见
-# qr_login.unbind）——只认字面量「确认」会把群友卡在提示里，实机踩过；
-# #绑定 只改 active_uid——UID 是取数参数不是凭证，没 CK 时单绑 UID 取不到数据。
-# PC 会把这一整块迁成插件；本轮保留原样，先把契约与两个取数插件落地。
-LOGIN_DESCS = {
-    "登录": "扫码绑定米游社账号（凭证只存本机）",
-    "登录状态": "查看自己的绑定情况",
-    "绑定": "绑定/切换游戏 UID（需先 #登录）",
-    "解绑": "解绑米游社账号（再发一次即确认）",
-}
 
 
 def beat():
@@ -316,15 +310,6 @@ def plugin_options(settings, name):
     return ((settings.get("plugins") or {}).get(name) or {}).get("options") or {}
 
 
-def qr_login_options(settings):
-    """扫码登录的配置。**PC 之前唯一的宿主→provider 读取点**。
-
-    ``#登录`` 与轮询线程都要这一段；qr_login 迁成插件后本函数与两个调用点一起
-    搬进插件（issue #4 PC），宿主就彻底不认识 miyoushe 这个词了。
-    """
-    return plugin_options(settings, "miyoushe").get("qr_login") or {}
-
-
 def _positive(value, fallback):
     try:
         number = float(value)
@@ -417,8 +402,6 @@ def help_text(settings, group_id=""):
         if not PLUGINS.available(key, settings, group_id):
             continue
         entries.setdefault(key, {"desc": desc})
-    for key, desc in LOGIN_DESCS.items():
-        entries.setdefault(key, {"desc": desc})
     for key in settings["help_keywords"]:
         entries.setdefault(key, {"desc": "指令列表"})
     if not entries:
@@ -484,14 +467,12 @@ def resolve_reply(key, settings, event=None, args=""):
     """关键词 → 回复。None 表示不回复（未配置且未开 unknown_reply）。
 
     返回值两种形状：纯文本 str，或 {"text", "image"}（扫码登录的二维码回复，
-    image 是 OneBot image 段）。优先登录指令，再动态 handler（米游社取数），
-    再静态配置，最后 unknown_reply。
+    image 是 OneBot image 段）。优先动态 handler（取数 / 登录 / 资讯），再静态
+    配置，最后 unknown_reply——PC 起登录指令也是插件指令，不再有前置分支。
     """
     group_id = str((event or {}).get("group_id") or "")
     if key in settings["help_keywords"]:
         return help_text(settings, group_id)
-    if key in LOGIN_DESCS:
-        return login_reply(key, args, settings, event)
     handler_key, rest = match_handler(key)
     if handler_key:
         # 插件门控（issue #53 的 60s 白名单）：没开配置就静默落空，不走
@@ -505,34 +486,6 @@ def resolve_reply(key, settings, event=None, args=""):
         return settings["unknown_reply"] or None
     text = str(entry.get("reply") or "")
     return text or None
-
-
-def login_reply(key, args, settings, event):
-    """#登录 / #登录状态 / #绑定 / #解绑（issue #6 §4.5）。"""
-    if _LOGIN_LOAD_ERROR:
-        log(f"login unavailable: {_LOGIN_LOAD_ERROR}")
-        return "登录功能暂不可用（模块加载失败），稍后再试"
-    event = event or {}
-    user_id = str(event.get("user_id") or "")
-    if not user_id or user_id == "0":
-        return "这条指令要群友本人在群里发（合成测试事件没有真实 QQ）"
-    if key == "绑定":
-        return qr_login.bind_uid(user_id, args)
-    if key == "登录":
-        if not qr_login_options(settings).get("enabled", True):
-            return "扫码登录未开启（config → plugins.miyoushe.options.qr_login.enabled）"
-        try:
-            session = qr_login.start_login(settings, user_id, event.get("group_id"))
-        except qr_login.QrLoginError as exc:
-            return str(exc)
-        return {"text": "5 分钟内用米游社 App 扫这张码\n"
-                        "凭证只加密存本机，机器人不会发出去；随时 #解绑 可删",
-                "image": qr_login.qr_image_segment(session["url"])}
-    if key == "登录状态":
-        return qr_login.status_text(user_id)
-    # 两步确认在 qr_login.unbind 里收口：窗口内再发一次裸 #解绑 也算确认。
-    # 原来这里硬比 args=="确认"，而提示文案让人「再发一次 #解绑」，于是死循环。
-    return qr_login.unbind(user_id, args)
 
 
 def run_handler(key, fn, settings, event, args):
@@ -552,7 +505,10 @@ def run_handler(key, fn, settings, event, args):
     need_ck = getattr(fn, "need_ck", True)
     owner = PLUGINS.owner(key)
     ctx = {"ck": [], "uid": "",
-           "group_id": str(event.get("group_id") or ""), "user_id": user_id}
+           "group_id": str(event.get("group_id") or ""), "user_id": user_id,
+           # 插件 handler 只拿 (args, ctx)，配置从这里取（issue #4 PC：
+           # #登录 要把 settings 交给 qr_login.start_login）。
+           "settings": settings}
     hint = plugins.host.resolve_credentials(
         ctx, settings, user_id, need_ck, owner,
         provider=PLUGINS.credential_provider(settings))
@@ -631,11 +587,12 @@ def dispatch(event, settings, self_ids, state):
     # 冷却 key 带上 user_id：避免 A 发完指令把 B 的同名指令静默吃掉（issue #66）。
     slot = f"{event.get('group_id')}:{user_id}:{key}"
     now = time.monotonic()
+    owner = PLUGINS.owner(key)
+    hooks = owner.hooks if owner is not None else None
     # 待确认流程的第二步（如 #解绑 的 60s 窗口内再发）豁免冷却闸门，
-    # 否则 5s 冷却会把第二步静默丢弃（issue #66）。
-    pending_keys = (qr_login.pending_confirmation_keys(user_id)
-                    if qr_login is not None else frozenset())
-    if key not in pending_keys and not cooldown_ok(state["last_at"], slot, now, settings["cooldown_seconds"]):
+    # 否则 5s 冷却会把第二步静默丢弃（issue #66）。判定在插件里（issue #4 PC）。
+    pending = hooks.pending(user_id) if (hooks is not None and hooks.pending) else frozenset()
+    if key not in pending and not cooldown_ok(state["last_at"], slot, now, settings["cooldown_seconds"]):
         return False
     text = resolve_reply(key, settings, event, args)
     if text is None:
@@ -646,10 +603,10 @@ def dispatch(event, settings, self_ids, state):
         data = send_group_msg(settings, event["group_id"], segments)
     except Exception as exc:  # noqa: BLE001  发送失败不能杀死监听
         log(f"send failed group={event.get('group_id')} key={key}: {type(exc).__name__}: {exc}")
-        if key == "登录" and qr_login is not None:
-            # 二维码没发出去：撤销会话并退还本次额度，别让用户白等 5 分钟
-            # 才收到「已过期」，也别白扣当天 5 次里的一次（#41-E2）。
-            qr_login.discard_session(event.get("user_id"))
+        if hooks is not None and hooks.on_send_failed is not None:
+            # 回滚交给插件（二维码没发出去要撤会话、退额度，#41-E2）
+            hooks.on_send_failed({"key": key, "user_id": user_id,
+                                  "group_id": str(event.get("group_id") or "")}, settings)
         return False
     sent = (data.get("data") or {}).get("message_id")
     log(f"replied #{key} group={event.get('group_id')} user={event.get('user_id')} "
@@ -658,11 +615,14 @@ def dispatch(event, settings, self_ids, state):
 
 
 def notify_login(settings, group_id, qq, text):
-    """扫码登录的主动通知（§4.3）：@ 本人 + 文本，发到发起 #登录 的那个群。"""
-    segments = [{"type": "at", "data": {"qq": str(qq)}},
-                {"type": "text", "data": {"text": " " + text}}]
+    """扫码登录的主动通知（§4.3）：@ 本人 + 文本，发到发起 #登录 的那个群。
+
+    ``@ + 文本`` 的形状收在 ``Host.notify`` 里（插件回推同一条路），这里只剩
+    日志与「通知失败不能杀死轮询线程」。``settings`` 只为保持调用签名——测试
+    仍以 ``commands.notify_login`` 为打桩点。
+    """
     try:
-        send_group_msg(settings, group_id, segments)
+        PLUGINS.host.notify(group_id, qq, text)
         log(f"qr login notify group={group_id} qq={qq}")
     except Exception as exc:  # noqa: BLE001  通知失败不能杀死轮询线程
         log(f"qr notify failed group={group_id}: {type(exc).__name__}: {exc}")
@@ -679,16 +639,14 @@ def serve():
     if not acquire_lock():
         return 0
     # 扫码轮询线程与 WS 循环共享最新设置：热重载只换 box 里的引用，线程不用重启。
-    # 线程常驻，`qr_login.enabled` 由 cfg_getter 每 tick 重读（#41-D2）。
-    box = {"settings": settings}
-    if qr_login is not None:
-        qr_login.start_poller(
-            lambda group_id, qq, text: notify_login(box["settings"], group_id, qq, text),
-            cfg_getter=lambda: qr_login_options(box["settings"]))
-        log("qr-login poller started")
+    # 线程常驻，扫码开关由插件的 cfg_getter 每 tick 重读（#41-D2）。
+    SETTINGS_BOX["settings"] = settings
+    # 插件的后台线程在这里起（不是 import 期的 load()）：此刻才有设置与发送通道。
+    PLUGINS.start_all()
     try:
-        return _serve(settings, connect, ConnectionClosed, box)
+        return _serve(settings, connect, ConnectionClosed, SETTINGS_BOX)
     finally:
+        PLUGINS.stop_all()
         release_lock()
 
 
@@ -793,6 +751,8 @@ def run_test(text):
         return 1
     event = {"post_type": "message", "message_type": "group",
              "group_id": int(groups[0]), "user_id": 0, "message_id": None}
+    # 宿主发送通道读的是这个 box；--test 是独立进程，不设就拿不到 onebot 地址。
+    SETTINGS_BOX["settings"] = settings
     reply = resolve_reply(key, settings, event, args)
     if reply is None:
         print(f"#{key} 不产生回复")
@@ -815,8 +775,6 @@ def main():
     args = parser.parse_args()
     for name, error in PLUGINS.load_errors.items():
         log(f"plugin {name} unavailable: {error}")
-    if _LOGIN_LOAD_ERROR:
-        log(f"qr login unavailable: {_LOGIN_LOAD_ERROR}")
     if args.test:
         return run_test(args.test)
     try:

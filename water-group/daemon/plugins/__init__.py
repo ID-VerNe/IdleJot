@@ -49,15 +49,17 @@ LOADERS = (
 )
 
 
-def load_all(log=None, capabilities=None):
+def load_all(log=None, capabilities=None, settings_provider=None, sender=None):
     """按 ``LOADERS`` 顺序加载；单个插件失败只记一行，不影响其他插件。
 
     返回注册表本身。``capabilities`` 缺省是 commands 宿主的能力集，测试可以传
-    一个更小的集合来验证 ``requires`` 校验。
+    一个更小的集合来验证 ``requires`` 校验。``settings_provider`` / ``sender``
+    由宿主延迟绑定（``load_all`` 在 import 期跑，发送函数通常还没定义）。
     """
     REGISTRY.reset()
     caps = COMMANDS_CAPABILITIES if capabilities is None else frozenset(capabilities)
-    host = CommandsHost(log=log)
+    host = CommandsHost(log=log, settings_provider=settings_provider, sender=sender)
+    REGISTRY.host = host
     for name, loader in LOADERS:
         try:
             plugin = loader()

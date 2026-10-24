@@ -265,6 +265,11 @@ class MemoryDossierMixin:
                 new_memories = self._merge_memories([], norm_memories)
                 new_tone = tone_style.strip() if (tone_style and str(tone_style).strip()) else "普通群友"
 
+                # A group-scoped insert must not leak group-only facts into the
+                # cross-group row; they land in the overlay below (issue #19).
+                # This mirrors the UPDATE branch's `memories_for_row` guard.
+                memories_for_row = [] if gid else new_memories
+
                 conn.execute(
                     """
                     INSERT INTO member_profiles (user_id, primary_name, aliases, tone_style, interests, traits, key_memories, created_at, updated_at)
@@ -277,7 +282,7 @@ class MemoryDossierMixin:
                         new_tone,
                         json.dumps(new_interests, ensure_ascii=False),
                         json.dumps(new_traits, ensure_ascii=False),
-                        json.dumps(new_memories, ensure_ascii=False),
+                        json.dumps(memories_for_row, ensure_ascii=False),
                         now,
                         now,
                     ),
@@ -369,6 +374,10 @@ class MemoryDossierMixin:
                     role=rec.get("role"),
                     primary_name=rec.get("primary_name"),
                     overwrite=bool(rec.get("overwrite", False)),
+                    # Group-scoped records must land in the overlay, not the
+                    # cross-group main row (issue #19). Empty gid -> None keeps
+                    # the legacy cross-group behaviour.
+                    group_id=gid or None,
                 )
                 if res.get("success"):
                     updated_profiles.append(res["primary_name"])

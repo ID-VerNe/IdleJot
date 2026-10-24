@@ -154,22 +154,13 @@ class MemoryProfileMixin:
                 loose.append(r)
         return by_name + by_alias, loose
 
-    def alias_index(self, group_id=None, min_len=2):
-        """Every known name in the dossier, as ``{name: (user_id, primary_name)}``.
+    def _alias_pairs(self, group_id=None):
+        """Every known name as ``[(name, user_id, primary_name), ...]``, unfiltered.
 
-        Rendering layers need to answer "who does this nickname point at" for a
-        whole line of chatter, not one profile at a time (issue #30): a per-line
-        ``match_profiles`` hands back full rows (key_memories included), and a
-        wake batch would hit the database once per message. This is one read of
-        the same view ``query_member_dossier`` reports -- the cross-group
-        profile unioned with this group's overlay (issue #5) -- shaped for
-        scanning instead of for one lookup.
-
-        Generic placeholders (「领导」「群友」) and anything shorter than
-        ``min_len`` are dropped: they name nobody, and matching them would
-        invent pointers nobody asked for. On an alias collision the first
-        profile in table order wins, same as ``find_profile`` taking [0]; a
-        rendering hint does not need to relitigate ties.
+        One read of the view ``query_member_dossier`` reports -- the cross-group
+        profile unioned with this group's overlay (issue #5). Length/generic
+        filtering is a property of *how* the table is consumed, so it lives in
+        the two views below instead of here (issue #54).
         """
         with self.lock, self._connect() as conn:
             rows = [dict(r) for r in conn.execute(
@@ -181,15 +172,52 @@ class MemoryProfileMixin:
                         "SELECT user_id, aliases FROM member_group_memories WHERE group_id=?",
                         (gid,)).fetchall():
                     overlays[str(r["user_id"])] = json.loads(r["aliases"] or "[]")
-        index = {}
+        pairs = []
         for r in rows:
             uid = str(r["user_id"])
-            names = [str(r["primary_name"])] + [str(a) for a in json.loads(r["aliases"] or "[]")]
+            primary = str(r["primary_name"])
+            names = [primary] + [str(a) for a in json.loads(r["aliases"] or "[]")]
             names += [str(a) for a in overlays.get(uid) or []]
             for name in dict.fromkeys(n for n in names if n and n.strip()):
-                if len(name) < min_len or name in GENERIC_ALIASES:
-                    continue
-                index.setdefault(name, (uid, str(r["primary_name"])))
+                pairs.append((name, uid, primary))
+        return pairs
+
+    def alias_index(self, group_id=None, min_len=2):
+        """Substring-scanning alias table, as ``{name: (user_id, primary_name)}``.
+
+        Rendering layers need to answer "who does this nickname point at" for a
+        whole line of chatter, not one profile at a time (issue #30): a per-line
+        ``match_profiles`` hands back full rows (key_memories included), and a
+        wake batch would hit the database once per message.
+
+        Generic placeholders (「领导」「群友」) and anything shorter than
+        ``min_len`` are dropped: they are substring-matched against free text, so
+        a one-character name would hit almost every sentence and invent pointers
+        nobody asked for. Equality lookups must use ``alias_index_exact``
+        instead -- there, a one-character display name is a precise hit, not a
+        guess (issue #54). On an alias collision the first profile in table
+        order wins, same as ``find_profile`` taking ``[0]``.
+        """
+        index = {}
+        for name, uid, primary in self._alias_pairs(group_id):
+            if len(name) < min_len or name in GENERIC_ALIASES:
+                continue
+            index.setdefault(name, (uid, primary))
+        return index
+
+    def alias_index_exact(self, group_id=None):
+        """Equality-lookup alias table, as ``{name: (user_id, primary_name)}``.
+
+        No length or generic-word filtering (issue #54): ``sender_tag`` compares
+        the display name verbatim (``table.get(display_name)``), so a one-char
+        primary name or an alias that happens to be a generic word is *the same
+        string*, not a substring guess. Hiding those made existing dossiers
+        invisible on the wake line -- indistinguishable from a stranger. On a
+        collision the first profile in table order wins, same as ``find_profile``.
+        """
+        index = {}
+        for name, uid, primary in self._alias_pairs(group_id):
+            index.setdefault(name, (uid, primary))
         return index
 
     def find_profile(self, identifier, group_id=None):

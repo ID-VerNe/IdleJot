@@ -4,7 +4,7 @@
 之后没有任何东西保证下一次挂上：Agent 回消息、读图、写 issue 的几十秒里，
 @ 落进文件而没人看。三次都是用户主动问「是不是没挂上」才发现的。
 
-这条门禁钉十一个契约，任何一处退回旧行为都红：
+这条门禁钉十二个契约，任何一处退回旧行为都红：
 
 1. `listen.py` 的每种退出（WAKE / NO_WORK / WATCH_FAILED）都以一行
    `RESTART: <python> water-group/daemon/listen.py --timeout N` 收尾，且短等待
@@ -27,7 +27,10 @@
    ——被宿主截断时它是唯一的痕迹。
 10. `RESTART:` 行不推荐撑不住的取值：短等待回常驻周期、超预算压回预算、其余透传。
 11. 文档（`AGENTS.md` / `README.md` / `.agents/rules/water_group.md` / `SKILL.md`）
-    里的 `--timeout` 示例不得超预算——Agent 照抄的是它们，不是源码。
+    里的 `--timeout` 示例不得超预算——Agent 照抄的是它们，不是源码。守护脚本里的
+    字符串字面量（`up.py --status` 的提示串）同扫，注释与 docstring 不算推荐值。
+12. `watch.py` 裸跑时的 `--timeout` 默认值同样不超预算，且 argparse 的实际 default
+    必须等于模块常量（写死 `default=240` 而常量仍是 90 会绕过第 8 条）。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -55,6 +58,7 @@ sys.path.insert(0, str(DAEMON))
 import listen  # noqa: E402
 import reply  # noqa: E402
 import up  # noqa: E402
+import watch  # noqa: E402
 import wg_budget  # noqa: E402
 
 # 外部测试变量会把 state 又指回实机，这里必须清掉，只留临时数据根。
@@ -127,6 +131,64 @@ def index_of(out, prefix):
         if ln.startswith(prefix):
             return idx
     return -1
+
+
+def _arg_default(rel, flag):
+    """`add_argument(flag, default=…)` 的**实际**取值（字面量 / 模块常量都解）。
+
+    只断言模块常量不够：把 `default=240` 直接写死、常量仍留 90 时，「常量 ≤ 预算」
+    那条照样绿（变异实测）。所以解析 argparse 自己的 default，再要求它与常量一致。
+    """
+    tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+    consts = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            value = node.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, int):
+                consts[node.targets[0].id] = value.value
+            elif (isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name)
+                    and value.value.id == "wg_budget" and hasattr(wg_budget, value.attr)):
+                consts[node.targets[0].id] = getattr(wg_budget, value.attr)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument"):
+            continue
+        flags = [a.value for a in node.args
+                 if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+        if flag not in flags:
+            continue
+        for kw in node.keywords:
+            if kw.arg != "default":
+                continue
+            if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, int):
+                return kw.value.value
+            if isinstance(kw.value, ast.Name):
+                return consts.get(kw.value.id)
+    return None
+
+
+def _quoted_timeouts(rel):
+    """某脚本里字符串字面量中的 `--timeout N` 取值（跳过注释与 docstring）。
+
+    只看字符串常量是有意的：注释与 docstring 会写「300s 会怎样」这类解释，
+    按原文扫会把解释当成推荐值判红（复核 agent 指出的假阳性风险）。
+    """
+    tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+    docs = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+            continue
+        body = getattr(node, "body", None) or []
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+            docs.add(id(body[0].value))
+    found = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in docs):
+            found += re.findall(r"--timeout[ =](\d+)", node.value)
+    return found
 
 
 # ---------- listen.py：退出时给出可粘贴的下一步 ----------
@@ -348,7 +410,9 @@ def 常驻周期不长于等待预算():
     与 `reply.py --wait` 用同一套预算（`wg_budget.WAIT_BUDGET`），谁把它调回去都在
     这里红。
     """
-    return 0 < listen.DEFAULT_TIMEOUT <= wg_budget.WAIT_BUDGET
+    return (0 < listen.DEFAULT_TIMEOUT <= wg_budget.WAIT_BUDGET
+            and _arg_default("water-group/daemon/listen.py", "--timeout")
+            == listen.DEFAULT_TIMEOUT)
 
 
 @case
@@ -398,20 +462,39 @@ def 超预算的取值不写进重挂命令():
 
 
 @case
+def 看护默认超时也在预算内():
+    """裸跑 `watch.py` 的等待上限同样不能超预算（issue #83）。
+
+    `watch.py --timeout 240` 是默认值而不是文档示例：Agent 直接敲 `watch.py`
+    就走到它，超预算时同样被宿主截断、同样不留输出。数值藏在 argparse 的
+    `default=` 里，文档扫描抓不到，所以单独钉。
+    """
+    return (0 < watch.DEFAULT_TIMEOUT <= wg_budget.WAIT_BUDGET
+            and _arg_default("water-group/daemon/watch.py", "--timeout")
+            == watch.DEFAULT_TIMEOUT)
+
+
+@case
 def 示例命令不超预算():
-    """文档与守护脚本里的 `--timeout` 示例都得装得进一次工具调用（issue #83）。
+    """文档与守护脚本里**给人照抄**的 `--timeout` 取值都得装得进一次调用。
 
     源码改对了不算修好：Agent 照抄的是 `AGENTS.md` / `README.md` / `SKILL.md` /
     rules 里的示例命令，以及 `up.py --status` 的「下一步」提示串（`up.py:242`
-    曾经硬编码 300，比文档还难发现——它是运行时打印的）。这四处与
-    `water-group/daemon/*.py` 一起扫，白名单为空：示例本来就该是这个口径。
+    曾经硬编码 300，比文档还难发现——它是运行时打印的）。
+
+    文档按正则在原文上扫；守护脚本只扫**字符串字面量**（AST，跳过 docstring 与
+    注释）：注释里写「300s 会怎样」是解释，不是推荐值，按原文扫会把解释也判红。
     """
     over = []
-    for rel in DOC_SAMPLES + DAEMON_SOURCES:
+    for rel in DOC_SAMPLES:
         text = (ROOT / rel).read_text(encoding="utf-8")
-        for value in re.findall(r"--timeout[ =](\d+)", text):
-            if int(value) > wg_budget.WAIT_BUDGET:
-                over.append(f"{rel}: --timeout {value}")
+        over += [f"{rel}: --timeout {value}"
+                 for value in re.findall(r"--timeout[ =](\d+)", text)
+                 if int(value) > wg_budget.WAIT_BUDGET]
+    for rel in DAEMON_SOURCES:
+        over += [f"{rel}: --timeout {value}"
+                 for value in _quoted_timeouts(rel)
+                 if int(value) > wg_budget.WAIT_BUDGET]
     if over:
         print("  " + "; ".join(over))
     return not over

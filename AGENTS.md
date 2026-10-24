@@ -376,6 +376,11 @@ uv run python scripts/check_pollution_scrub.py
 #     不得进 chat_inbox.payload.sender，也不得进档案 aliases/primary_name；
 #     入库侧与建档侧共用 chatlocal/name_guard.py 单一清洗
 uv run python scripts/check_sender_name.py
+
+# 30. watchdog halt 可恢复（issue #45）：连续 boot timeout 后必须冷却再试
+#     （计数重置，不许永久停机）；halt 期间写 state/napcat_halt.json
+#     （kind/fails/first_fail_at/halted_at/reason），恢复后立即清除
+uv run python scripts/check_watchdog_halt.py
 ```
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

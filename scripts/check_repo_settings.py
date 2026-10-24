@@ -315,11 +315,17 @@ POLICY_FIXTURES = [
     (2, {'required_approving_review_count': 1}, '/docs/ @x', True,
      '双维护者 + review 但 CODEOWNERS 只覆盖 docs'),
     (2, {'required_approving_review_count': 0}, '/scripts/ @x', True, '双维护者 + review 人数 0'),
+    (2, None, ALL_GATES_CODEOWNERS, True,
+     '双维护者 + 无 review + CODEOWNERS 全覆盖（隔离 review 维度，独立复核追改）'),
 ]
 
 
 def self_test():
-    """离线 A/B 夹具：CODEOWNERS 匹配器 8 组 + 两态复核政策 8 组（issue #78）。"""
+    """离线 A/B 夹具：CODEOWNERS 匹配器 8 组 + 两态复核政策 9 组（issue #78）。
+
+    政策夹具按「维度隔离」设计：每条断言分支至少有一组只暴露该维度的用例
+    （双人态 review 断言由「全覆盖 + 无 review」隔离，混因用例不替代隔离用例）。
+    """
     failures = []
     for text, paths, expected in MATCHER_FIXTURES:
         covered = codeowners_covers(text, paths)

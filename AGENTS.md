@@ -71,11 +71,13 @@
 判据看 `~/.water-group/logs/wg_commands.log` 的启动行：
 
 ```
-commands start, prefix='#' keywords=[...] groups=[...] handlers=<N> sixty=<M>
+commands start, prefix='#' keywords=[...] groups=[...] handlers=<N> plugins=miyoushe:17,sixty:14
 ```
 
 这行**时间早于提交时间** = 进程还是旧代码，此时新指令会被当未知指令**静默丢弃**
-（`unknown_reply` 默认空串，症状是「发了完全没反应」，见 issue #68）。
+（`unknown_reply` 默认空串，症状是「发了完全没反应」，见 issue #68）。`plugins=`
+里缺某个插件或写成 `:0` = 那个插件没加载起来（issue #4 PA：注册表按插件记
+`load_error`，`up.py --status` 的 `插件` 行也会列出来）。
 
 重启单棵树（别整栈停，supervisor 会在 8 秒内拉起）：
 

@@ -21,6 +21,7 @@ from fixture_server import FixtureHandler, fixture_server  # noqa: E402
 from check_fixture_support import network_guard  # noqa: E402
 
 import commands  # noqa: E402
+import miyoushe  # noqa: E402  (域异常由插件声明，commands 不再转出类对象)
 import qr_login  # noqa: E402
 import user_store  # noqa: E402
 
@@ -458,10 +459,10 @@ def test_ck_invalid_notify(_tmp):
                               "bound_at": 1760000000, "last_renew_at": int(time.time())})
 
     def boom(_args, _ctx):
-        raise commands.MiyousheError("CK 已失效", code=10001)
+        raise miyoushe.MiyousheError("CK 已失效", code=10001)
 
     def boom_quota(_args, _ctx):
-        raise commands.MiyousheError("今日查询次数已达上限", code=10101)
+        raise miyoushe.MiyousheError("今日查询次数已达上限", code=10101)
 
     real = dict(commands.HANDLERS)
     commands.HANDLERS["坏探针"] = ("坏探针", boom)
@@ -706,15 +707,17 @@ def test_commands_privacy(tmp):
         zero = json.loads(commands.resolve_reply("探针", S, {"user_id": 0}, ""))
         check("privacy: user_id=0 视作测试口", zero["ck"] == ["ltuid=GLOBAL; ltoken=GLOBAL"])
 
-        saved = commands.user_store
-        commands.user_store = None
+        # 凭证链路在宿主里（issue #4 PA）：user_store 的落点是 plugins.host。
+        import plugins.host as plugin_host
+        saved = plugin_host.user_store
+        plugin_host.user_store = None
         try:
             fallback = json.loads(commands.resolve_reply(
                 "探针", S, {"user_id": 222333461, "group_id": 1}, ""))
             check("privacy: 存储模块缺失时退回旧行为（不掐死取数）",
                   fallback["ck"] == ["ltuid=GLOBAL; ltoken=GLOBAL"])
         finally:
-            commands.user_store = saved
+            plugin_host.user_store = saved
     finally:
         commands.HANDLERS = real
 

@@ -321,7 +321,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 38 | `mcp` | `check_mcp_jargon_pipeline.py` | 黑话流水线各阶段独立校验 |
 | 39 | `mcp` | `check_mcp_expression_evidence.py` | 表达证据 vs 机器人政策回归 |
 | 40 | `mcp` | `check_plugin_registry.py` | 插件注册表（#4 PA 与 PB） |
-| 41 | `mcp` | `check_app_plugins.py` | app 侧插件协议：静态表、停用即降级、无插件名硬编码（#4 PD） |
+| 41 | `mcp` | `check_app_plugins.py` | app 侧插件协议：显式 scope/expression 声明、静态表、停用即降级、宿主无插件名硬编码（#4 PD/PD2b） |
 | 42 | `storage` | `check_memory_engine_imports.py` | 水群模块单实例身份（动 shim 或 sync_* 时必跑） |
 | 43 | `storage` | `check_group_memory.py` | 记忆引擎、MCP 读写工具与两层存储 |
 | 44 | `storage` | `check_group_notes.py` | 群级结构化术语读写闭环（#31） |

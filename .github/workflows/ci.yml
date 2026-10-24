@@ -62,6 +62,8 @@ jobs:
             'check_memory_engine_imports.py',
             'check_group_memory.py',
             'check_text_truncation.py',
+            # dossier.py 写入动词：载荷校验、超长拒绝、游标只在写入成功后推进（issue #6）
+            'check_dossier_ingest.py',
             # One backend start must write one startup banner (issue #97)
             'check_app_log_once.py',
             'check_anti_habituation.py',

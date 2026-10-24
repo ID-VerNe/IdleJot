@@ -325,6 +325,11 @@ uv run python scripts/check_quote_visibility.py
 # 22. 「现在」锚点（issue #95）：status 首行 / --list / --context 表头 /
 #     watch 唤醒块 / followup --show 都必须带当前时刻，且与 time.time() 对得上
 uv run python scripts/check_now_clock.py
+
+# 23. 沉淀写入动词（issue #6）：--ingest 落一条 source=summary 事件；超 12000 字
+#     exit 2 且不写库；--through 只在写入成功后推进游标；--apply 带 group_id 追加
+#     只写覆盖行（#5 边界）；未知字段 fail-closed；--dry-run 零写入
+uv run python scripts/check_dossier_ingest.py
 ```
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

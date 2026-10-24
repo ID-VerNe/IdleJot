@@ -24,7 +24,6 @@ from .onebot_events import EventReceiver
 from .onebot_segments import at as at_segment, message_id, name as at_name, qq as qq_id, reply as reply_segment
 from . import mcp_chat_prompts as prompts
 from .mcp_chat_turns import ChatTurns, TOOLS as TURN_TOOLS
-from .mcp_language_learning import ChatLearning, TOOLS as LEARNING_TOOLS
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _WATER_GROUP_CONFIG_CACHE = {'mtime': 0, 'path': None, 'data': {}}
 
@@ -48,7 +47,7 @@ def load_water_group_config():
 
 
 CHAT_TOOLS = {'start_chat_session', 'get_chat_session', 'list_chat_sessions', 'read_chat_forward',
-              'wait_chat_messages', 'send_chat_message', 'stop_chat_session', 'list_chat_groups', 'list_chat_friends', 'list_chat_personas', 'query_member_dossier', 'update_member_dossier', 'consolidate_chat_memory', 'query_group_notes'} | TURN_TOOLS | LEARNING_TOOLS | APP_TOOL_NAMES
+              'wait_chat_messages', 'send_chat_message', 'stop_chat_session', 'list_chat_groups', 'list_chat_friends', 'list_chat_personas', 'query_member_dossier', 'update_member_dossier', 'consolidate_chat_memory', 'query_group_notes'} | TURN_TOOLS | APP_TOOL_NAMES
 CHAT_INSTRUCTIONS = '''这是用户明确开启的持续聊天，不设总时长；直到用户停止、权限失效或客户端退出。
 开始即在当前机器人账号与授权会话内边聊边学，保留之前明确暂停的偏好；只学习本次实时他人消息，不读历史或更换模型目的地。好友私聊使用 ACCOUNT:direct:QQ，群聊使用 ACCOUNT:group:GROUP；不发送临时会话。
 统一循环：wait 收到消息先做 Planner；silence 仅结束本轮发言决定，确认处理进度后继续 wait，绝不退出水群。Planner 的 WAITING 只是暂缓决定，不确认本批完成；沿 next_call 等待，到期或新输入时程序重新交付可规划批次。wait 返回 learning_ready 时领取一个阶段；claim 返回 task 时，用下一次实际模型调用完成并沿 task.submit_call 提交。claim/submit 附 updated_chat 时直接沿 next_call 先聊天；未领取任务或已提交且无附带聊天时回 wait。每次只推进一个阶段，不连续领取，无需用户另给学习口令。
@@ -128,7 +127,6 @@ class MCPChat(ChatWaitMixin):
         self.media = ChatMedia(self)
         self.apps = build_app_plugins(self)
         self.turns = ChatTurns(self)
-        self.learning = ChatLearning(self)
         from .mcp_chat_details import ChatDetails
         self.details = ChatDetails(self)
         from .mcp_qq import QQExtensions
@@ -147,9 +145,18 @@ class MCPChat(ChatWaitMixin):
     def reactions(self, plugin):
         self.apps.instances['reactions'] = plugin
 
+    @property
+    def learning(self):
+        """Compatibility handle for the local UI and gates; write-through."""
+        return self.apps.get('language')
+
+    @learning.setter
+    def learning(self, plugin):
+        self.apps.instances['language'] = plugin
+
     def resume(self):
         self.available = True
-        self.learning.resume()
+        self.apps.resume()
         with self.access.connect() as db:
             active = db.execute('SELECT 1 FROM chat_sessions WHERE active=1 LIMIT 1').fetchone()
         with self.access.connect() as db:
@@ -160,7 +167,6 @@ class MCPChat(ChatWaitMixin):
         with self.lock:
             if self.was_connected and state != 'connected':
                 self.apps.reset()
-                self.learning.invalidate()
                 with self.access.connect() as db:
                     db.execute('UPDATE chat_sessions SET gap_count=gap_count+1 WHERE active=1')
             self.was_connected = state == 'connected'
@@ -328,8 +334,6 @@ class MCPChat(ChatWaitMixin):
                               stickers=stickers,sticker_status=sticker_status,scope=scope,full=full,
                               wake_hint=self.apps.wake_hint(batch),app_hints=self.apps.hints(scope))
         self.apps.decorate(packet,batch)
-        learning=self.learning.hint(grant,row)
-        if learning:packet['language_learning']=learning
         # Tier 1 L1 Context injection for active speakers
         try:
             speaker_ids = [m.get('sender_id') for m in items if not m.get('is_self') and m.get('sender_id')]
@@ -490,7 +494,7 @@ class MCPChat(ChatWaitMixin):
             signal=self.events.get(row['id'])
             if signal:signal.set()
             if inserted:
-                self.learning.observe(row,payload)
+                self.apps.on_stored(row,payload)
                 try:
                     from water_group.memory_engine import get_memory_engine
                     get_memory_engine().observe_message(row['conversation_id'].split(':')[-1], payload)
@@ -607,7 +611,7 @@ class MCPChat(ChatWaitMixin):
     def stop(self, sid, gid=None, reason='用户停止'):
         with self.lock:
             self.row(sid,gid)
-            self.learning.invalidate(sid)
+            self.apps.stopped(sid)
             with self.access.connect() as db:
                 changed=db.execute('UPDATE chat_sessions SET active=0,updated=?,stop_reason=? WHERE id=? AND active=1',(time.time(),reason,sid)).rowcount
                 if changed:db.execute('INSERT INTO chat_events(session_id,event,at) VALUES(?,?,?)',(sid,'stopped',time.time()))
@@ -628,10 +632,10 @@ class MCPChat(ChatWaitMixin):
         return dict(stopped=len(rows))
 
     def suspend(self):
-        self.learning.close()
+        self.apps.close()
         with self.lock:
             self.available=False
-            self.learning.invalidate()
+            self.apps.suspend()
             for event in self.events.values():event.set()
         self.receiver.stop()
 
@@ -700,7 +704,10 @@ class MCPChat(ChatWaitMixin):
         return dict(result,session_id=sid)
 
     def call(self, grant, name, args, cancel):
-        if name in LEARNING_TOOLS:return self.learning.call(grant,name,args)
+        # Plan-independent plugin tools authorize themselves (their own
+        # binding/scope checks), exactly like scopeless ones.
+        owner=self.apps.tool_owner(name)
+        if owner and owner.expression is None:return owner.dispatch(grant,name,args,cancel)
         self.permission(grant)
         if name=='list_chat_personas':return dict(prompts.persona_catalog(),note='本次已重新扫描人格目录。新会话使用最新文件，已开启会话保留快照。仅持续群聊使用；不改变普通问答或回复助手。persona 可补充预设，也可以独立使用自定义人格。')
         if name in ('list_chat_groups','list_chat_friends'):

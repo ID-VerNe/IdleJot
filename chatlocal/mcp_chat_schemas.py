@@ -3,11 +3,12 @@
 The hand-written schema dictionary used to live inside ``mcp_chat.py``, mixing
 the protocol contract with the chat engine. Shared property fragments come from
 ``mcp_schemas`` (the DRY-3 canonical factories); this module only assembles
-rows and delegates to the turn/learning schema modules.
+rows and delegates to the turn schema module. Plugin-owned tools (reactions,
+language learning) are not listed here: ``mcp_tools`` fans them out through
+the app plugin registry after these rows.
 """
 from .mcp_chat_limits import WAIT_TIMEOUT_SECONDS
 from .mcp_chat_turns import schema as turn_schemas
-from .mcp_language_learning import schemas as learning_schemas
 from .mcp_schemas import SESSION_ID_DESCRIPTION, event_id, idempotency_key, session_id
 
 
@@ -96,4 +97,4 @@ def schemas(tool):
     next(s for s in rows if s['name']=='send_chat_message')['parameters']['properties']['plan_id']=dict(type='string',minLength=32,maxLength=32,description='plan_chat_reply 返回的 READY 计划；缺少时拒绝发送。')
     next(s for s in rows if s['name']=='send_chat_message')['parameters']['properties']['expression_ids']=dict(type='array',maxItems=5,uniqueItems=True,
         items=dict(type='string',minLength=32,maxLength=32),description='可随正文一起提交表达选择；[] 明确不用，兼容单独选择工具。')
-    return rows + turn_schemas(tool) + learning_schemas(tool)
+    return rows + turn_schemas(tool)

@@ -36,9 +36,15 @@ class AppPlugin:
     tool_names: frozenset[str] = frozenset()
     scope_flag: str | None = None
     expression: str | None = None
+    # Event name this plugin's wake signal reports to the wait loop. Defaults
+    # to the plugin name; a feature whose wire event differs declares it here
+    # (the host must not know the literal).
+    wake_event: str | None = None
 
     def __init__(self, chat: Any):
         self.chat = chat
+        if not self.wake_event:
+            self.wake_event = self.name
 
     # -- switch ---------------------------------------------------------
     def enabled(self) -> bool:
@@ -53,8 +59,14 @@ class AppPlugin:
     def schemas(self, tool: Any, scope: Mapping) -> Sequence[dict]:
         return ()
 
-    def dispatch(self, grant: Mapping, args: Mapping, cancel: Any) -> dict:
-        """Execute one expression of this plugin. ``args`` already has the key."""
+    def dispatch(self, grant: Mapping, name: str, args: Mapping, cancel: Any) -> dict:
+        """Execute one tool of this plugin. ``args`` already has the key.
+
+        Called before ``permission()`` when the plugin has no ``expression``:
+        a plan-independent tool authorizes itself (its own binding/scope checks),
+        exactly like a scopeless one. Expression tools instead flow through the
+        reply plan, where the bubble dispatch supplies the name again.
+        """
         raise NotImplementedError(self.name)
 
     def rejected(self, args: Mapping, code: str, note: str) -> dict:
@@ -107,6 +119,74 @@ class AppPlugin:
 
     def reset(self) -> None:
         """The live connection changed. Drop anything derived from it."""
+
+    # -- lifecycle and stored messages ------------------------------------
+    def resume(self) -> None:
+        """The live service resumed; restart anything this plugin paused."""
+
+    def close(self) -> None:
+        """The service is suspending; stop threads, keep durable data."""
+
+    def suspend(self) -> None:
+        """Drop connection-derived state, inside the host lock, once down.
+
+        The in-lock counterpart of ``close()``: the host sets its own
+        unavailable flag first, then fans this out. Unlike ``reset()`` a
+        suspend has no successor connection, so a plugin whose epoch marks
+        live-connection identity keeps it -- the epoch rotates only when a
+        new connection takes over (``reset``), never here.
+        """
+
+    def on_stored(self, row: Mapping, payload: Mapping) -> None:
+        """A new message row was stored for this session."""
+
+    def stopped(self, sid: str) -> None:
+        """One chat session stopped; drop everything derived from it."""
+
+    # -- descriptors -------------------------------------------------------
+    # Descriptor hooks return the feature's own wire contract as data; the
+    # host keeps the control flow and never learns the field names or texts.
+    def wake_signal(self, grant: Mapping, row: Mapping) -> dict | None:
+        """A wait-loop wake owned by this plugin, or None.
+
+        Keys: ``kind`` (the wire event name), ``ready``, ``payload`` (the
+        result field's value), ``next_call`` and ``note``.
+        """
+        return None
+
+    def plan_context(self, p: Mapping) -> dict | None:
+        """Plan-context descriptor for one READY plan, or None.
+
+        Keys: ``field`` (result field name), ``context`` (its value) plus the
+        optional overrides ``phase`` / ``next`` / ``next_call`` (a full
+        replacement for the host's own follow-up call).
+        """
+        return None
+
+    def select(self, grant: Mapping, p: Mapping, expression_ids: Sequence[str]) -> tuple[str, str] | None:
+        """Apply an inline expression selection. ``(code, note)`` on refusal.
+
+        A plugin that does not own this plan's context must not refuse;
+        success is None. Only one plugin answers a given plan today.
+        """
+        return None
+
+    def handoff(self, grant: Mapping, data: Mapping, name: str, args: Mapping, cancel: Any) -> dict | None:
+        """Post-dispatch chat handoff for this call, or None to leave data.
+
+        ``name`` lets one plugin answer for several of its tools; returning a
+        dict replaces the tool result (the host then revalidates the session).
+        """
+        return None
+
+    def durable(self, data: Mapping, name: str) -> dict | None:
+        """A stage result that outlives a cancelled or failed handoff.
+
+        Keys: ``receipt`` (the durable result as it survives a failed handoff
+        -- follow-up fields already dropped), ``cancel_note`` and
+        ``failure_note`` -- what the host echoes when either happens.
+        """
+        return None
 
 
 class AppPlugins:
@@ -184,3 +264,44 @@ class AppPlugins:
     def reset(self) -> None:
         for plugin in self.instances.values():
             plugin.reset()
+
+    def resume(self) -> None:
+        for plugin in self.instances.values():
+            plugin.resume()
+
+    def close(self) -> None:
+        for plugin in self.instances.values():
+            plugin.close()
+
+    def suspend(self) -> None:
+        for plugin in self.instances.values():
+            plugin.suspend()
+
+    def on_stored(self, row: Mapping, payload: Mapping) -> None:
+        for plugin in self.instances.values():
+            plugin.on_stored(row, payload)
+
+    def stopped(self, sid: str) -> None:
+        for plugin in self.instances.values():
+            plugin.stopped(sid)
+
+    def wake_signal(self, grant: Mapping, row: Mapping) -> dict | None:
+        for plugin in self.instances.values():
+            signal = plugin.wake_signal(grant, row)
+            if signal is not None:
+                return signal
+        return None
+
+    def plan_context(self, p: Mapping) -> dict | None:
+        for plugin in self.instances.values():
+            patch = plugin.plan_context(p)
+            if patch is not None:
+                return patch
+        return None
+
+    def select(self, grant: Mapping, p: Mapping, expression_ids: Sequence[str]) -> tuple[str, str] | None:
+        for plugin in self.instances.values():
+            refusal = plugin.select(grant, p, expression_ids)
+            if refusal is not None:
+                return refusal
+        return None

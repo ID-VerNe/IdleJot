@@ -49,7 +49,7 @@
     {"name": "check_mcp_jargon_pipeline.py", "shard": "mcp", "why": "黑话流水线各阶段独立校验"},
     {"name": "check_mcp_expression_evidence.py", "shard": "mcp", "why": "表达证据 vs 机器人政策回归"},
     {"name": "check_plugin_registry.py", "shard": "mcp", "why": "插件注册表（#4 PA 与 PB）"},
-    {"name": "check_app_plugins.py", "shard": "mcp", "why": "app 侧插件协议：静态表、停用即降级、无插件名硬编码（#4 PD）"},
+    {"name": "check_app_plugins.py", "shard": "mcp", "why": "app 侧插件协议：显式 scope/expression 声明、静态表、停用即降级、宿主无插件名硬编码（#4 PD/PD2b）"},
     {"name": "check_memory_engine_imports.py", "shard": "storage", "why": "水群模块单实例身份（动 shim 或 sync_* 时必跑）"},
     {"name": "check_group_memory.py", "shard": "storage", "why": "记忆引擎、MCP 读写工具与两层存储"},
     {"name": "check_group_notes.py", "shard": "storage", "why": "群级结构化术语读写闭环（#31）"},
@@ -89,6 +89,7 @@
     {"name": "check_mcp_language_usage.py", "why": "重集成：强制表达选择走真实 MCP HTTP"},
     {"name": "check_mcp_qq_extensions.py", "why": "重集成：SL 扩展对隔离 QQ 协议夹具"},
     {"name": "check_mcp_sticker_library.py", "why": "表情包生命周期、权限与成本检查（loopback mock OneBot）"},
+    {"name": "check_pr_parity.py", "why": "推送前 parity：干净 worktree + 空数据根下复跑门禁（#61）；CI 本身就是干净环境，且本脚本要建 worktree/读 git 历史，不进 ci"},
     {"name": "check_repo_settings.py", "why": "平台设置只读探测（分支保护 / delete_branch_on_merge / core.hooksPath）；CI 的 GITHUB_TOKEN 读 protection 会 403，只能本机跑（#58）"}
   ],
   "stale": [

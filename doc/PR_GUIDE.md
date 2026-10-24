@@ -76,7 +76,7 @@ type/<issue 号>-p<字母>[-<数字>]-<slug>   # 多分节时，如 feat/41-pe4-
 | `Closes #NN` | 是 | 放正文末尾（或开头），合并后自动关 issue |
 | `## 问题` | 是 | 复述 issue 的现象 + 根因（带 `文件:行号`） |
 | `## 改动` | 是 | 按文件列改动，每文件说清「为什么」；新门禁注明登记进 `scripts/gates.json` 的哪个档位，并跑过 `scripts/check_gate_manifest.py --write` |
-| `## 测试` / `## 验证` | 是 | 贴门禁原始输出摘要（✓ 列表），并列本地同时通过的门禁名 |
+| `## 测试` / `## 验证` | 是 | 贴 `check_pr_parity.py` 的原始输出（PASS/FAIL 行）与门禁原始输出摘要（✓ 列表）；只贴 ✓ 摘要不够——parity 证明这些 ✓ 是在 CI 等价条件下拿到的 |
 | `## 基线验证` | 修红门禁时必填 | 见下 |
 | `## 影响面` | 是 | 行为变化、兼容性、不动的部分 |
 | `## 验收对照` | 大 issue 拆分时必填 | 按分节（`P+字母`）逐条对照、每条带优先级；未完成项显式列出并转新 issue |
@@ -92,7 +92,7 @@ type/<issue 号>-p<字母>[-<数字>]-<slug>   # 多分节时，如 feat/41-pe4-
 
 ## 开 PR 前自查
 
-1. 本地跑相关门禁子集 + `uv run python scripts/check_publication.py --history`（发布门禁：全部文件 + commit 身份/文案，规则见 AGENTS.md §5.3）。**PR 标题与正文先存草稿，`--text <草稿>` 过了再发**；commit message 由 `commit-msg` 钩子自动拦。
+1. 本地跑 `uv run python scripts/check_pr_parity.py`（issue #61）：在**干净 worktree + 空数据根**里复跑门禁，证明「本地绿」不是靠开发机私有状态绿出来的（CI 等价条件；`--shard static` 只跑一片）。它与 `uv run python scripts/check_publication.py --history`（发布门禁：全部文件 + commit 身份/文案，规则见 AGENTS.md §5.3）一起由 `pre-push` 钩子自动执行。**PR 标题与正文先存草稿，`--text <草稿>` 过了再发**；commit message 由 `commit-msg` 钩子自动拦。
 2. **本机红线先跑基线**：同一脚本在未打补丁 base 上复跑一遍，确认是代码问题还是环境问题——环境问题不进修复（既有先例：`check_mcp_chat_turns` 本机端口/websocket 冲突必挂、CI 绿，归环境）。
 3. 本机跑一次 `uv run python scripts/check_repo_settings.py`（平台侧只读探测：分支保护 / `delete_branch_on_merge` / `core.hooksPath`）。红说明仓库设置漂了，先按它打印的命令修好再推；CI 的 `GITHUB_TOKEN` 读 protection 会 403，这门禁只在 `manual` 档。
 4. 确认分支基于最新 `slim`，`git fetch origin slim` 后无落后。

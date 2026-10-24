@@ -345,6 +345,11 @@ uv run python scripts/check_forward_wake.py
 # 26. 模块体量红线（issue #11）：单文件 >1000 行或单类 >800 行即 fail，
 #     700+ 行进提示带；豁免名单逐条注明由哪个分节消除，清空即拆分完成
 uv run python scripts/check_module_size.py
+
+# 27. app 侧插件协议（issue #4 PD）：工具名/授权位/表达三张静态表与宿主常量一致；
+#     停用即降级（工具消失 + 授权位清空）；私聊自动关掉自己；不吃别人的事件；
+#     `chatlocal/*.py` 里不得再出现插件名硬编码（宿主只认注册表）
+uv run python scripts/check_app_plugins.py
 ```
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

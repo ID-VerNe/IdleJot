@@ -27,7 +27,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from chatlocal.store import Store
 from chatlocal.mcp_routes import install_mcp_routes
-from chatlocal.mcp_reactions import TOOL, ChatReactions
+from chatlocal.app_plugins.reactions import TOOL, ChatReactions
 from chatlocal.onebot import Client, OneBotError, OneBotUncertain, invalidate_availability
 
 # 等待方 future 的预算必须大于被等待 wait 的 timeout_seconds，否则调度稍慢就会
@@ -101,8 +101,8 @@ async def wire(service,token,sid,eid):
 
 
 def main():
-    for name in ('mcp_reactions','mcp_chat','mcp_tools','message_sender','onebot'):
-        mod=__import__('chatlocal.'+name,fromlist=[name]);assert Path(mod.__file__).resolve()==ROOT/'chatlocal'/f'{name}.py'
+    for name in ('app_plugins.reactions','mcp_chat','mcp_tools','message_sender','onebot'):
+        mod=__import__('chatlocal.'+name,fromlist=[name]);assert Path(mod.__file__).resolve()==ROOT/'chatlocal'/f"{name.replace('.','/')}.py"
     evidence=dict(environment='isolated loopback fixtures; no real QQ',paths=[],checks=[])
     events=Events();upstream=ThreadingHTTPServer(('127.0.0.1',0),ReactionBot)
     threading.Thread(target=upstream.serve_forever,daemon=True).start()

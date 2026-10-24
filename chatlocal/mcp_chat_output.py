@@ -6,7 +6,7 @@ Polling sends dynamic state only, with no message truncation or cursor changes.
 from .mcp_chat_hints import DOSSIER_REMINDER, habit_hints
 
 
-def compact_wait(data,known_prompt_version=None):
+def compact_wait(data,known_prompt_version=None,brief=None):
     if not isinstance(data,dict) or 'chat_guidance' not in data:return data
     full=data['chat_guidance'];state=full.get('social_context',{});event=data.get('event')
     active=bool(data.get('decision_required'))
@@ -14,7 +14,7 @@ def compact_wait(data,known_prompt_version=None):
     if event=='source_unavailable':hints.append('来源断开，继续等待恢复；不要发言。')
     elif data.get('deferred_until'):hints.append('本批暂缓决定，到期会重新交付；直接 next_call 等待，不确认处理完成。')
     elif data.get('has_more'):hints.append('还有未读消息，先接着读再决定，不把一页当全部。')
-    elif event=='reactions':hints.append('结合回应通知和目标原消息决定是否参与；自己的回声不接。')
+    elif brief:hints.append(brief)
     elif not active:hints.append('没有新消息时直接 next_call 继续等待，不提交空规划、不结束群聊。')
     else:hints.append('先判断对谁说；plan_chat_reply 后直接 send_chat_reply，一并提交 expression_ids 与 bubbles。首条文字气泡带 "quote": true 开启 QQ 原生引用回复精准指向该群友。')
     if active and state.get('may_be_unfinished'):hints.append('最后一句可能没说完，先等短窗口听后续。')

@@ -11,6 +11,8 @@ import threading
 import time
 import uuid
 
+from .app_plugins import TOOL_NAMES as APP_TOOL_NAMES
+from .app_plugins.loader import build as build_app_plugins
 from .mcp_access import AccessDenied
 from .mcp_chat_hints import DOSSIER_REMINDER
 from .mcp_chat_limits import WAIT_TIMEOUT_SECONDS
@@ -43,7 +45,7 @@ def load_water_group_config():
 
 
 CHAT_TOOLS = {'start_chat_session', 'get_chat_session', 'list_chat_sessions', 'read_chat_forward',
-              'wait_chat_messages', 'send_chat_message', 'stop_chat_session', 'list_chat_groups', 'list_chat_friends', 'list_chat_personas', 'react_to_chat_message', 'query_member_dossier', 'update_member_dossier', 'consolidate_chat_memory'} | TURN_TOOLS | LEARNING_TOOLS
+              'wait_chat_messages', 'send_chat_message', 'stop_chat_session', 'list_chat_groups', 'list_chat_friends', 'list_chat_personas', 'query_member_dossier', 'update_member_dossier', 'consolidate_chat_memory'} | TURN_TOOLS | LEARNING_TOOLS | APP_TOOL_NAMES
 CHAT_INSTRUCTIONS = '''这是用户明确开启的持续聊天，不设总时长；直到用户停止、权限失效或客户端退出。
 开始即在当前机器人账号与授权会话内边聊边学，保留之前明确暂停的偏好；只学习本次实时他人消息，不读历史或更换模型目的地。好友私聊使用 ACCOUNT:direct:QQ，群聊使用 ACCOUNT:group:GROUP；不发送临时会话。
 统一循环：wait 收到消息先做 Planner；silence 仅结束本轮发言决定，确认处理进度后继续 wait，绝不退出水群。Planner 的 WAITING 只是暂缓决定，不确认本批完成；沿 next_call 等待，到期或新输入时程序重新交付可规划批次。wait 返回 learning_ready 时领取一个阶段；claim 返回 task 时，用下一次实际模型调用完成并沿 task.submit_call 提交。claim/submit 附 updated_chat 时直接沿 next_call 先聊天；未领取任务或已提交且无附带聊天时回 wait。每次只推进一个阶段，不连续领取，无需用户另给学习口令。
@@ -202,14 +204,26 @@ class MCPChat:
         self.was_connected = False
         from .mcp_chat_media import ChatMedia
         self.media = ChatMedia(self)
-        from .mcp_reactions import ChatReactions
-        self.reactions = ChatReactions(self)
+        self.apps = build_app_plugins(self)
         self.turns = ChatTurns(self)
         self.learning = ChatLearning(self)
         from .mcp_chat_details import ChatDetails
         self.details = ChatDetails(self)
         from .mcp_qq import QQExtensions
         self.qq = QQExtensions(self)
+
+    @property
+    def reactions(self):
+        """Compatibility handle for gates that inspect one plugin directly.
+
+        Write-through: assigning here replaces the instance the host uses, so a
+        test can never poke a second copy and see a fake pass.
+        """
+        return self.apps.get('reactions')
+
+    @reactions.setter
+    def reactions(self, plugin):
+        self.apps.instances['reactions'] = plugin
 
     def resume(self):
         self.available = True
@@ -223,7 +237,7 @@ class MCPChat:
     def source_changed(self, state):
         with self.lock:
             if self.was_connected and state != 'connected':
-                self.reactions.reset_connection()
+                self.apps.reset()
                 self.learning.invalidate()
                 with self.access.connect() as db:
                     db.execute('UPDATE chat_sessions SET gap_count=gap_count+1 WHERE active=1')
@@ -337,7 +351,7 @@ class MCPChat:
         return out
 
     def messages(self, rows):
-        return [dict({k:v for k,v in json.loads(r['payload']).items() if k!='reaction_epoch'}, id=r['id']) for r in rows]
+        return [dict({k:v for k,v in json.loads(r['payload']).items() if k not in ('reaction_epoch','app_epochs')}, id=r['id']) for r in rows]
 
     def context(self, grant, row, recovery=False, cancel=None):
         with self.access.connect() as db:
@@ -386,12 +400,12 @@ class MCPChat:
         observed={m['id']:m for m in self.messages(recent)}
         observed.update({m['id']:m for m in items})
         stickers,sticker_status=self.media.candidates(grant,row,items)
-        reactions=self.reactions.catalog(grant['scope'])
-        notices=self.reactions.context(row,consume=True)
-        packet=prompts.packet(row,[observed[key] for key in sorted(observed)][-40:],items,event=event,has_more=has_more,reaction_notices=notices,
-                              stickers=stickers,sticker_status=sticker_status,scope=dict(grant['scope'],chat_reactions=reactions['enabled']),full=full)
-        packet['reactions']=reactions
-        packet['reaction_notices']=notices
+        scope=self.apps.scope(grant['scope'],row)
+        batch=self.apps.batch(grant,row)
+        packet=prompts.packet(row,[observed[key] for key in sorted(observed)][-40:],items,event=event,has_more=has_more,
+                              stickers=stickers,sticker_status=sticker_status,scope=scope,full=full,
+                              wake_hint=self.apps.wake_hint(batch),app_hints=self.apps.hints(scope))
+        self.apps.decorate(packet,batch)
         learning=self.learning.hint(grant,row)
         if learning:packet['language_learning']=learning
         # Tier 1 L1 Context injection for active speakers
@@ -433,8 +447,7 @@ class MCPChat:
     def receive(self, event, *, send_request=None):
         if self.available and event.get('post_type')=='request':
             self.qq.receive(event);return
-        if self.available and event.get('post_type')=='notice' and event.get('notice_type')=='group_msg_emoji_like':
-            self.reactions.receive(event);return
+        if self.available and self.apps.receive(event):return
         if self.available and event.get('post_type')=='notice' and event.get('notice_type') in ('group_recall','friend_recall'):
             self.recall(event);return
         if not self.available or event.get('post_type') not in ('message','message_sent') or event.get('message_type') not in ('group','private'):return
@@ -506,7 +519,7 @@ class MCPChat:
                      sender=str(sender.get('card') or sender.get('nickname') or uid)[:200],
                      timestamp=timestamp,received_at=time.time(),is_self=uid==account,content=content[:12000],
                      truncated=len(content)>12000 or (isinstance(source,list) and len(source)>100),segments=segments[:100])
-        payload['reaction_epoch']=self.reactions.epoch
+        payload['app_epochs']=self.apps.stamps()
         payload['synthetic']=any(bool(event.get(k)) for k in ('virtual','is_notify','is_system','synthetic'))
         if type(event.get('message_seq')) is int and event['message_seq']>0:
             payload['onebot_message_seq']=event['message_seq']
@@ -749,7 +762,7 @@ class MCPChat:
                     echoes+=consumed
                     continue
                 newest=pending[-1]['id'] if pending else row['cursor']
-                notices=self.reactions.pending(row)
+                wake_kind,notices=self.apps.wake(row)
                 newest=(newest,notices[-1]['notice_id'] if notices else 0)
                 if newest!=last_max:last_max=newest;changed_at=time.monotonic()
                 now=time.monotonic()
@@ -865,7 +878,7 @@ class MCPChat:
                             db.executemany('UPDATE chat_inbox SET delivered=1 WHERE session_id=? AND id=?',[(sid,m['id']) for m in items])
                     status=self.receiver.status()
                     ready=status['state']=='connected' and status['account']==row['conversation_id'].split(':')[0]
-                    kind='messages' if items else 'reactions' if notices and ready else 'learning_ready' if learning['ready'] and ready else 'idle' if ready else 'source_unavailable'
+                    kind='messages' if items else wake_kind if notices and ready else 'learning_ready' if learning['ready'] and ready else 'idle' if ready else 'source_unavailable'
                     if kind == 'idle':
                         try:
                             from water_group.memory_engine import get_memory_engine
@@ -997,7 +1010,7 @@ class MCPChat:
         if name=='wait_chat_messages':return self.wait(grant,args,cancel)
         if name=='plan_chat_reply':return self.turns.plan(grant,args,cancel)
         if name=='send_chat_reply':return self.turns.submit(grant,args,cancel)
-        if name in ('send_chat_message','react_to_chat_message'):return self.turns.single(grant,name,args,cancel)
+        if name=='send_chat_message' or self.apps.tool_owner(name):return self.turns.single(grant,name,args,cancel)
         if name=='query_member_dossier':return self.query_member_dossier(grant,args)
         if name=='update_member_dossier':return self.update_member_dossier(grant,args)
         if name=='consolidate_chat_memory':return self.consolidate_chat_memory(grant,args)

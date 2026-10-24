@@ -388,16 +388,16 @@ class ChatTurns:
                 previous=json.loads(waiting[0]);delay=previous['not_before']-now
                 if delay>0 and batch['watermark']<=previous['watermark']:
                     raise TurnRejected('needs_wait','已选择等待，尚无新输入或到期；继续 wait。',wait_seconds=round(delay,2))
-            if 'reaction' in expressions and (not target or not grant['scope'].get('chat_reactions')):
-                raise TurnRejected('reaction_permission','仅回应也需要真实目标和回应授权。')
+            for kind in expressions:
+                owner=self.chat.apps.expression_owner(kind)
+                if owner and (denied:=owner.deny(grant,target,self.chat.row(sid))):
+                    raise TurnRejected(*denied)
             if 'sticker' in expressions and not grant['scope'].get('chat_sticker_send'):
                 raise TurnRejected('sticker_permission','连接未获发送表情包权限。')
             for expression,flag in (('voice','chat_voice'),('ai_voice','chat_voice'),('video','chat_video'),('file','chat_files')):
                 if expression in expressions and not grant['scope'].get(flag):raise TurnRejected('attachment_permission','连接没有所选附件权限。')
             if 'qq_action' in expressions and not any(grant['scope'].get(f) for f in ('qq_messages','qq_interactions')):
                 raise TurnRejected('qq_permission','连接没有消息操作或互动权限。')
-            if 'reaction' in expressions and ':direct:' in self.chat.row(sid)['conversation_id']:
-                raise TurnRejected('reaction_unavailable','私聊暂不支持消息表情回应。')
             # Untargeted proactive replies use all peer input as their subject.
             focus=dict(message_ids=[m['onebot_message_id'] for m in focus_rows],
                        terms=args.get('topic_terms',[]),all=not bool(focus_ids))
@@ -525,8 +525,8 @@ class ChatTurns:
                                 result=self.chat.send(grant,params,cancel)
                             elif b['kind']=='sticker':
                                 result,_=self.chat.media.call(grant,'send_chat_sticker',dict(session_id=sid,idempotency_key=key,sticker_id=b['sticker_id']),cancel)
-                            elif b['kind']=='reaction':
-                                result=self.chat.reactions.request(grant,dict(session_id=sid,idempotency_key=key,**{k:v for k,v in b.items() if k!='kind'}),cancel)
+                            elif owner:=self.chat.apps.expression_owner(b['kind']):
+                                result=owner.dispatch(grant,dict(session_id=sid,idempotency_key=key,**{k:v for k,v in b.items() if k!='kind'}),cancel)
                             else:
                                 result=self.chat.qq.send_bubble(grant,self.chat.row(sid),b,key,cancel)
                             item['state']=result.get('state','UNKNOWN');item['receipt']=result
@@ -565,7 +565,9 @@ class ChatTurns:
         finally:lock.release()
 
     def single(self,grant,name,args,cancel):
-        kinds={'send_chat_message':'text','send_chat_sticker':'sticker','react_to_chat_message':'reaction'}
+        kinds={'send_chat_message':'text','send_chat_sticker':'sticker'}
+        kinds.update({tool:owner.expression for owner in self.chat.apps.all()
+                      if owner.expression for tool in owner.tool_names})
         bubble={'kind':kinds[name],**{k:v for k,v in args.items() if k not in ('session_id','plan_id','idempotency_key','reply_to_event_id','expression_ids')}}
         if args.get('reply_to_event_id') and args.get('plan_id'):
             p=self.load(args['plan_id'],args['session_id'])

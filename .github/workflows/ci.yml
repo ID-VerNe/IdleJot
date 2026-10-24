@@ -84,6 +84,8 @@ jobs:
             'check_miyoushe.py',
             'check_sixty.py',
             'check_plugin_registry.py',
+            # App-side plugin protocol: static surface, degrade-on-disable, no name branches (issue #4 PD)
+            'check_app_plugins.py',
             'check_qr_login.py',
             'check_log_encoding.py',
             'check_watchdog_token.py',

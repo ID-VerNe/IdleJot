@@ -125,8 +125,8 @@ CLI 只写请求文件，执行者始终是 guard；不会从沙箱 spawn 任何
 #   .\stop.ps1
 .venv/Scripts/python.exe water-group/daemon/up.py --stop
 
-# 挂监听。只活一轮，WAKE 后必须重挂
-.venv/Scripts/python.exe water-group/daemon/listen.py --timeout 300
+# 挂监听。只活一轮，WAKE 后必须重挂（90s 是等待预算，见下方说明）
+.venv/Scripts/python.exe water-group/daemon/listen.py --timeout 90
 
 # 看谁 @ 了我
 .venv/Scripts/python.exe water-group/daemon/reply.py --list

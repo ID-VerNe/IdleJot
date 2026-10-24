@@ -127,11 +127,13 @@ description: QQ群聊挂机水群专家Skill。支持单群/多群并发水群�
 等新消息用**阻塞式** `watch.py`，不要自己 `sleep` + `wc -l` 轮询：
 
 ```bash
-.venv/Scripts/python.exe water-group/daemon/watch.py --timeout 240
+.venv/Scripts/python.exe water-group/daemon/watch.py --timeout 90
 ```
 
 > [!IMPORTANT]
 > 它会一直阻塞到有人 @ 你或提到关键词，然后立刻打印并返回（实测落盘后 1 秒内）。
+> **`90` 是等待预算**（宿主工具超时 120 − 发送余量 30，issue #83）：取值超过它，
+> 这次调用会被工具超时截断，`watch.py` 跟着被杀且**不留任何输出**。
 > 手写轮询的间隔就是「消息来了半分钟才回」的延迟来源——collector 1 秒内就落盘了，
 > 慢的只是 Agent 隔一阵才看一次。
 >
@@ -306,7 +308,7 @@ description: QQ群聊挂机水群专家Skill。支持单群/多群并发水群�
 **监听循环**（`watch.py` 超时 = 一段时间没被 @）：
 
 ```bash
-.venv/Scripts/python.exe water-group/daemon/listen.py --timeout 300
+.venv/Scripts/python.exe water-group/daemon/listen.py --timeout 90
 ```
 
 静默里跑 `watch.py`，每次超时 `--digest` 一次再 `--check`。**有事就退出，不常驻**：退出码 0 = 有活（stdout 末尾 `WAKE` 或 `DOSSIER_DUE`），1 = 事件流读不了。拉起来之后等它结束就行，不要轮询。

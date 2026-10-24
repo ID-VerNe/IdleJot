@@ -4,11 +4,11 @@
 之后没有任何东西保证下一次挂上：Agent 回消息、读图、写 issue 的几十秒里，
 @ 落进文件而没人看。三次都是用户主动问「是不是没挂上」才发现的。
 
-这条门禁钉七个契约，任何一处退回旧行为都红：
+这条门禁钉十一个契约，任何一处退回旧行为都红：
 
 1. `listen.py` 的每种退出（WAKE / NO_WORK / WATCH_FAILED）都以一行
    `RESTART: <python> water-group/daemon/listen.py --timeout N` 收尾，且短等待
-   （`reply.py --wait 6` 这类）不透传成新的常驻周期——重挂回到 300s。
+   （`reply.py --wait 6` 这类）不透传成新的常驻周期——重挂回到常驻周期。
 2. `reply.py` 发送成功后默认就地续挂（`--wait` 默认 = 宿主工具超时减发送余量，
    `--no-wait` 关闭），已有监听时不重复 spawn。
 3. `watch.py` 超时块把「因过期被丢弃的未回唤醒」计数并列出 id，不再与
@@ -22,6 +22,12 @@
    `--no-wait`）；显式取值超限时另给 `WARN`。
 7. 续挂不许留下孤儿监听：`watch.py` 打完唤醒块立刻推进游标，没人读的监听会把
    唤醒吃掉，`up.listener_pids()` 还会把孤儿当成「已有监听在跑」拒绝重挂。
+8. `listen.py` 的常驻周期不得长于等待预算（`wg_budget.WAIT_BUDGET`，issue #83）。
+9. 进入 `watch.py` 之前必须打印「等最多 Ns（第 k 轮）…」，且位置在 `NO_WORK` 之前
+   ——被宿主截断时它是唯一的痕迹。
+10. `RESTART:` 行不推荐撑不住的取值：短等待回常驻周期、超预算压回预算、其余透传。
+11. 文档（`AGENTS.md` / `README.md` / `.agents/rules/water_group.md` / `SKILL.md`）
+    里的 `--timeout` 示例不得超预算——Agent 照抄的是它们，不是源码。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -32,6 +38,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -45,14 +52,20 @@ from check_fixture_support import temp_dir  # noqa: E402
 DAEMON = ROOT / "water-group" / "daemon"
 sys.path.insert(0, str(DAEMON))
 
+import listen  # noqa: E402
 import reply  # noqa: E402
 import up  # noqa: E402
+import wg_budget  # noqa: E402
 
 # 外部测试变量会把 state 又指回实机，这里必须清掉，只留临时数据根。
 ISOLATING_VARS = ("IDLEJOT_WG_STATE", "TULPA_WG_STATE", "IDLEJOT_WG_DB",
                   "IDLEJOT_WG_MEMORY_DB")
 ACCOUNT = "10001"
 GROUP = "1:group:123"
+
+# 文档里挂着 `--timeout N` 示例的四处（issue #83）：Agent 照抄的就是这些命令。
+DOC_SAMPLES = ("AGENTS.md", "README.md", ".agents/rules/water_group.md",
+               ".agents/skills/water-group/SKILL.md")
 
 CASES = []
 
@@ -148,10 +161,12 @@ def 重挂命令可原样粘贴且回到常驻周期():
         proc = run_script(home, "listen.py", "--cycles", "1", "--timeout", "1",
                           "--no-digest")
     hint = next((ln for ln in lines(proc.stdout) if ln.startswith("RESTART:")), "")
-    # 短等待 1s 是 reply --wait 的临时边界，重挂必须回到 300s；
-    # --cycles / --no-digest 同样不该透传。
-    return (hint.endswith("--timeout 300") and "listen.py" in hint
-            and "--no-digest" not in hint and "--cycles" not in hint)
+    # 短等待 1s 是 reply --wait 的临时边界，重挂必须回到常驻周期；
+    # --cycles / --no-digest 同样不该透传。周期值读常量而不是写死 300（issue #83）：
+    # 与 #79 的 `"默认 240s"` 同一种耦合，断言存在性时不该顺手锁死数值。
+    return (hint.endswith(f"--timeout {listen.DEFAULT_TIMEOUT}") and "listen.py" in hint
+            and "--no-digest" not in hint and "--cycles" not in hint
+            and listen.DEFAULT_TIMEOUT > 0)
 
 
 # ---------- watch.py：过期未回唤醒不再静默 ----------
@@ -319,6 +334,76 @@ def no_wait_优先于_wait():
                     and stmt.value.value == 0):
                 return True
     return False
+
+
+@case
+def 常驻周期不长于等待预算():
+    """一次挂机周期必须装得进一次工具调用（issue #83）。
+
+    宿主工具调用默认 120s。周期取 300 时，只要群里安静，调用必被截断；而截断路径上
+    `run_passthrough` 不回写任何输出，`listen.py` 连「我挂上了」都说不出来。周期
+    与 `reply.py --wait` 用同一套预算（`wg_budget.WAIT_BUDGET`），谁把它调回去都在
+    这里红。
+    """
+    return 0 < listen.DEFAULT_TIMEOUT <= wg_budget.WAIT_BUDGET
+
+
+@case
+def 等待开始前声明边界():
+    """进入 `watch.py` 之前必须说一句「在等、等多久」（issue #83）。
+
+    这条是 issue 的决定性一条：`listen.py` 按设计不返回，群里一直安静时宿主迟早
+    会截断这次调用，而截断路径上一个字都不打印。所以断言不是「有输出」，而是
+    「等待开始那一句在 NO_WORK 之前就出来了」——被砍掉时它是唯一的痕迹。
+    """
+    with temp_dir(prefix="wg-rehang-") as home:
+        fixture_home(home)
+        proc = run_script(home, "listen.py", "--cycles", "1", "--timeout", "1",
+                          "--no-digest")
+    out = proc.stdout
+    waiting = index_of(out, "等最多 1s（第 1 轮）")
+    return proc.returncode == 0 and waiting >= 0 and index_of(out, "NO_WORK") > waiting
+
+
+@case
+def 超预算的取值不写进重挂命令():
+    """RESTART 行不推荐撑不住的取值（issue #83）。
+
+    `restart_hint` 原来把任何 ≥60s 的取值原样透传，于是 `--timeout 300` 被推荐
+    回来、被截断、再被推荐回来。现在三个区间：短等待回到常驻周期、超预算压回
+    预算、其余原样透传。
+    """
+    def hint(seconds):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            listen.restart_hint(seconds)
+        return buf.getvalue()
+
+    inside = wg_budget.WAIT_BUDGET - 10
+    return (f"--timeout {wg_budget.WAIT_BUDGET}" in hint(300)
+            and f"--timeout {wg_budget.WAIT_BUDGET}" in hint(wg_budget.AGENT_TOOL_TIMEOUT * 2)
+            and f"--timeout {wg_budget.WAIT_BUDGET}" in hint(wg_budget.WAIT_BUDGET)
+            and f"--timeout {wg_budget.WAIT_BUDGET}" in hint(1)
+            and f"--timeout {inside}" in hint(inside))
+
+
+@case
+def 文档示例不超预算():
+    """文档里的挂监听示例必须装得进一次工具调用（issue #83 候选 4）。
+
+    源码改对了不算修好：Agent 照抄的是 `AGENTS.md` / `README.md` / `SKILL.md` /
+    rules 里的示例命令。这四处一旦写回 300/240，用户在真实环境里就复现 issue 的
+    症状，而本机门禁全绿。
+    """
+    over = []
+    for rel in DOC_SAMPLES:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        for value in re.findall(r"--timeout[ =](\d+)", text):
+            if int(value) > wg_budget.WAIT_BUDGET:
+                over.append(f"{rel}: --timeout {value}")
+    if over:
+        print("  " + "; ".join(over))
+    return not over
 
 
 def main():

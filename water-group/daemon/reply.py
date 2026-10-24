@@ -46,6 +46,7 @@ sys.path.insert(0, str(HERE))
 import mcp_client  # noqa: E402
 import plugins  # noqa: E402  (事件型能力派发口：追问窗口，issue #4 PD2a)
 import wg_aliases  # noqa: E402  (别名指向渲染，issue #30)
+import wg_budget  # noqa: E402  (等待预算的唯一出口，issue #79/#83)
 import winconsole  # noqa: E402
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_images  # noqa: E402
@@ -63,16 +64,17 @@ DB = Path(os.environ.get("IDLEJOT_WG_DB") or os.environ.get("TULPA_WG_DB", data_
 
 RETRY_SLEEP = 3
 SOURCE_WAIT = 30
-# 宿主（Agent 工具调用）的常见默认超时，公开出来给门禁断言（issue #79）。
-AGENT_TOOL_TIMEOUT = 120
-# 发送 + 记账 + 起子进程的余量：实测是秒级，30s 是保守上限，剩下的时间才是等待。
-SEND_BUDGET = 30
+# 预算（宿主超时 / 发送余量 / 单次调用最多能等多久）只写在 wg_budget.py 里，
+# listen.py 也用同一套口径（issue #83）。这三个名字在这里重新导出，门禁与调用点
+# 照旧读 reply.AGENT_TOOL_TIMEOUT / reply.SEND_BUDGET（issue #79）。
+AGENT_TOOL_TIMEOUT = wg_budget.AGENT_TOOL_TIMEOUT
+SEND_BUDGET = wg_budget.SEND_BUDGET
 # 发送成功后原地续挂监听的默认时长（issue #69）。监听只活一轮，回完消息到
 # 下一次挂上之间的空窗正是 @ 丢失的地方；把它做成默认值而不是可选项。
 # 取值由宿主超时减去预算算出（issue #79）：默认调用必须在调用方失去耐心之前
 # 自己返回并打印 NO_WORK，否则「消除几十秒空窗」会以「无限长空窗」收场——
 # 被截断时子监听和父进程一起死，而这条路径上不会留下任何提示。
-DEFAULT_WAIT = AGENT_TOOL_TIMEOUT - SEND_BUDGET
+DEFAULT_WAIT = wg_budget.WAIT_BUDGET
 # 多条气泡之间的间隔。计划通道按 bubble_min_seconds 算（默认 1.2s 起，随上一条
 # 长度增加）；OneBot 直发这条路径不经过那套策略，用同一个下限保持手感一致。
 BUBBLE_GAP = 1.2
@@ -782,9 +784,9 @@ def wait_for_next(seconds):
     print(f"本次调用合计约 {seconds + SEND_BUDGET}s（发送 + 等待）；你自己的工具超时"
           f"短于此值，子监听会跟着被杀且不留提示"
           f"（要更短：--wait {max(seconds // 2, 1)}；立即返回：--no-wait）", flush=True)
-    if seconds >= AGENT_TOOL_TIMEOUT:
-        print(f"WARN: --wait {seconds}s 已达到或超过常见工具调用超时 "
-              f"{AGENT_TOOL_TIMEOUT}s，很可能在拿到 WAKE 之前被截断", flush=True)
+    if wg_budget.over_budget(seconds):
+        print(f"WARN: --wait {seconds}s 加上发送余量 {SEND_BUDGET}s 已超过常见工具调用"
+              f"超时 {AGENT_TOOL_TIMEOUT}s，很可能在拿到 WAKE 之前被截断", flush=True)
 
     cmd = [sys.executable, str(HERE / "listen.py"), "--timeout", str(seconds),
            "--cycles", "1", "--no-digest"]

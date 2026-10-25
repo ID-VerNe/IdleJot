@@ -771,25 +771,52 @@ def wait_for_next(seconds):
     started by the agent without a console, so a CREATE_NO_WINDOW child would
     print into a console of its own and the wake lines would vanish here even
     after listen.py started printing them.
+
+    Both the printed bound and the child's --timeout are the *effective* wait,
+    not the requested one (issue #97). listen.py clamps on its side too (#88),
+    but that clamp lives in another process: printing the request made the
+    parent promise "about 230s, likely truncated" while the child answered
+    "clamped to 90s, not truncated" one second later. The requested value is
+    still named in the WARN -- "your 200s was not honoured" is itself worth
+    saying -- and the escape hatch is halved from the effective value, so
+    following it actually shortens the wait.
     """
     import up
 
     if up.listener_pids():
         print("已有监听在跑，不再重复挂")
         return 0
-    print(f"等下一次唤醒（最多 {seconds}s）…", flush=True)
+    # 实际能等多久：请求值先过一遍预算（issue #97）。子监听也会夹一次（#88），
+    # 但那是另一个进程——父进程按请求值打印时，两行就各说各话：这边「合计约
+    # 230s、很可能被截断」，那边「已压回 90s、不会因此被截断」。所以边界行、
+    # 合计值、WARN 里的实际值和子进程参数统一用这一个数。
+    wait = wg_budget.clamp_wait(seconds)
+    if wait <= 0:
+        # 额度已经用尽（调用方已经等过一轮）：自己收手，别 spawn 一个等 0s 的
+        # 子监听再把 NO_WORK 读回来（issue #97）。
+        print("等待额度已用尽，不再续挂")
+        return 0
+    print(f"等下一次唤醒（最多 {wait}s）…", flush=True)
     # 边界必须写在等待之前（issue #79）。调用被宿主超时截断时，父进程和它起的
     # 子监听在同一个进程组里会一起被杀；run_passthrough 只在子进程正常返回后才把
     # 输出写回来，所以那条路径上「被杀了」和「还在等」在 Agent 眼里长得一模一样。
     # 秒数、合计值和两个出口写在眼前，是这里唯一来得及说的话。
-    print(f"本次调用合计约 {seconds + SEND_BUDGET}s（发送 + 等待）；你自己的工具超时"
+    # 逃生口必须真的更短（issue #97）：按实际等待值折半，且永远小于等待预算；
+    # 折半后不足一秒时只留 --no-wait，不推荐 --wait 0（那等于 --no-wait）。
+    shorter = min(wait // 2, wg_budget.WAIT_BUDGET - 1)
+    shorter_hint = f"要更短：--wait {shorter}；" if shorter > 0 else ""
+    print(f"本次调用合计约 {wait + SEND_BUDGET}s（发送 + 等待）；你自己的工具超时"
           f"短于此值，子监听会跟着被杀且不留提示"
-          f"（要更短：--wait {max(seconds // 2, 1)}；立即返回：--no-wait）", flush=True)
+          f"（{shorter_hint}立即返回：--no-wait）", flush=True)
     if wg_budget.over_budget(seconds):
+        # 与 listen.py 同一句口径（issue #97）：取值会被压回预算，所以**不会**
+        # 因此被截断；照旧写「很可能被截断」就是一句假话，而输出里的假话比没有
+        # 输出更坏（#88 的教训）。
         print(f"WARN: --wait {seconds}s 加上发送余量 {SEND_BUDGET}s 已超过常见工具调用"
-              f"超时 {AGENT_TOOL_TIMEOUT}s，很可能在拿到 WAKE 之前被截断", flush=True)
+              f"超时 {AGENT_TOOL_TIMEOUT}s；本次已压回等待预算 {wait}s（issue #88），"
+              f"不会因此被截断", flush=True)
 
-    cmd = [sys.executable, str(HERE / "listen.py"), "--timeout", str(seconds),
+    cmd = [sys.executable, str(HERE / "listen.py"), "--timeout", str(wait),
            "--cycles", "1", "--no-digest"]
     # Without this the child gets a console window of its own, and a fresh
     # console reads our UTF-8 as the OEM code page. Both were reported.

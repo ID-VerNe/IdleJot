@@ -19,7 +19,7 @@
    （`DEFAULT_WAIT + SEND_BUDGET <= AGENT_TOOL_TIMEOUT`）：调用被截断时父进程
    和子监听同组同死，而且那条路径上一个字都不打印（issue #79）。
 6. 等待开始前把这条边界印出来：实际秒数、合计值、两个出口（`--wait` 更小 /
-   `--no-wait`）；显式取值超限时另给 `WARN`。
+   `--no-wait`）；显式取值超限时另给 `WARN`，并点名被压回的实际秒数。
 7. 续挂不许留下孤儿监听：`watch.py` 打完唤醒块立刻推进游标，没人读的监听会把
    唤醒吃掉，`up.listener_pids()` 还会把孤儿当成「已有监听在跑」拒绝重挂。
 8. `listen.py` 的常驻周期不得长于等待预算（`wg_budget.WAIT_BUDGET`，issue #83）。
@@ -34,8 +34,9 @@
 13. `--status` 的「监听」行必须带上每个监听**实际的** `--timeout`（issue #86）：
     修复前的监听行只有 pid，修复前起的超预算监听和修复后起的健康监听长得一模一样。
 14. 超预算的监听必须在状态行里被点名（带 ⚠ 与秒数），预算内的不得被误报。
-15. `listen.py` 显式传超预算 `--timeout` 时自己打 WARN（与 `reply.py --wait` 同口径），
-    预算内的取值不得出现 WARN。
+15. `listen.py` 显式传超预算 `--timeout` 时自己打 WARN，与 `reply.py --wait` 同口径
+    （都写「已压回等待预算 N s、不会因此被截断」，issue #97），预算内的取值不得
+    出现 WARN。
 16. 探针必须从**真实进程**的命令行里读出 `--timeout`（WMI 那条查询曾经只取 pid）。
 17. 默认形态（不传 `--cycles`）自己就能回来：rc=0、只跑一轮、末行 `NO_WORK` +
     `RESTART:`。整次调用的等待额度由所有轮次共享，不能每轮领一份新的（issue #88）。
@@ -48,6 +49,13 @@
 21. 透传样本值必须真的落在透传区间里且不等于常量本身；预算收缩到装不下
     「短等待」与「预算内」两个区间时，红在**预算不自洽**上，不红在重挂提示的
     措辞上（issue #95：合法的预算收缩不许变成门禁假红）。
+22. `reply.py --wait` 的打印与传参都是**实际**等待值（`clamp_wait` 之后）：请求
+    240s 时打 90s、合计 120s ≤ `AGENT_TOOL_TIMEOUT`、子监听命令行 `--timeout 90`；
+    预算内的取值原样透传（issue #97）。
+23. `reply.py` 与 `listen.py` 的超预算措辞不得互相矛盾：两处都写「不会因此被
+    截断」，都不许再出现「很可能…被截断」（issue #97）。
+24. 边界行推荐的「更短」取值必须真的更短：严格小于实际等待值（因此也小于
+    `WAIT_BUDGET`）；折半后不足一秒时只留 `--no-wait`（issue #97）。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -185,6 +193,25 @@ def status_listener_line(specs):
             else:
                 setattr(up, name, value)
     return next((ln for ln in buf.getvalue().splitlines() if ln.startswith("监听")), "")
+
+
+def capture_wait(seconds):
+    """跑一次 `reply.wait_for_next`，返回 (stdout, 它交给子监听的命令行)（issue #97）。
+
+    两个外部依赖打桩：进程探针返回空（否则直接走「已有监听在跑」），
+    `run_passthrough` 只记下命令行并返回 0（不真的 spawn `listen.py`，也不等）。
+    """
+    originals = (up.listener_pids, reply.winconsole.run_passthrough)
+    seen = []
+    up.listener_pids = lambda *args, **kwargs: []
+    reply.winconsole.run_passthrough = lambda cmd, cwd=None: (seen.append(list(cmd)), 0)[1]
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            reply.wait_for_next(seconds)
+    finally:
+        up.listener_pids, reply.winconsole.run_passthrough = originals
+    return buf.getvalue(), (seen[0] if seen else [])
 
 
 def _arg_default(rel, flag):
@@ -375,33 +402,101 @@ def 等待前说清被杀边界():
 
     这条路径上唯一来得及说的话就是等待之前那几行：一旦被截断，之后不会再有任何
     输出。所以断言不是「有提示」，而是「提示里有实际秒数、合计值和两个出口」；
-    显式把 `--wait` 开到宿主超时以上时，还要多一行 `WARN` 点名后果。
+    显式把 `--wait` 开到宿主超时以上时，还要多一行 `WARN` 点名被压回的实际秒数
+    （issue #97：超预算不再等于「会被截断」，WARN 也不再这么说）。
     """
-    originals = (up.listener_pids, reply.winconsole.run_passthrough)
-    up.listener_pids = lambda *args, **kwargs: []
-    reply.winconsole.run_passthrough = lambda *args, **kwargs: 0
-
-    def capture(seconds):
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            reply.wait_for_next(seconds)
-        return buf.getvalue()
-
     # 用显式的 60 而不是 DEFAULT_WAIT 当正常样本：默认值是否合规由
     # `默认等待短于宿主超时` 管，这条只管「提示在不在、内容够不够改参」，
     # 否则两个契约会一起红、分不清坏在哪。
     too_long = max(reply.AGENT_TOOL_TIMEOUT, 60) + 60
-    try:
-        normal = capture(60)
-        over = capture(too_long)
-    finally:
-        up.listener_pids, reply.winconsole.run_passthrough = originals
+    normal, _ = capture_wait(60)
+    over, _ = capture_wait(too_long)
 
     return ("最多 60s" in normal
             and f"约 {60 + reply.SEND_BUDGET}s" in normal
             and "被杀" in normal and "--no-wait" in normal
             and "WARN" not in normal
             and "WARN" in over and f"{too_long}s" in over)
+
+
+@case
+def 等待秒数与合计值都是实际值():
+    """`--wait` 的打印与传参都必须是**实际**等待值（issue #97）。
+
+    请求 240s 时子监听只会等 `clamp_wait(240, 0)` = 90s。父进程按请求值打印，
+    就会虚报「合计约 270s」并宣称「很可能被截断」——而 #88 之后实际合计 120s，
+    仍在预算内。同一次调用里父子两行因此互相矛盾。
+
+    断言取的是**实际值**（90 ≠ 240）：只断言「有秒数、有合计值」时，把打印改回
+    请求值照样绿（#86 复核模板：探针不能等于被测的坏实现会输出的那个值）。预算内
+    的 60s 另测一遍：原样透传，不许被折半或压回。
+    """
+    over = wg_budget.AGENT_TOOL_TIMEOUT * 2
+    actual = wg_budget.clamp_wait(over, 0)
+    loud, cmd = capture_wait(over)
+    inside, inside_cmd = capture_wait(60)
+    total = actual + reply.SEND_BUDGET
+    loud_cmd = " ".join(cmd)
+    inside_cmd_text = " ".join(inside_cmd)
+    return (actual != over
+            and f"最多 {actual}s" in loud
+            and f"约 {total}s" in loud
+            and total <= wg_budget.AGENT_TOOL_TIMEOUT
+            and f"--timeout {actual}" in loud_cmd
+            and f"--timeout {over}" not in loud_cmd
+            and "最多 60s" in inside
+            and f"约 {60 + reply.SEND_BUDGET}s" in inside
+            and "--timeout 60" in inside_cmd_text)
+
+
+@case
+def 父子超预算措辞不矛盾():
+    """`reply.py` 与 `listen.py` 对超预算取值必须说同一件事（issue #97）。
+
+    #88 把子监听那句改成「已压回等待预算 90s，不会因此被截断」，父进程仍写
+    「很可能在拿到 WAKE 之前被截断」——同一次调用里相邻两行互相打架，Agent 无从
+    判断该信哪句，于是白白放弃 `--wait` 改用 `--no-wait`（#69 想消除的空窗）。
+
+    两边都钉：必须有「不会因此被截断」，且两边都不许再出现「很可能…被截断」。
+    `listen.py` 那次预置一条唤醒事件，`watch.py` 立刻返回，不真等 90s。
+    """
+    over = wg_budget.AGENT_TOOL_TIMEOUT * 2
+    loud, _ = capture_wait(over)
+    with temp_dir(prefix="wg-rehang-") as home:
+        fixture_home(home)
+        write_events(home, [event(1, 5, "@机器人 在吗")])
+        child = run_script(home, "listen.py", "--cycles", "1", "--timeout",
+                           str(over), "--no-digest")
+    both = loud + child.stdout
+    return (child.returncode == 0
+            and "不会因此被截断" in loud
+            and "不会因此被截断" in child.stdout
+            and "很可能" not in both)
+
+
+@case
+def 逃生口真的更短():
+    """边界行推荐的「更短」取值必须真的更短（issue #97）。
+
+    `max(seconds // 2, 1)` 对 `--wait 200` 给出 100——100 同样被夹回 90s，与
+    200 的行为完全一样，照着改也改不掉任何东西。断言从输出里解析推荐值，要求它
+    严格小于**实际**等待值（因此也小于 `WAIT_BUDGET`）。
+
+    两个样本：超预算 240 → 实际 90 → 推荐必须 < 90（修复后 45，修复前 120）；
+    预算内 60 → 推荐 30。前者是判别位，后者防止「一律不推荐」也被判绿。
+    """
+    def shorter_for(seconds):
+        out, _ = capture_wait(seconds)
+        match = re.search(r"--wait (\d+)；立即返回", out)
+        return int(match.group(1)) if match else None
+
+    over = wg_budget.AGENT_TOOL_TIMEOUT * 2
+    actual = wg_budget.clamp_wait(over, 0)
+    short_over = shorter_for(over)
+    short_inside = shorter_for(60)
+    return (short_over is not None and short_over < actual
+            and short_over < wg_budget.WAIT_BUDGET
+            and short_inside is not None and short_inside < 60)
 
 
 @case

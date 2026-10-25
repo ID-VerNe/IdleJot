@@ -40,7 +40,9 @@ STOP_PORTS = NAPCAT_PORTS + BACKEND_PORTS
 # stack, and it exits on its own after a wake. Killing it here would also kill a
 # listener that is mid-`--wait` in some other turn. Consistently, `listener_pids()`
 # answers for *this* checkout only (issue #94) -- it never reports another tree's
-# listener, so a stop here neither sees nor touches one.
+# listener, so a stop here neither sees nor touches one. This tree's own gate
+# listeners are skipped for the same reason (they carry `--probe`, issue #94 PB):
+# a stop -- or a `--status` reader -- has no business with a throwaway probe.
 #
 # Multi-group (`--stop --group A`) is not implemented yet; when it is, these
 # fingerprints have to carry the group argument. See doc/MULTI_GROUP_PLAN.md.
@@ -63,6 +65,14 @@ KILLABLE_NAMES = {"python.exe", "pythonw.exe", "qq.exe", "node.exe"}
 # The wait budget a live process was started with (issue #86). Only the value is
 # read here; whether it is too big is the caller's business (`wg_budget`).
 TIMEOUT_ARG = re.compile(r"--timeout[ =](\d+)")
+
+# A gate/test throwaway listener says so on its own command line (issue #94
+# section PB). Root scoping (PA) keeps *other* trees out, but a gate running in
+# *this* tree starts its temporary listeners with this checkout's own absolute
+# script path -- indistinguishable from a real listener by shape alone. `--probe`
+# is carried by nothing on the duty path (reply.py's re-hang, the `RESTART:`
+# hint, a hand-hung loop), so skipping it costs no real listener.
+PROBE_ARG = re.compile(r"(?:^|\s)--probe(?:\s|$)")
 
 
 def port_open(port):
@@ -206,9 +216,14 @@ def listener_pids(exclude=None):
     gate scripts, and consumers then misread them as "a listener is already
     up": `reply.py` skipped a necessary re-hang that way, and a `--status` pid
     belonging to another tree invited a `taskkill` that broke the gate mid-run.
+
+    Root scoping (issue #94 PA) covers other trees; this tree's own gate
+    listeners needed a second, explicit line: they run this checkout's listen.py
+    by absolute path, so shape alone cannot tell them from a real listener. They
+    carry `--probe` (section PB) and are skipped here.
     """
     return [pid for pid, cmdline in _match_rows("daemon[\\\\/]listen\\.py", exclude)
-            if _own_checkout(cmdline)]
+            if _own_checkout(cmdline) and not PROBE_ARG.search(cmdline or "")]
 
 
 def parse_timeout(cmdline):
@@ -231,11 +246,13 @@ def listener_specs(exclude=None):
     exactly like one started after it -- and the old one dies on the next quiet
     stretch without a word on the way out. Scoped to this tree like
     `listener_pids()` (issue #94): another worktree's listener is not ours to
-    report, diagnose, or kill.
+    report, diagnose, or kill. Gate/test listeners (`--probe`, section PB) are
+    skipped here too: reporting one invites the `taskkill` that breaks the gate
+    mid-run.
     """
     return [{"pid": pid, "timeout": parse_timeout(cmdline)}
             for pid, cmdline in _match_rows("daemon[\\\\/]listen\\.py", exclude)
-            if _own_checkout(cmdline)]
+            if _own_checkout(cmdline) and not PROBE_ARG.search(cmdline or "")]
 
 
 def commands_pids(exclude=None):

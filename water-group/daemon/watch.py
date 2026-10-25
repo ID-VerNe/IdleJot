@@ -17,6 +17,11 @@ either: the timeout block ends with an ``EXPIRED:`` count and its ids, so
 "nobody watched for two hours" and "the group said nothing" stop looking the
 same (issue #69).
 
+While it waits it also refreshes the listener's liveness beat (issue #112): "was
+anyone on watch" has to be answerable from a file afterwards, and this poll loop
+is the only thing running during the long quiet stretches. Bare ``watch.py`` runs
+(no listener started the record) leave the ledger untouched.
+
 Exit codes:
   0  a wake was printed
   2  timed out with nothing new (call again)
@@ -38,6 +43,7 @@ import wg_budget  # noqa: E402  (等待预算，issue #83)
 import wg_aliases  # noqa: E402  (别名指向渲染，issue #30)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_images  # noqa: E402  (图片标记渲染)
+import wg_listener_state  # noqa: E402  (监听存亡账本的续心跳，issue #112)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
 import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收口)
@@ -239,6 +245,9 @@ def main():
             report_expired(rows, start_cursor)
             print("TIMEOUT")
             return 2
+        # 续心跳（issue #112）：监听在不在不该只活在进程表里。没有在值守的记录
+        # 时是 no-op——裸跑 watch.py（门禁、Agent 手工调试）不会写账本。
+        wg_listener_state.beat()
         time.sleep(POLL)
 
 

@@ -1,8 +1,12 @@
-"""钉住监听空窗：退出要说下一步，过期唤醒不许静默消失（issue #69）。
+"""钉住监听空窗：退出要说下一步、要留下痕迹，过期唤醒不许静默消失（#69/#112）。
 
 2026-10-24 一晚上 `listen.py` 掉了 3 次。它按设计「有事就退出叫人」，但退出
 之后没有任何东西保证下一次挂上：Agent 回消息、读图、写 issue 的几十秒里，
 @ 落进文件而没人看。三次都是用户主动问「是不是没挂上」才发现的。
+
+2026-10-25 那次更狠（#112）：`RESTART:` 送到了、也被读到了，然后 14 分 37 秒
+没有任何监听，而磁盘上零痕迹——`RESTART:` 只解决「说不说」，「做不做」还得
+有东西能在事后报出「当时没人值守」。
 
 这条门禁钉住下面这些契约（编号是分组，一组里可能有多条断言），任何一处退回旧行为都红：
 
@@ -80,6 +84,22 @@
     `reply.py` 的续挂判断与 `--status` 的监听行因此都不受影响；本树监听
     （含绝对路径起的）仍必须被认出，根下的普通子目录（非 worktree 槽位）
     也不算边界。
+30. 一轮监听退出后必须留下**可读的存亡事实**（issue #112）：`state/wg_listener.json`
+    记下起点与退出时刻，`on_watch()` 为 False、`describe()` 报「无人值守」+
+    退出时刻。修复前同一场景只有 `rc=0` 和一个空目录——「刚才有人值守过、
+    现在没了」在磁盘上零痕迹。这是 issue 现象段那条复现命令的验收基线。
+31. 「值守中」与「空窗」两侧都要判定得出（issue #112）：真监听在跑时
+    `on_watch()` 为 True 且 `describe()` 报「值守中」；它退出后转 False 且记录
+    里出现 `stopped_at`。只钉单侧时，恒假 / 恒真两种坏实现各自都能假绿。
+32. `--status` 的「监听」行在无人值守时带出上一轮起止与空窗（issue #112）；
+    没有账本时不额外加字（排除型对照：恒加注脚的实现红在后半条）。
+33. 探针监听（`--probe`）留痕但不计为值守（issue #112 / #94 PB）：记录与退出
+    时刻都在（事后归因要），`on_watch()` 为 False——与进程探针跳过探针同口径。
+34. 心跳过期的 `watching` 记录不算值守（issue #112 / #88）：宿主截断那条路径上
+    `stop()` 根本跑不到，记录会永远停在 `watching`；只按 state 判定时，一个早就
+    死掉的监听在账本里是「值守中」——与 #88 的静默同形。窗口内必须算值守
+    （对照组：恒 False 的实现不许蒙混过关），窗口外不算，且 `describe()` 要说出
+    「失去心跳、没有退出记录」，而不是编一个退出时刻。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -145,6 +165,8 @@ import reply  # noqa: E402
 import up  # noqa: E402
 import watch  # noqa: E402
 import wg_budget  # noqa: E402
+import wg_clock  # noqa: E402  (断言里的退出时刻按同一份渲染口径比)
+import wg_listener_state  # noqa: E402  (监听存亡账本，issue #112)
 import wg_up_probe  # noqa: E402  (issue #94 新用例轮询原始匹配行要用 _match_rows)
 
 # 外部测试变量会把 state 又指回实机，这里必须清掉，只留临时数据根。
@@ -1475,6 +1497,178 @@ def 非约定路径的注册worktree不算已有监听():
         subprocess.run(["git", "worktree", "prune"],
                        cwd=str(ROOT), capture_output=True, timeout=60)
         shutil.rmtree(nested, ignore_errors=True)
+
+
+def ledger_at(home):
+    """把账本指到 `home`，返回还原函数（issue #112）。
+
+    `wg_listener_state.STATE` 与别的 daemon 模块同款，在 import 期求值。要让本
+    进程读到**子进程**写的那一份账本，只能临时改写这个模块级绑定——与
+    `status_listener_line` 打桩同款，只是这次桩在账本模块自己身上。返回还原函数
+    而不是用上下文管理器：用例里的 finally 本来就要收树，多一层不划算。
+    """
+    original = wg_listener_state.STATE
+    wg_listener_state.STATE = home / "state" / "wg_listener.json"
+    return lambda: setattr(wg_listener_state, "STATE", original)
+
+
+@case
+def 退出后账本留下可读的无人值守():
+    """单轮监听退出后，「现在没有人值守」必须是一个可读事实（issue #112）。
+
+    issue 现象段的验收基线：同一条复现命令跑完之后，修复前只有 `rc=0` 和一个
+    空状态目录；修复后要有 `state/wg_listener.json`，且只读入口（模块函数，不
+    问进程表）就能报出「无人值守」与退出时刻——不需要谁恰好想起来跑一次
+    `--status`。
+
+    这条**不带** `--probe`：探针监听不占「值守」语义（契约 33），拿它做基线就
+    测不到 `describe()` 的空窗分支。
+    """
+    with temp_dir(prefix="wg-ledger-") as home:
+        fixture_home(home)
+        restore = ledger_at(home)
+        try:
+            proc = run_script(home, "listen.py", "--cycles", "1", "--timeout", "1",
+                              "--no-digest", timeout=60)
+            record = wg_listener_state.read()
+            on_watch = wg_listener_state.on_watch()
+            note = wg_listener_state.describe()
+        finally:
+            restore()
+    stopped = wg_clock.clock(record.get("stopped_at")) if record else ""
+    return (proc.returncode == 0
+            and record is not None
+            and record.get("state") == "exited"
+            and record.get("reason") == "NO_WORK"
+            and isinstance(record.get("started_at"), int)
+            and isinstance(record.get("stopped_at"), int)
+            and record["stopped_at"] >= record["started_at"]
+            and not on_watch
+            and "无人值守" in note and bool(stopped) and stopped in note)
+
+
+@case
+def 值守中与空窗两侧都判定得出():
+    """「值守中」与「退出后无人值守」两侧都要判定得出（issue #112）。
+
+    只钉退出后为 False 时，`on_watch()` 恒返回 False 的坏实现照样绿；只钉在跑时
+    为 True 时，恒 True 的实现会在下一半被抓。所以起一个真监听（不带 `--probe`：
+    探针不算值守），轮询到 True 再等它自己退出（`--timeout 6 --cycles 1` 会自己
+    收手），断言翻面且记录里落下 `stopped_at`。
+    """
+    with temp_dir(prefix="wg-live-") as home:
+        fixture_home(home)
+        restore = ledger_at(home)
+        proc = None
+        seen_watch, seen_note = False, ""
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, str(DAEMON / "listen.py"), "--cycles", "1",
+                 "--timeout", "6", "--no-digest"],
+                cwd=str(ROOT), env=child_env(home),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                if wg_listener_state.on_watch():
+                    seen_watch = True
+                    seen_note = wg_listener_state.describe()
+                    break
+                time.sleep(0.5)
+            code = proc.wait(timeout=60)
+            record = wg_listener_state.read()
+            after_watch = wg_listener_state.on_watch()
+            after_note = wg_listener_state.describe()
+        finally:
+            restore()
+            if proc is not None and proc.poll() is None:
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                               capture_output=True)
+    return (seen_watch and "值守中" in seen_note
+            and code == 0
+            and record is not None and bool(record.get("stopped_at"))
+            and not after_watch and "无人值守" in after_note)
+
+
+@case
+def 状态行报出上一轮监听与空窗():
+    """`up.py --status` 的「监听」行在无人值守时带出上一轮起止（issue #112）。
+
+    只读入口里 Agent 最常跑的就是这个：修复前它只会说「现在没人」（而且这个结论
+    还是现算的），说不出「刚才有、几分钟前没的」。预置一条已退出记录后，行里必须
+    出现退出时刻与「无人值守」；**没有账本时不得凭空加字**——恒加注脚的实现红在
+    后半条（排除型对照）。
+    """
+    with temp_dir(prefix="wg-status-") as home:
+        fixture_home(home)
+        restore = ledger_at(home)
+        try:
+            blank = status_listener_line([])
+            wg_listener_state.start(timeout=wg_budget.WAIT_BUDGET)
+            wg_listener_state.stop("WAKE")
+            record = wg_listener_state.read()
+            line = status_listener_line([])
+        finally:
+            restore()
+    stopped = wg_clock.clock(record.get("stopped_at")) if record else ""
+    return ("未挂" in blank and "账本" not in blank
+            and "未挂" in line and "账本" in line
+            and "无人值守" in line and bool(stopped) and stopped in line)
+
+
+@case
+def 探针监听留痕但不算值守():
+    """门禁/测试的临时监听留痕，但不占「值守」语义（issue #112 / #94 PB）。
+
+    事后归因需要它的起止（跑了多久、什么时候退的），但「现在有没有人值守」不能被
+    一次跑门禁的临时监听顶掉——那与进程探针跳过 `--probe` 是同一口径。恒 False
+    的坏实现由「值守中与空窗两侧都判定得出」抓；这里钉的是「留痕 ≠ 计数」。
+    """
+    with temp_dir(prefix="wg-probe-ledger-") as home:
+        fixture_home(home)
+        restore = ledger_at(home)
+        try:
+            proc = run_script(home, "listen.py", "--cycles", "1", "--timeout", "1",
+                              "--no-digest", "--probe", timeout=60)
+            record = wg_listener_state.read()
+            on_watch = wg_listener_state.on_watch()
+        finally:
+            restore()
+    return (proc.returncode == 0
+            and record is not None and record.get("probe") is True
+            and bool(record.get("stopped_at"))
+            and not on_watch)
+
+
+@case
+def 心跳过期的值守记录不算值守():
+    """被硬杀写不了退出记录：心跳过期必须与「还在等」分开（issue #112 / #88）。
+
+    `stop()` 在宿主截断那条路径上根本跑不到（进程整棵被杀），记录会永远停在
+    `watching`。只按 state 判定时，一个早就死掉的监听在账本里一直是「值守中」
+    ——与 #88 的那种静默同形。所以：窗口内算值守（对照组，恒 False 的实现不许
+    蒙混过关）、窗口外不算，且 `describe()` 要说出「失去心跳、没有退出记录」，
+    而不是编一个退出时刻。
+
+    这里直接写记录再把心跳推到窗口之外（不真杀进程）：`stop()` 一次都没被调用
+    过，正是硬杀留下的形态。
+    """
+    with temp_dir(prefix="wg-stale-") as home:
+        restore = ledger_at(home)
+        try:
+            wg_listener_state.start(timeout=wg_budget.WAIT_BUDGET)
+            record = wg_listener_state.read()
+            record["beat_at"] = record["started_at"] - wg_listener_state.STALE_AFTER - 5
+            (home / "state" / "wg_listener.json").write_text(
+                json.dumps(record, ensure_ascii=False), encoding="utf-8")
+            stale_watch = wg_listener_state.on_watch()
+            stale_note = wg_listener_state.describe()
+            # 同一份记录、把「现在」拨回窗口内：必须是 True，证明上面的 False
+            # 来自窗口判定，而不是这份记录一律不算值守。
+            inside_watch = wg_listener_state.on_watch(now=record["beat_at"] + 1)
+        finally:
+            restore()
+    return (not stale_watch and inside_watch
+            and "失去心跳" in stale_note and "没有退出记录" in stale_note)
 
 
 def main():

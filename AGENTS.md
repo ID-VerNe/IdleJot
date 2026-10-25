@@ -60,6 +60,13 @@
 （远超预算的旧默认值）在状态里一眼看得出，不必再另跑一条 PowerShell 查 WMI。
 `listen.py` 显式传超预算的 `--timeout` 时也会自己打一行 `WARN`。
 
+**监听存亡（issue #112）**：`listen.py` 每一轮值守都会在
+`~/.water-group/state/wg_listener.json` 留一行（起点、退出时刻、退出原因），等待期间由
+`watch.py` 续心跳；`up.py --status` 的「监听」行在没人值守时会把上一轮的起止和空窗时长
+带出来（`；账本：上一轮监听 18:02:01–18:02:01 已退出（NO_WORK），此后 14 分 37 秒无人值守`），
+被硬杀写不了退出记录时以心跳过期给出判定。**判定「现在有没有人值守」不依赖谁恰好跑一次
+`--status`**——任何一方读这个文件就行（`wg_listener_state.on_watch()` / `describe()`）。
+
 追问窗口：回复成功后 `reply.py` 自动开窗（默认再跟 10 条或静默 180 秒），群里继续聊的
 几句也会唤醒监听（唤醒行带 `[追问]` 前缀），话题能接着走；`--no-followup` 单次关闭。
 它是插件（issue #4 PD2a）：参数与开关在 `config.json` 的 `plugins.followup`
@@ -365,7 +372,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 4 | `static` | `check_path_hygiene.py` | 路径卫生：运行时数据不许从仓库根推导（防 #14 复发） |
 | 5 | `static` | `check_no_console_child.py` | 子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发） |
 | 6 | `static` | `check_listen_passthrough.py` | 唤醒内容不被 listen.py 吞掉（#91） |
-| 7 | `static` | `check_listener_rehang.py` | 监听空窗：退出必带重挂指令、回复默认续挂、过期唤醒不静默（#69） |
+| 7 | `static` | `check_listener_rehang.py` | 监听空窗：退出必带重挂指令、回复默认续挂、过期唤醒不静默、退出留痕且空窗可由只读入口报出（#69/#112） |
 | 8 | `static` | `check_module_size.py` | 模块体量红线：文件超 1000 行或类超 800 行即 fail（#11） |
 | 9 | `static` | `check_tmp_hygiene.py` | 私有目录巡检：tmp/ 禁脚本、bin 与 archive 须登记（#6） |
 | 10 | `static` | `check_sender_name.py` | 发信人名形态：QQ 引用气泡文案不得进 sender 或 aliases（#39） |

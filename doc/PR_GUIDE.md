@@ -109,7 +109,7 @@ type/<issue 号>-p<字母>[-<数字>]-<slug>   # 多分节时，如 feat/41-pe4-
 
 ### 门禁改动与独立复核
 
-门禁是这套协作里唯一的第三方校验，**被测方却可以在同一个 PR 里改门禁**。所以 diff 触及门禁执行链时，验收标准加两条——触发范围（任一命中）：`scripts/check_*.py`、`scripts/gates.json`、`scripts/run_gates.py`、`.github/workflows/ci.yml`。改清单、执行器或 workflow 与改断言等价，都能让门禁静默失效。
+门禁是这套协作里唯一的第三方校验，**被测方却可以在同一个 PR 里改门禁**。所以 diff 触及门禁执行链时，验收标准加两条——触发范围（任一命中）：`scripts/check_*.py`、`scripts/gates.json`、`scripts/run_gates.py`、`.github/workflows/ci.yml`、`.githooks/` 下全部钩子（issue #107：pre-push / commit-msg 是门禁执行入口，改钩子与改断言等价）。改清单、执行器、workflow 或钩子都能让门禁静默失效。
 
 **1. 正文必须有 `## 门禁改动` 段**，逐个文件交代四件事：
 

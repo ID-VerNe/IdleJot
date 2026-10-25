@@ -21,8 +21,10 @@ issue #78 追加「门禁复核的平台侧两态政策」。门禁脚本是这�
 `scripts/run_gates.py`、`.github/workflows/ci.yml`，外加 `.githooks/` 下全部钩子
 （pre-push 跑发布门禁 + 每推送 sha 的 CI 等价复跑，commit-msg 跑 commit message
 发布门禁——改钩子同样能静默削弱门禁链）。#62 的 review 链
-（`check_gate_change_review.py` 的 PATTERNS）只含前四类，用途是「PR 正文必须
-交代」，与这里的「CODEOWNERS 覆盖」是两回事，故意不一致。
+（`check_gate_change_review.py` 的 PATTERNS）自 #107 起与本处同口径（同样含
+`.githooks/` 下全部钩子）：用途是「PR 正文必须交代」，与这里的「CODEOWNERS 覆盖」
+是两回事，但门禁执行链的定义只有一个。残余差异只有展开方式：PATTERNS 用 glob
+（`.githooks/*`，`*` 跨 `/`，嵌套路径也算），本处按磁盘枚举顶层文件。
 
 第二个维护者就位时本门禁转红，并按打印的命令翻转（CODEOWNERS 模板 + protection
 PUT）；翻转后平台强制生效。两态断言随维护者数量自动切换，设置漂移即红。

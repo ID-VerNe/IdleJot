@@ -59,6 +59,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# `import check_fixture_support` 之前先把 env 里的数据根**记下来**：那模块在 import 期
+# 会把它钉成临时目录，事后只剩夹具目录。这里记的是「import 之前真实的那个值」，
+# 契约 14 用它当锚点——验「模块级的 PRIVATE_HOME 仍由它解析而来」。
+# 锚点只用公开信息（env + 家目录），不碰别的模块的私有变量：绑在
+# `check_fixture_support._PINNED_HOME` 上时，那变量一旦改名，锚点就静默消失。
+_PRE_WGH = os.environ.get("WATER_GROUP_HOME")
+
 
 def _live_private_home(env=None):
     """真实的私有数据根（**必须在** import `check_fixture_support` 之前调用）。
@@ -231,16 +238,6 @@ def _quoted_timeouts(rel):
                 and id(node) not in docs):
             found += re.findall(r"--timeout[ =](\d+)", node.value)
     return found
-
-
-def _is_under(child, parent):
-    """`child` 是否落在 `parent` 之内（含相等）。"""
-    try:
-        child = Path(child).resolve()
-        parent = Path(parent).resolve()
-    except OSError:
-        return False
-    return child == parent or parent in child.parents
 
 
 def _sop_snippets(text):
@@ -644,9 +641,9 @@ def 私有SOP扫描器能识别漂移():
     2. 接线：**直接调用上面那条契约的函数体**（把数据根换掉），脏的必须红，
        干净的与不存在的根必须绿；
     3. 根解析：`WATER_GROUP_HOME` 指到哪，数据根就该解析到哪；
-    4. 模块级绑定与注册：`PRIVATE_HOME` 不能落在夹具目录里（取根时机被颠倒时它
-       会落进去，issue #87 的盲区原样重现）、本机有私有库时不能是 `None`、
-       契约本身不能从 `CASES` 里被摘掉。
+    4. 模块级绑定与注册：`PRIVATE_HOME` 必须仍由 import **之前**记下的 env 值解析
+       而来（取根时机被颠倒时它会落进夹具目录，issue #87 的盲区原样重现）、
+       本机有私有库时不能是 `None`、契约本身不能从 `CASES` 里被摘掉。
 
     第 2 层刻意直接调函数体而不是复制它的逻辑：把契约改成永远 `return True`，
     或者把跳过条件放宽，复制逻辑的自检照样绿，直接调就会红。第 4 层同理：
@@ -697,15 +694,12 @@ def 私有SOP扫描器能识别漂移():
         resolved = _live_private_home({"WATER_GROUP_HOME": str(dirty_root)})
         root_ok = resolved is not None and Path(resolved) == dirty_root
 
-        # 4) 模块级绑定与注册：取根时机被颠倒 / 绑定被置空 / case 注册被摘掉
-        pinned = getattr(check_fixture_support, "_PINNED_HOME", None)
-        bound_ok = True
-        if pinned is not None and PRIVATE_HOME is not None:
-            # 取根若发生在 `import check_fixture_support` 之后，PRIVATE_HOME 会落回
-            # 夹具目录 —— 仓外永远扫不到，issue #87 的盲区原样重现，而上面三层全绿。
-            bound_ok = not _is_under(PRIVATE_HOME, pinned)
-        if (Path.home() / ".water-group").is_dir() and PRIVATE_HOME is None:
-            bound_ok = False
+        # 4) 模块级绑定与注册：取根时机被颠倒 / 绑定被置空 / case 注册被摘掉。
+        #    锚点是 import 之前记下的 env 值（公开信息）：模块级的 PRIVATE_HOME
+        #    必须仍由它解析而来。取根时机一旦被颠倒，它会落回夹具目录，issue #87
+        #    的盲区原样重现——而上面三层验的都是函数，照样全绿。
+        expected_home = _live_private_home({"WATER_GROUP_HOME": _PRE_WGH})
+        bound_ok = PRIVATE_HOME == expected_home
         registered_ok = 私有SOP示例不超预算 in CASES
 
     return scanner_ok and wired_ok and root_ok and bound_ok and registered_ok

@@ -9,9 +9,14 @@ import。
 匹配一律按**脚本路径**，不按进程名：`python.exe` / `QQ.exe` 这种名字匹配会把 Agent
 宿主和用户自己的桌面 QQ 一起带走。
 
+探针既然已经在读命令行，就把命令行一并带回来（issue #86）：**运行中的进程只在自己的
+命令行里写着自己用了什么参数**，而状态行只报 pid 时，一个 `--timeout 300` 的监听和一个
+`--timeout 90` 的监听在诊断屏上长得一模一样。
+
 Windows only（和 daemon 其它成员一致）：finder 走 WMI 读命令行，端口兜底走 `netstat`。
 """
 import os
+import re
 import socket
 import subprocess
 import time
@@ -48,6 +53,10 @@ STACK_SCRIPTS = (
 # decide. QQ/node are the injected instance's two shapes, python* is the stack's.
 KILLABLE_NAMES = {"python.exe", "pythonw.exe", "qq.exe", "node.exe"}
 
+# The wait budget a live process was started with (issue #86). Only the value is
+# read here; whether it is too big is the caller's business (`wg_budget`).
+TIMEOUT_ARG = re.compile(r"--timeout[ =](\d+)")
+
 
 def port_open(port):
     try:
@@ -67,34 +76,56 @@ def self_pids():
     return {str(os.getpid()), str(os.getppid())}
 
 
-def _match_pids(pattern, exclude=None):
-    """PIDs whose command line matches, with launcher shims collapsed.
+def _match_rows(pattern, exclude=None):
+    """`[(pid, command_line)]` whose command line matches, launcher shims collapsed.
+
+    The matching rule is unchanged (by script path, never by process name); what is
+    new is that the command line comes back too (issue #86). It is the only place a
+    running process states its own parameters, and `--status` needs it to tell a
+    listener on the old budget from one on the current one.
 
     The venv python.exe is a redirector: it shows up in WMI with the same command
     line as the interpreter it spawns, so a naive match reports one guard as two
     pids. A pid whose parent is also matched is that second layer, so it is dropped.
     """
+    rows = []
     if os.name != "nt":
-        # console-gate: posix-only -- pgrep has no window to open.
-        out = subprocess.run(["pgrep", "-f", pattern], capture_output=True)
-        found = [line.strip() for line in out.stdout.decode().splitlines() if line.strip()]
-        return [p for p in found if p not in exclude] if exclude else found
-    script = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='pythonw.exe'\" | "
-              f"Where-Object {{ $_.CommandLine -match '{pattern}' }} | "
-              "ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }")
-    try:
-        out = winconsole.run_hidden(["powershell", "-NoProfile", "-NonInteractive",
-                                     "-Command", script], capture_output=True, timeout=30)
-    except Exception:  # noqa: BLE001
-        return []
-    pairs = []
-    for line in out.stdout.decode("utf-8", "ignore").splitlines():
-        parts = line.split()
-        if len(parts) == 2 and parts[0].isdigit():
-            pairs.append((parts[0], parts[1]))
-    matched = {pid for pid, _ in pairs}
-    found = [pid for pid, parent in pairs if parent not in matched]
-    return [p for p in found if p not in exclude] if exclude else found
+        # console-gate: posix-only -- ps has no window to open.
+        out = subprocess.run(["ps", "-ww", "-eo", "pid=,ppid=,args="], capture_output=True)
+        for line in out.stdout.decode("utf-8", "ignore").splitlines():
+            parts = line.strip().split(None, 2)
+            if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+                continue
+            if re.search(pattern, parts[2]):
+                rows.append((parts[0], parts[1], parts[2]))
+    else:
+        # `|` separates the fields because a command line contains spaces (and may
+        # contain `|` itself): `split("|", 2)` keeps the tail intact either way.
+        script = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='pythonw.exe'\" | "
+                  f"Where-Object {{ $_.CommandLine -match '{pattern}' }} | "
+                  "ForEach-Object { \"$($_.ProcessId)|$($_.ParentProcessId)|$($_.CommandLine)\" }")
+        try:
+            out = winconsole.run_hidden(["powershell", "-NoProfile", "-NonInteractive",
+                                         "-Command", script], capture_output=True, timeout=30)
+        except Exception:  # noqa: BLE001
+            out = None
+        for line in (getattr(out, "stdout", None) or b"").decode("utf-8", "ignore").splitlines():
+            parts = line.split("|", 2)
+            if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+                rows.append((parts[0], parts[1], parts[2]))
+    matched = {pid for pid, _, _ in rows}
+    found = [(pid, cmdline) for pid, parent, cmdline in rows if parent not in matched]
+    return [(pid, cmdline) for pid, cmdline in found if pid not in exclude] if exclude else found
+
+
+def _match_pids(pattern, exclude=None):
+    """PIDs whose command line matches, with launcher shims collapsed.
+
+    Thin wrapper over `_match_rows`: the pids are all some callers want, and
+    `scripts/check_stop_stack.py` stubs this one entry point to fake the whole
+    machine -- moving the implementation elsewhere would silently un-stub it.
+    """
+    return [pid for pid, _ in _match_rows(pattern, exclude)]
 
 
 def supervisor_pids(exclude=None):
@@ -137,6 +168,30 @@ def listener_pids(exclude=None):
     them, which looks to the group like the bot stopped hearing them.
     """
     return _match_pids("daemon[\\\\/]listen\\.py", exclude)
+
+
+def parse_timeout(cmdline):
+    """The `--timeout N` on a command line, or None when it was not passed.
+
+    `--timeout=N` counts too: the value is what matters, not which spelling the
+    caller used. Nothing is guessed here -- a listener that never wrote a timeout
+    down really is running on whatever default its own code had.
+    """
+    found = TIMEOUT_ARG.search(cmdline or "")
+    return int(found.group(1)) if found else None
+
+
+def listener_specs(exclude=None):
+    """`[{"pid": str, "timeout": int | None}]` for every live listen.py.
+
+    The timeout comes off the command line, because that is the only place a
+    running listener says which budget it is on (issue #86): `--status` used to
+    report the pid alone, so a listener started before the budget fix looked
+    exactly like one started after it -- and the old one dies on the next quiet
+    stretch without a word on the way out.
+    """
+    return [{"pid": pid, "timeout": parse_timeout(cmdline)}
+            for pid, cmdline in _match_rows("daemon[\\\\/]listen\\.py", exclude)]
 
 
 def commands_pids(exclude=None):

@@ -3,7 +3,7 @@
 Two-Tier Storage:
 - Tier 1 (L1 Context): Compact synthesized profiles (aliases, tone style, XP preferences, 3-5 key memories)
   automatically injected into Agent's context when members speak (~80 tokens per relevant member).
-- Tier 2 (L2 DB Storage): Persistent in SQLite (data/group_memories.sqlite3) with timeline event logs
+- Tier 2 (L2 DB Storage): Persistent in SQLite (~/.water-group/data/group_memories.sqlite3) with timeline event logs
   (timestamp, quote, context) and structured slot cards (interests, jargons, relationships). Exposed via
   MCP tool `query_member_dossier`.
 

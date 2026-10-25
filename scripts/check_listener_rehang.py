@@ -29,7 +29,7 @@
 11. 文档（`AGENTS.md` / `README.md` / `.agents/rules/water_group.md` / `SKILL.md`）
     里的 `--timeout` 示例不得超预算——Agent 照抄的是它们，不是源码。守护脚本里的
     字符串字面量（`up.py --status` 的提示串）同扫，注释与 docstring 不算推荐值。
-    仓外那份私有 SOP 口径不同，由第 19 条单扫。
+    仓外那份私有 SOP 口径不同，由第 22 条单扫。
 12. `watch.py` 裸跑时的 `--timeout` 默认值同样不超预算，且 argparse 的实际 default
     必须等于模块常量（写死 `default=240` 而常量仍是 90 会绕过第 8 条）。
 13. `--status` 的「监听」行必须带上每个监听**实际的** `--timeout`（issue #86）：
@@ -46,15 +46,18 @@
     （写死 `default=0` 就退回无限轮）。
 20. `clamp_wait()` 算出来的秒数必须真的交给 `watch.py`，而且打印的秒数要跟它
     一致：只断言「函数算得对」时，把实等改回传入值仍全绿（issue #88 复核）。
+21. 透传样本值必须真的落在透传区间里且不等于常量本身；预算收缩到装不下
+    「短等待」与「预算内」两个区间时，红在**预算不自洽**上，不红在重挂提示的
+    措辞上（issue #95：合法的预算收缩不许变成门禁假红）。
 
-19. 仓外的私有 SOP（`~/.water-group/rules/*.md`）里的示例命令同样不得超预算——
+22. 仓外的私有 SOP（`~/.water-group/rules/*.md`）里的示例命令同样不得超预算——
     它是 Agent「动手前先读」的最高权威文档，却不在第 11 条的扫描范围里，于是
     权威路径反向：仓库说 90、私有 SOP 说 240 / 300（issue #87）。扫的是**可照抄
     的片段**（围栏代码块的整行 + 行内代码），不是全文：私有文档里有「`--wait 180`
     会被砍掉」这类故意讲反面的解释，全文正则扫会误报。私有库不存在时跳过。
-20. 私有 SOP 的扫描器**、接线与模块级绑定**都必须真能报出漂移：脏样本必被抓，
+23. 私有 SOP 的扫描器**、接线与模块级绑定**都必须真能报出漂移：脏样本必被抓，
     干净样本与反面示例必被放过，判定层的跳过条件、模块级绑定的取根时机与
-    `@case` 注册也必被覆盖。否则第 19 条在 CI 上（没有私有库）就是永远绿的空壳。
+    `@case` 注册也必被覆盖。否则第 22 条在 CI 上（没有私有库）就是永远绿的空壳。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -76,12 +79,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # `import check_fixture_support` 之前先把 env 里的数据根**记下来**：那模块在 import 期
 # 会把它钉成临时目录，事后只剩夹具目录。这里记的是「import 之前真实的那些值」，
-# 契约 20 用它们当锚点——验「模块级的 PRIVATE_HOME 仍由它们解析而来」。
+# 契约 23 用它们当锚点——验「模块级的 PRIVATE_HOME 仍由它们解析而来」。
 # 锚点只用公开信息（env + 家目录），不碰别的模块的私有变量：绑在
 # `check_fixture_support._PINNED_HOME` 上时，那变量一旦改名，锚点就静默消失。
 # 两条腿都要记：`WATER_GROUP_HOME` 与 `IDLEJOT_WG_HOME`（后者是
 # `scripts/check_publication.py` 认的正式候选）。少记一条，锚点在只设了那条的
-# 机器上就会算出另一个根，契约 20 平白变红。
+# 机器上就会算出另一个根，契约 23 平白变红。
 _PRE_WGH = os.environ.get("WATER_GROUP_HOME")
 _PRE_IWGH = os.environ.get("IDLEJOT_WG_HOME")
 
@@ -294,6 +297,22 @@ def _quoted_timeouts(rel):
                 and id(node) not in docs):
             found += re.findall(r"--timeout[ =](\d+)", node.value)
     return found
+
+
+def inside_probe():
+    """透传区间内的样本值；预算装不下区间时返回 None（issue #95）。
+
+    透传条件是 `SHORT_WAIT <= timeout <= WAIT_BUDGET`（listen.restart_hint），
+    所以样本取 `max(WAIT_BUDGET - 10, SHORT_WAIT + 10)` 夹进区间；但裸夹会在
+    `WAIT_BUDGET <= SHORT_WAIT + 20` 时恰好夹到 `WAIT_BUDGET` 本身——#86 的
+    教训是探针恰好等于常量时，「永远报常量」的坏实现区分不出，所以再往里收
+    一格。两个前提都不成立（`WAIT_BUDGET < SHORT_WAIT + 10`）时返回 None，
+    由 `预算装得下透传区间` 那条契约点名，这里不硬测区间外的值。
+    """
+    if wg_budget.WAIT_BUDGET < listen.SHORT_WAIT + 10:
+        return None
+    return min(max(wg_budget.WAIT_BUDGET - 10, listen.SHORT_WAIT + 10),
+               wg_budget.WAIT_BUDGET - 1)
 
 
 def _sop_snippets(text):
@@ -723,12 +742,28 @@ def 等待开始前声明边界():
 
 
 @case
+def 预算装得下透传区间():
+    """预算合法收缩不许把门禁变成绊脚石（issue #95 候选 2）。
+
+    透传样本要落在 `[SHORT_WAIT, WAIT_BUDGET]` 且不等于常量本身，前提是预算
+    装得下「短等待」与「预算内」两个区间。预算小到装不下时，那是**预算本身**
+    要重新设计（`SHORT_WAIT` 是给 `reply.py --wait` 这类有界等待用的），红在
+    预算不自洽上，而不是让 `超预算的取值不写进重挂命令` 以无关的签名假红。
+    """
+    return listen.SHORT_WAIT + 10 <= wg_budget.WAIT_BUDGET
+
+
+@case
 def 超预算的取值不写进重挂命令():
     """RESTART 行不推荐撑不住的取值（issue #83）。
 
     `restart_hint` 原来把任何 ≥60s 的取值原样透传，于是 `--timeout 300` 被推荐
     回来、被截断、再被推荐回来。现在三个区间：短等待回到常驻周期、超预算压回
     预算、其余原样透传。
+
+    透传样本由 `inside_probe()` 取（issue #95）：直接用 `WAIT_BUDGET - 10` 的话，
+    预算合法收缩到 ≤70 时样本落进短等待夹回区间，断言以与被测行为无关的理由
+    假红——预算装不下区间时这里跳过透传样本，红交给 `预算装得下透传区间`。
     """
     def hint(seconds):
         buf = io.StringIO()
@@ -736,12 +771,19 @@ def 超预算的取值不写进重挂命令():
             listen.restart_hint(seconds)
         return buf.getvalue()
 
-    inside = wg_budget.WAIT_BUDGET - 10
+    inside = inside_probe()
+    if inside is None:
+        print(f"  WAIT_BUDGET {wg_budget.WAIT_BUDGET} 装不下透传区间"
+              f"（需 >= SHORT_WAIT+10 = {listen.SHORT_WAIT + 10}），透传样本跳过，"
+              f"由『预算装得下透传区间』点名")
+        passes_through = True
+    else:
+        passes_through = f"--timeout {inside}" in hint(inside)
     return (f"--timeout {wg_budget.WAIT_BUDGET}" in hint(300)
             and f"--timeout {wg_budget.WAIT_BUDGET}" in hint(wg_budget.AGENT_TOOL_TIMEOUT * 2)
             and f"--timeout {wg_budget.WAIT_BUDGET}" in hint(wg_budget.WAIT_BUDGET)
             and f"--timeout {wg_budget.WAIT_BUDGET}" in hint(1)
-            and f"--timeout {inside}" in hint(inside))
+            and passes_through)
 
 
 @case
@@ -768,7 +810,7 @@ def 示例命令不超预算():
     文档按正则在原文上扫；守护脚本只扫**字符串字面量**（AST，跳过 docstring 与
     注释）：注释里写「300s 会怎样」是解释，不是推荐值，按原文扫会把解释也判红。
 
-    仓外那份私有 SOP 口径不同，由第 19 条单扫（见「私有SOP示例不超预算」）。
+    仓外那份私有 SOP 口径不同，由第 22 条单扫（见「私有SOP示例不超预算」）。
     """
     over = []
     for rel in DOC_SAMPLES:
@@ -969,7 +1011,7 @@ def 私有SOP扫描器能识别漂移():
                       and ("water_group.md", 5) in hits
                       and ("water_group.md", 4) not in hits)
 
-        # 2) 接线：调契约 19 的函数体，脏根必须红，干净根与不存在的根必须绿
+        # 2) 接线：调契约 22 的函数体，脏根必须红，干净根与不存在的根必须绿
         saved_home = PRIVATE_HOME
         try:
             with contextlib.redirect_stdout(io.StringIO()):
@@ -995,7 +1037,7 @@ def 私有SOP扫描器能识别漂移():
         #    必须仍由它解析而来。取根时机一旦被颠倒，它会落回夹具目录，issue #87
         #    的盲区原样重现——而上面三层验的都是函数，照样全绿。
         #    两条腿都要喂（WATER_GROUP_HOME 与 IDLEJOT_WG_HOME）：少喂一条，
-        #    只设了那条的机器上锚点会算出另一个根，契约 20 平白变红。
+        #    只设了那条的机器上锚点会算出另一个根，契约 23 平白变红。
         expected_home = _live_private_home({"WATER_GROUP_HOME": _PRE_WGH,
                                             "IDLEJOT_WG_HOME": _PRE_IWGH})
         bound_ok = PRIVATE_HOME == expected_home

@@ -15,7 +15,7 @@
     {"name": "check_path_hygiene.py", "shard": "static", "why": "路径卫生：运行时数据不许从仓库根推导（防 #14 复发）"},
     {"name": "check_no_console_child.py", "shard": "static", "why": "子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发）"},
     {"name": "check_listen_passthrough.py", "shard": "static", "why": "唤醒内容不被 listen.py 吞掉（#91）"},
-    {"name": "check_listener_rehang.py", "shard": "static", "why": "监听空窗：退出必带重挂指令、回复默认续挂、过期唤醒不静默（#69）"},
+    {"name": "check_listener_rehang.py", "shard": "static", "why": "监听空窗：退出必带重挂指令、回复默认续挂、过期唤醒不静默、退出留痕且空窗可由只读入口报出（#69/#112）"},
     {"name": "check_module_size.py", "shard": "static", "why": "模块体量红线：文件超 1000 行或类超 800 行即 fail（#11）"},
     {"name": "check_tmp_hygiene.py", "shard": "static", "why": "私有目录巡检：tmp/ 禁脚本、bin 与 archive 须登记（#6）"},
     {"name": "check_sender_name.py", "shard": "static", "why": "发信人名形态：QQ 引用气泡文案不得进 sender 或 aliases（#39）"},

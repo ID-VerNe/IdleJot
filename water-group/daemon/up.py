@@ -44,6 +44,7 @@ import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收
 import wg_budget  # noqa: E402  (等待预算：重挂提示不推荐撑不住的取值，issue #83)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_images  # noqa: E402  (图片标记渲染，与 reply/look 同一份实现)
+import wg_listener_state  # noqa: E402  (监听存亡账本：「无人值守」的可读事实，issue #112)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
 from wg_daemon import read_json  # noqa: E402
 from wg_paths import logs_dir, state_dir  # noqa: E402
@@ -201,6 +202,12 @@ def report(exclude_pids=None, resident_pid=None):
         listener = "已挂 " + "，".join(pieces)
     else:
         listener = "未挂 —— 消息照收，但没人会叫醒你"
+        # issue #112：这一行以前只有现算的进程结论。空窗期里没人跑 --status 时，
+        # 「刚才有人值守过、现在没了」在磁盘上没有任何痕迹；账本把上一轮的起止
+        # 时刻带进来，状态行才回答「空窗多长」而不只是「现在没人」。
+        note = wg_listener_state.describe()
+        if note:
+            listener += f"；账本：{note}"
     if specs and any("self_account" in p for p in problems):
         # 一个永远唤不醒的监听比没有监听更糟：它让人以为在值守（issue #51）。
         listener += "（⚠ self_account 不可用，@ 与关键词都判不中——这个监听唤不醒任何人，见「配置」行）"

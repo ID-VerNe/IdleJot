@@ -792,8 +792,10 @@ def wait_for_next(seconds):
     # 合计值、WARN 里的实际值和子进程参数统一用这一个数。
     wait = wg_budget.clamp_wait(seconds)
     if wait <= 0:
-        # 额度已经用尽（调用方已经等过一轮）：自己收手，别 spawn 一个等 0s 的
-        # 子监听再把 NO_WORK 读回来（issue #97）。
+        # 走到这里只有两种可能：调用方直接传了 0（`main()` 用 `if args.wait` 挡住，
+        # 正常路径不会），或者等待预算被收缩到 0。两种情况都不该 spawn 一个等 0s 的
+        # 子监听再把 NO_WORK 读回来——那是把「额度用尽」伪装成「等过一轮」
+        # （issue #97）。
         print("等待额度已用尽，不再续挂")
         return 0
     print(f"等下一次唤醒（最多 {wait}s）…", flush=True)

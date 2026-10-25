@@ -486,8 +486,10 @@ def 逃生口真的更短():
     200 的行为完全一样，照着改也改不掉任何东西。断言从输出里解析推荐值，要求它
     严格小于**实际**等待值（因此也小于 `WAIT_BUDGET`）。
 
-    两个样本：超预算 240 → 实际 90 → 推荐必须 < 90（修复后 45，修复前 120）；
-    预算内 60 → 推荐 30。前者是判别位，后者防止「一律不推荐」也被判绿。
+    三个样本：超预算 240 → 实际 90 → 推荐必须 < 90（修复后 45，修复前 120）；
+    预算内 60 → 推荐 30；`--wait 1` → 实际 1s，折半不足一秒，**只留 `--no-wait`**
+    （契约第 25 条后半句，独立复核抓出的缺口：不钉这一条时，去掉 `shorter > 0`
+    守卫、推荐出 `--wait 0` 也照样全绿，而 `--wait 0` 等于 `--no-wait`，是个假出口）。
     """
     def shorter_for(seconds):
         out, _ = capture_wait(seconds)
@@ -498,9 +500,11 @@ def 逃生口真的更短():
     actual = wg_budget.clamp_wait(over, 0)
     short_over = shorter_for(over)
     short_inside = shorter_for(60)
+    tiny, _ = capture_wait(1)
     return (short_over is not None and short_over < actual
             and short_over < wg_budget.WAIT_BUDGET
-            and short_inside is not None and short_inside < 60)
+            and short_inside is not None and short_inside < 60
+            and "--no-wait" in tiny and shorter_for(1) is None)
 
 
 @case

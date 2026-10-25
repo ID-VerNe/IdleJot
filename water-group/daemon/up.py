@@ -60,6 +60,8 @@ from wg_up_probe import (  # noqa: E402,F401  (分节 PA：进程/端口探测)
     _process_names,
     commands_pids,
     listener_pids,
+    listener_specs,
+    parse_timeout,
     port_open,
     port_owners,
     self_pids,
@@ -175,10 +177,31 @@ def report(exclude_pids=None, resident_pid=None):
     # token 读空让 NapCat 行误报、@ 判定永假让监听永远唤不醒人）。problems() 把
     # 「缺什么」说出来——与 bootstrap 注入前的拒绝判定同一份实现。
     problems = config_problems()
-    listeners = listener_pids(exclude=exclude_pids)
-    listener = (f"已挂 pid={','.join(listeners)}" if listeners
-                else "未挂 —— 消息照收，但没人会叫醒你")
-    if listeners and any("self_account" in p for p in problems):
+    # issue #86：监听行必须说清每个监听**实际的** `--timeout`。只报 pid 时，
+    # 修复前起的超预算监听（`--timeout 300`）和修复后起的（`--timeout 90`）
+    # 在状态里长得一模一样——而前者下一轮等待必被宿主截断，且截断路径零输出。
+    specs = listener_specs(exclude=exclude_pids)
+    if specs:
+        pieces = []
+        for spec in specs:
+            timeout = spec.get("timeout")
+            if timeout is None:
+                # 不猜：命令行里没写就是没写，它跑的是启动时那份代码的默认值。
+                # 当前代码的默认就是等待预算，但老监听跑的是老代码——所以两半都写。
+                detail = (f"--timeout 未显式指定（生效值取该监听启动时那版代码的默认；"
+                          f"当前默认 {wg_budget.WAIT_BUDGET}s）")
+            elif wg_budget.over_budget(timeout):
+                detail = (f"--timeout {timeout} ⚠ 超预算：等待 {timeout}s + 发送余量 "
+                          f"{wg_budget.SEND_BUDGET}s 已超过宿主常见工具调用超时 "
+                          f"{wg_budget.AGENT_TOOL_TIMEOUT}s，这轮等待会被截断且不留输出"
+                          f"——重挂 listen.py --timeout {wg_budget.WAIT_BUDGET}")
+            else:
+                detail = f"--timeout {timeout}"
+            pieces.append(f"pid={spec.get('pid')}（{detail}）")
+        listener = "已挂 " + "，".join(pieces)
+    else:
+        listener = "未挂 —— 消息照收，但没人会叫醒你"
+    if specs and any("self_account" in p for p in problems):
         # 一个永远唤不醒的监听比没有监听更糟：它让人以为在值守（issue #51）。
         listener += "（⚠ self_account 不可用，@ 与关键词都判不中——这个监听唤不醒任何人，见「配置」行）"
     cmds = commands_pids(exclude=exclude_pids)

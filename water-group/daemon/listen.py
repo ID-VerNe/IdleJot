@@ -113,6 +113,19 @@ def main():
                         help="超时后不沉淀、不查档案，只等（给 reply.py --wait 用）")
     args = parser.parse_args()
 
+    # 显式的超预算取值自己说一声（issue #86）。`reply.py --wait` 早就有这行 WARN，
+    # `listen.py` 没有——同一个预算、两种静默，而这里正是那个会被静默截断的进程。
+    # 必须打在等待之前：被宿主截断的路径上一个字都不会再打印（issue #83）。
+    #
+    # 后半句是按「会不会真被截断」写的（issue #88 合并上游后改）：超预算的取值
+    # 会被压回等待预算（`clamp_wait` 管单轮），所以这里**不会**因此被截断——
+    # 照旧写「很可能被截断」就是一句假话，而输出里的假话比没有输出更坏。
+    if wg_budget.over_budget(args.timeout):
+        print(f"WARN: --timeout {args.timeout}s 加上发送余量 {wg_budget.SEND_BUDGET}s 已超过"
+              f"常见工具调用超时 {wg_budget.AGENT_TOOL_TIMEOUT}s；本次已压回等待预算 "
+              f"{wg_budget.WAIT_BUDGET}s（issue #88），不会因此被截断",
+              flush=True)
+
     cycles = 0
     started = time.monotonic()
     while True:

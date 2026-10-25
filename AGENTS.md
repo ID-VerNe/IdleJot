@@ -23,8 +23,15 @@
 .venv/Scripts/python.exe water-group/daemon/reply.py --context 30      # 回之前看群里在聊什么（含闲聊）
 .venv/Scripts/python.exe water-group/daemon/reply.py <id> "<正文>"      # 回一条，自动带原生引用；发完默认续挂监听 90s，--no-wait 关闭
 .venv/Scripts/python.exe water-group/daemon/reply.py --show <id>       # 读某条消息全文（wg_events 命中带引用展开；缺 id 明说原因）
+.venv/Scripts/python.exe water-group/daemon/reply.py <id> "<正文>" --at <花名>  # 正文前 @ 人，可重复；真 @ 不是正文里的文本
+.venv/Scripts/python.exe water-group/daemon/reply.py --context 30 --around <id> # 只看这条之前的部分
+.venv/Scripts/python.exe water-group/daemon/reply.py --who <花名>     # 只解析花名到 QQ 与归属群，不发送
 .venv/Scripts/python.exe water-group/daemon/look.py --event <id>       # 唤醒行图片标「可补读」时先落盘再读；--pick 看候选、--recent 看最近
 ```
+
+`reply.py` 共 16 个参数，上面是最常用的；`--also`（连发 @ 用一条答复算作回了多条）、
+`--force`（目标唤醒已过待回时效也发）、`--intent`、`--no-quote` 见 `reply.py --help`。
+`look.py --frames all` 把动图补成 3 帧（默认只取 1 帧），遇到动图结论可疑时加上。
 
 唤醒行里的图片标记三种形态：`path=…`（已落盘，直接读）、`可补读 look.py --event <id> --index <i>`
 （deferred，先跑命令再读）、`未登记`（无任何记录，命令照样能补读）。别对着裸 `[图片]` 说
@@ -80,6 +87,8 @@
 |---|---|
 | `water-group/config.json`（群列表、各类开关、`plugins.<名字>.enabled`…） | `commands.py` **按消息懒重载**（`RELAY_SECONDS=30`，判断点在下一条消息 `dispatch` 之前），**不用重启** |
 | `commands.py` / `sixty.py` / `miyoushe.py` / `qr_login.py` 等 handler 代码 | `.\reload.ps1`：按 AST 闭包只重启 `commands`（`HANDLERS` 是 import 期合成的，进程级重启才会换模块） |
+| `daemon/plugins/*.py`（插件适配器，issue #4 PA） | `.\reload.ps1`：`commands.py:85` 是模块级 `import plugins`、`load_all` 在 import 期跑，所以插件文件在 `commands` 的 AST 闭包里，不用手写映射 |
+| `chatlocal/app_plugins/*.py`（app 侧插件，issue #4 PD2b） | `.\reload.ps1`：`chatlocal/mcp_chat.py:14-15` 模块级 import，闭包命中 `app`（`server_wg`） |
 | `memory_engine.py` 及四个分层模块 | `.\reload.ps1`：闭包会命中 `app` / `commands` / `watchdog`，自动重启对应子进程 |
 | `up.py` / `wg_up_probe.py` / `wg_up_wake.py` / `wg_up_stack.py` / `bootstrap.py` / `reload.py` / `winconsole.py` / `watchdog.py` / `supervisor.py` / `start-bot.pyw`（启动链、控制台、NapCat 注入） | **必须整栈重启**：`.\stop.ps1`（或 `up.py --stop`）后从 explorer 启动 `start-bot.pyw`；`reload.ps1` 会把 guard-owned 代码拒绝掉，普通重载不会替换已运行的 `up.py` 和它拉起的 NapCat（#4 的旧乱码控制台窗口就是这么留下的） |
 
@@ -106,8 +115,9 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
 **群里发 `#` 指令没反应时，按这三步查**（`#` 指令是独立进程，别的日志帮不上忙）：
 
 1. `tail ~/.water-group/logs/wg_commands.log` —— 有 `replied #xxx` 就是已回；**没有**说明压根没被识别，往下走；
-2. 看启动行 `commands start ... handlers=<N> sixty=<M>`：时间早于提交时间 = 旧进程，`sixty=0` = 模块导入坏了
-   （两种导入失败现在都会 `log`，见 issue #68）；
+2. 看启动行 `commands start ... handlers=<N> plugins=<名字:指令数,…>`（例：`plugins=miyoushe:21,sixty:14`）：
+   时间早于提交时间 = 旧进程；`plugins=` 里**缺某个插件** = 它压根没加载起来（注册表记 `load_error`），
+   写成 `sixty:0` = 插件在但一条指令都没注册（两种导入失败现在都会 `log`，见 issue #68 / #4 PA）；
 3. 取数失败看 `~/.water-group/logs/wg_sixty.log` —— 它**只记失败**，成功不落日志，所以「文件不存在」是正常现象。
 
 ---
@@ -135,6 +145,8 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
       │  memory_dossier.py · memory_commands.py          │
       │  memory_format.py · bootstrap.py               │
       │  sync_groups.py · personas/                   │
+      │  daemon/plugins/（# 指令 + 事件插件，issue #4）  │
+      │  ⇅ chatlocal/app_plugins/（app 侧插件，PD2b）   │
       └───────────────────────────────────────────────┘
 ```
 
@@ -142,15 +154,57 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
 
 | 目录 | 职责 |
 |------|------|
-| `chatlocal/` | 应用核心：`store.py`（SQLite/WAL 连接策略）、`mcp_*` MCP 工具与路由层（`mcp_server.py`、`mcp_tools.py`、`mcp_chat*.py`、`mcp_qq*.py`、`mcp_reactions.py`、`mcp_sticker_library.py` 等）、`agent*.py` 会话与人格、`onebot*.py` 网关、`voice.py` 云端 ASR。人格卡模板在 `water-group/personas/`（公开）与 `~/.water-group/personas/`（私有，同名优先），`chatlocal/mcp_chat_prompts.py` 负责发现与加载 |
+| `chatlocal/` | 应用核心：`store.py`（SQLite/WAL 连接策略）、`mcp_*` MCP 工具与路由层（`mcp_server.py`、`mcp_tools.py`、`mcp_chat*.py`、`mcp_qq*.py`、`mcp_reactions.py`、`mcp_sticker_library.py` 等）、`agent*.py` 会话与人格、`onebot*.py` 网关、`voice.py` 云端 ASR。人格卡模板在 `water-group/personas/`（公开）与 `~/.water-group/personas/`（私有，同名优先），`chatlocal/mcp_chat_prompts.py` 负责发现与加载；`app_plugins/` 是 app 侧插件插座（MCP 工具 + 实时事件，见 §1.1） |
 | `server_wg.py` | 后端唯一入口：FastAPI，HTTP `47860` / MCP `48777`，`install_mcp_routes` 挂载 MCP；不 import `app.py`/Gradio（已删） |
-| `water-group/` | QQ 群水群专属自闭环模块：`bootstrap.py`（一键后台启动、端口屏障与自检）、`memory_engine.py`（群友小本本动态记忆门面，issue #11 PA 起拆为 `memory_store` 存储层 / `memory_profile` 画像层 / `memory_observe` 观察层 / `memory_dossier` 档案层，对外 API 不变）、`memory_commands.py`（指令语法解析）、`memory_format.py`（L1 画像卡渲染）、`sync_groups.py`（群列表/名片同步）、`daemon/sixty.py`（60s 资讯指令取数，issue #53 方案 A）、`personas/` 角色人格卡 |
+| `water-group/` | QQ 群水群专属自闭环模块：`bootstrap.py`（一键后台启动、端口屏障与自检）、`memory_engine.py`（群友小本本动态记忆门面，issue #11 PA 起拆为 `memory_store` 存储层 / `memory_profile` 画像层 / `memory_observe` 观察层 / `memory_dossier` 档案层，对外 API 不变）、`memory_commands.py`（指令语法解析）、`memory_format.py`（L1 画像卡渲染）、`sync_groups.py`（群列表/名片同步）、`daemon/sixty.py`（60s 资讯指令取数，issue #53 方案 A）、`personas/` 角色人格卡。`daemon/` 是常驻守护与 Agent 侧 CLI（**逐文件职责见 `water-group/daemon/README.md`，本表不再重列**），其中 `daemon/plugins/` 是指令与事件插件的注册表（§1.1） |
 | `water_group/` | 根目录标准 Python 模块兼容桥接 shim（连字符目录不可直接 import）。**它是唯一知道连字符目录存在的 water-group 文件**：通过扩展自身 `__path__` 使每个文件以 `water_group.<name>` 恰好可达一次；子模块经 PEP 562 懒加载解析。**严禁把连字符目录加入 `sys.path`**——同一文件以两个名字加载会拆分状态（记忆引擎单例曾因此损坏） |
-| `scripts/` | 检查与辅助脚本，以及共享基建：`fixture_server.py`（假服务器样板基类）、`check_fixture_support.py`（隔离环境/临时目录/网络护栏）、`incremental_common.py`（增量游标指纹）、`setup-napcat.ps1`（NapCat Shell 拉取器，pinned + sha256 校验） |
-| `doc/` | 水群与 MCP 协议文档：`MCP_CHAT*`、`MCP_REACTIONS*`、`GROUP_MANAGEMENT`、`REPLY_TIMING`、`WATER_GROUP_ONLY_PLAN`、`SECURITY`、`THIRD_PARTY`，及两轮 DRY/SRP 审计报告 |
+| `scripts/` | 检查与辅助脚本，以及共享基建：`fixture_server.py`（假服务器样板基类）、`check_fixture_support.py`（隔离环境/临时目录/网络护栏）、`incremental_common.py`（增量游标指纹）、`setup-napcat.ps1`（NapCat Shell 拉取器，pinned + sha256 校验）；门禁清单与执行器是 `gates.json` + `run_gates.py`（**唯一事实来源**，§5.1），对账与设置类还有 `check_pr_parity.py` / `check_repo_settings.py` / `check_gate_change_review.py` |
+| `doc/` | 水群与 MCP 协议文档：`MCP_CHAT*`、`MCP_REACTIONS*`、`GROUP_MANAGEMENT`、`REPLY_TIMING`、`WATER_GROUP_ONLY_PLAN`、`SECURITY`、`THIRD_PARTY`、`SLASH_COMMANDS`（`#` 指令体系）、`HOT_RELOAD`、`NAPCAT_TROUBLESHOOTING`、`MCP_TOOL_RELIABILITY`，以及流程指引 `ISSUE_GUIDE` / `PR_GUIDE`，及两轮 DRY/SRP 审计报告（具体篇目以磁盘为准，不在此穷举） |
 | `tools/` | NapCat Shell（OneBot 11 适配器，`setup-napcat.ps1` 拉取，受 `.gitignore` 保护）。qq-reader / wechat-reader / snowluma 等桌面壳组件不在本项目内 |
 
-**运行时/本地数据（仓库内只剩配置，数据全部在 `~/.water-group/`）**：本地数据根 `~/.water-group/`（`state/` 守护状态、`logs/` 全部日志、`data/` SQLite 库与媒体缓存、`tmp/` 临时目录；`WATER_GROUP_HOME` 可改根，`IDLEJOT_WG_STATE` / `TULPA_WG_STATE` 可改 state 目录，`IDLEJOT_WG_DB` / `IDLEJOT_WG_MEMORY_DB` 可钉单个库给测试用）；仓库内受 `.gitignore` 保护的仅剩 `imports/`、`reports/`、`build/`、`.env`、`.cache/`、`water-group/config.json`、`tools/`、以及部署者自建的私有人设卡。路径单一事实来源：`water-group/daemon/wg_paths.py`；`chatlocal/config.py` 与 `water-group/memory_store.py` 因不能 flat import 而按同规则复述一份，改规则时三处一起改，`scripts/check_path_hygiene.py` 会拦住漏改。
+**运行时/本地数据（仓库内只剩配置，数据全部在 `~/.water-group/`）**：本地数据根 `~/.water-group/`（`state/` 守护状态、`logs/` 全部日志、`data/` SQLite 库与媒体缓存、`tmp/` 临时目录；`WATER_GROUP_HOME` 可改根，`IDLEJOT_WG_STATE` / `TULPA_WG_STATE` 可改 state 目录，`IDLEJOT_WG_DB` / `IDLEJOT_WG_MEMORY_DB` 可钉单个库给测试用）；仓库内受 `.gitignore` 保护的仅剩 `imports/`、`exports/`、`reports/`、`build/`、`release/`、`instances/`、`research/upstream/`、`.env`、`.cache/`、`water-group/config.json`、`tools/`、以及部署者自建的私有人设卡。路径单一事实来源：`water-group/daemon/wg_paths.py`；`chatlocal/config.py` 与 `water-group/memory_store.py` 因不能 flat import 而按同规则复述一份，改规则时三处一起改，`scripts/check_path_hygiene.py` 会拦住漏改。
+
+### 1.1 插件体系（issue #4）
+
+可选能力的统一插座，**分两半且不合并**：daemon 侧管 `#` 指令与事件，app 侧管 MCP 工具与实时事件——宿主不同、生命周期不同、授权模型不同，合并会逼一方假装拥有另一方的保证。契约原文在两处模块 docstring，**改协议前先读它们，不要只看这里**：`water-group/daemon/plugins/base.py`、`chatlocal/app_plugins/base.py`。
+
+| | daemon 侧 | app 侧 |
+|---|---|---|
+| 目录 | `water-group/daemon/plugins/` | `chatlocal/app_plugins/` |
+| 现有插件 | `miyoushe_plugin.py` / `sixty_plugin.py` / `followup_plugin.py` | `language.py` / `reactions.py` |
+| 静态面 | `plugins/__init__.py:55` 的 `LOADERS`、`:64` 的 `EVENT_LOADERS`（**显式清单，不扫目录**） | `spec.py:42` 的 `PLUGINS`（`REACTIONS` / `LANGUAGE` 两块）+ `loader.py:10` 的 `build()` |
+| 扩展点 | `Command`（指令型，走 `Registry.commands()` 合成表）+ `Hooks.on_event`（事件型，没有表） | `AppPlugin` 的方法族：工具 / 事件 / 生命周期 / 描述子 |
+| 开关 | `config.json` 的 `plugins.<名字>` 三态 + 群级覆盖 | `spec.policy` 文件名（文件/DB 数据态）或插件自判 |
+
+**三条硬边界**（`plugins/base.py` 模块 docstring 的原话，别在实现里绕开）：
+
+1. **插件 = 可选行为；平台 = 必需通路。** 进程生命周期（`up.py` / `supervisor` / `watchdog`）、OneBot 连接、MCP 装配不是插件。
+2. **文件不搬迁。** 适配器放 `plugins/`，取数与传输模块留在原位；插件化改的是注册方式，不是目录结构。
+3. **静态 import 的显式注册表。** `check_hot_reload.py` 要求 watch 目录下每个 `.py` 都能从 5 个入口的 AST 闭包到达；运行时扫目录既过不了门禁，也让 `reload` 无法把改动映射到进程。包内**一律绝对 import**（`import plugins.base`），相对 import 会把路径算错且是静默算错。
+
+**加一个 daemon 插件**要改三处：`plugins/` 放适配器（模块级 `PLUGIN = Plugin(...)`）、`plugins/__init__.py` 的 `LOADERS` 加一行（有事件型能力再加 `EVENT_LOADERS`）、`config.json` 的 `plugins.<名字>` 加配置。**`commands.py` 不用改**——`HANDLERS` 由 `plugins.load_all(...).commands()` 在 import 期合成（`commands.py:85,97`）。
+
+**加一个 app 插件**要改三处：`spec.py` 加一块（`tools` / `scope` / `expression` / `policy`）、同目录加模块、`loader.py` 的 `build()` 元组加类。宿主里**不许出现插件名字面量**，`scripts/check_app_plugins.py` 钉住。
+
+**开关与兼容**：`Plugin.enabled()`（`plugins/base.py:137`）是三态——总开关 `plugins.<名字>.enabled` → `groups` 白名单 → 群级 `groups.<id>.plugins.<name>: false`；`group_id` 为空（`up.py --status` 那类全局查询）只判总开关，否则配了白名单的插件会在状态里显示停用。没迁完的老配置段用 `Plugin.legacy_section` 声明（只有 `followup` 有），宿主把它平铺读：`enabled` 进三态、其余键进 `options`。
+
+**两条派发路径（同一个 loader、同一个模块级 `PLUGIN`，不存在两份状态）**：
+
+- commands 进程：`Registry.emit(event, ctx)`（`plugins/registry.py:127`）按注册序问每个声明了 `on_event` 的插件，**首个非 `None` 胜出**；事件是否受三态门控由插件自己决定，宿主不替它选。
+- 一次性 CLI（`reply.py` / `watch.py` / `up.py`）：`plugins.emit(...)`（`plugins/__init__.py:88`）只过 `EVENT_LOADERS`，**不建 `CommandsHost`**——只为一条追问窗把米游社取数层拖进进程是错的。
+
+**app 侧派生语义**（宿主遍历顺序 = 注册序，实测于 `chatlocal/app_plugins/base.py` 的 `AppPlugins`）：
+
+| 语义 | 方法 |
+|---|---|
+| 全量 fan-out（每个插件都被调用） | `scope` / `decorate` / `reset` / `resume` / `close` / `suspend` / `on_stored` / `stopped` |
+| 首个非 `None` 胜出 | `receive` / `wake` / `wake_hint` / `wake_signal` / `plan_context` / `select` |
+| 聚合 | `batch` / `hints` / `stamps` |
+| 经 `tool_owner` 直取、**不** fan-out | `handoff` / `durable` |
+
+`suspend()` 必须独立存在：不能并进 `close()`（`close` 在锁外、`suspend` 在锁内 invalidate，合并会破坏锁序），也不能并进 `reset()`（`reset` 表示新连接接管，会轮转 reactions 的 epoch；suspend 没有后继连接，epoch 必须保留）。
+
+改完插件怎么生效见 §0.2。剩余未迁移：PD2c（群友画像）、PD2d（媒体，本机不可验证，垫底），进度在 issue #4。
 
 ---
 
@@ -185,6 +239,11 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
   uv run python scripts/check_publication.py
   ```
   扫描范围是 `git ls-files` 追踪的工作区 Markdown 文件的本地链接完整性与必需文档清单；不扫提交历史。
+- **本机跑法（本文件所有 `uv run python scripts/...` 都适用）**：先显式清掉宿主注入的 `PYTHONPATH`，否则本机 `import chatlocal` 会静默成功、CI 上才炸（#4 PE 的假绿），跑出来的绿不算绿：
+  ```bash
+  /usr/bin/env -u PYTHONPATH .venv/Scripts/python.exe scripts/check_publication.py
+  ```
+  必须写全 `/usr/bin/env`，别只写 `env`——PATH 里的 `env` 是沙箱 shim，会吞掉子进程 stdout 却照样 `exit 0`（连 `> file` 都是空文件），绿得毫无信息。
 
 ### 2.5 单一归属目录（新增代码的落脚点）
 
@@ -239,7 +298,7 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
 ### 3.2 两层存储架构 (Two-tier Storage)
 - **Tier 1 (L1 Context)**: 超紧凑画像卡（约 80 tokens/人，渲染逻辑在 `memory_format.py`），发言时自动注入模型上下文：
   `【群友档案：<人名> (QQ: <uid> / 名片: <card>)】外号: ... 狠料: ...`
-- **Tier 2 (L2 DB)**: SQLite 持久化（`data/group_memories.sqlite3`），包含完整时间戳事件轴、引用原话与结构化槽位。
+- **Tier 2 (L2 DB)**: SQLite 持久化（`~/.water-group/data/group_memories.sqlite3`；仓库里的 `data/` 不是它，那是 `.gitignore` 掉的本地目录），包含完整时间戳事件轴、引用原话与结构化槽位。
 
 ### 3.3 MCP 原生读写工具闭环（严禁 Agent 直连写 SQLite）
 Agent 必须且仅能通过标准化 MCP 工具维护群友记忆，**严禁自行编写 ad-hoc 脚本直接修改 SQLite**：
@@ -262,7 +321,8 @@ Agent 必须且仅能通过标准化 MCP 工具维护群友记忆，**严禁自�
 1. 校验返回结果的 `state`：
    - 若 `state == "READY"`：安全获取 `plan_id = result["plan_id"]`，进入发送流程。
    - 若 `state == "REJECTED"` 且 `error_code == "stale"`：说明群内切入了目标相关的新消息。此时 `plan_id` 为 `None`，必须提取返回的 `updated_chat["input_batch"]`，使用最新批次原地重规划，切勿崩溃退出。
-   - 若 `state == "SILENCE"`：表示当前语境适合潜水无需回复，流程正常结束。
+   - 若 `state == "SILENT"`：表示当前语境适合潜水无需回复，`turn_complete=true`，流程正常结束（注意动作名是 `silence`、状态名是 `SILENT`，别按动作名去判状态；见 `chatlocal/mcp_chat_turns.py:413`）。
+   - 若 `state in ("SUCCEEDED", "INTERRUPTED")`：本轮已结束。`SUCCEEDED` = 队列全部落地，`INTERRUPTED` = 只有部分落地（失败项既非成功也非 `UNKNOWN`，`chatlocal/mcp_chat_turns.py:557`）——**不要拿旧队列重发**，按下一轮的 `input_batch` 重新规划。
 
 ### 4.2 反语癖固化机制 (Anti-Habituation)
 自回归生成容易将前序回复中的单一口癖（如频繁以“……草”、“难绷”结尾）不断回喂放大。系统内置了标点清洗与多重后缀检测，当触发连续口癖时会自动在 `social_state` 提示词中注入多样性约束，Agent 应当主动响应约束、变换句式。
@@ -284,6 +344,8 @@ uv run python scripts/run_gates.py ci --fail-fast      # 本机快速试错：�
 uv run python scripts/run_gates.py --list              # 看档位计数、CI 分片与 ci 顺序
 uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写下面这段
 ```
+
+**本机跑法同 §2.4**：一律 `/usr/bin/env -u PYTHONPATH .venv/Scripts/python.exe scripts/run_gates.py …`（清掉注入的 `PYTHONPATH`，并写全 `/usr/bin/env`，否则沙箱 `env` shim 会吞掉子进程输出还报 `exit 0`）。下面的 `uv run` 是 CI 等价写法。
 
 <!-- gates:ci:begin -->
 > 本节由 `scripts/check_gate_manifest.py --write` 从 `scripts/gates.json` 生成，**不要手改**；顺序即本机全量执行顺序，`分片` 列即 CI matrix 分片（同片串行、片间并行）。

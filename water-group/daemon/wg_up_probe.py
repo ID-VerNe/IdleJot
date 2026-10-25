@@ -111,7 +111,7 @@ def _match_rows(pattern, exclude=None):
             out = None
         for line in (getattr(out, "stdout", None) or b"").decode("utf-8", "ignore").splitlines():
             parts = line.split("|", 2)
-            if len(parts) == 3 and parts[0].isdigit():
+            if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
                 rows.append((parts[0], parts[1], parts[2]))
     matched = {pid for pid, _, _ in rows}
     found = [(pid, cmdline) for pid, parent, cmdline in rows if parent not in matched]

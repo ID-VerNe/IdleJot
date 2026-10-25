@@ -550,9 +550,14 @@ def 状态行报出监听实际超时():
     修复前那行只有 pid：修复前起的监听（`--timeout 300`）和修复后起的
     （`--timeout 90`）在状态里长得一模一样，Agent 无从判断自己挂的是不是那个
     能活的。断言不是「有提示」，而是 pid 与秒数同时在行里。
+
+    探针值刻意取 `WAIT_BUDGET - 10` 而不是 `WAIT_BUDGET` 本身（独立复核建议）：
+    取值恰好等于模块常量时，「永远报常量」的坏实现输出逐字相同，断言区分不出
+    （变异 M4 实测：那样写门禁仍全绿，而一个活着的 60s 监听会被显示成 90）。
     """
-    line = status_listener_line([{"pid": "1111", "timeout": wg_budget.WAIT_BUDGET}])
-    return "1111" in line and f"--timeout {wg_budget.WAIT_BUDGET}" in line
+    probe = wg_budget.WAIT_BUDGET - 10
+    line = status_listener_line([{"pid": "1111", "timeout": probe}])
+    return "1111" in line and f"--timeout {probe}" in line
 
 
 @case
@@ -561,13 +566,22 @@ def 超预算监听在状态行里被点名():
 
     这是本 issue 的要害：`--status` 是操作者（和 Agent）唯一的只读诊断入口，
     它得能回答「我挂的是不是那个能活的」。断言 ⚠ 与秒数同时在行里。
+
+    同一行还要装得下**多个**监听（独立复核建议）：实机上「一个健康监听 + 一个
+    修复前起的旧监听」同时存在是最常见的场景，只报第一个的话旧监听被整条漏掉，
+    #86「旧监听在状态里一眼看得出」直接失效（变异 M7 实测）。
     """
     over = wg_budget.AGENT_TOOL_TIMEOUT * 2
+    inside = wg_budget.WAIT_BUDGET - 10
     loud = status_listener_line([{"pid": "2222", "timeout": over}])
-    quiet = status_listener_line([{"pid": "3333", "timeout": wg_budget.WAIT_BUDGET}])
+    quiet = status_listener_line([{"pid": "3333", "timeout": inside}])
+    both = status_listener_line([{"pid": "4444", "timeout": inside},
+                                 {"pid": "5555", "timeout": over}])
     return ("2222" in loud and f"--timeout {over}" in loud
             and "⚠" in loud and "超预算" in loud
-            and "3333" in quiet and "⚠" not in quiet)
+            and "3333" in quiet and "⚠" not in quiet
+            and "4444" in both and "5555" in both
+            and f"--timeout {inside}" in both and f"--timeout {over}" in both)
 
 
 @case
@@ -577,6 +591,10 @@ def 显式超预算的监听自己告警():
     `reply.py --wait` 早就有这行 WARN（reply.py:788），`listen.py` 没有——同一个
     预算、两种静默，而这里正是那个会被静默截断的进程。两次运行各用一份干净的
     夹具：唤醒会被 watch.py 消费掉，第二次跑就只剩等待了。
+
+    WARN 必须在**等待开始之前**（独立复核建议）：被宿主截断的路径上一个字都不
+    会再打印，把 WARN 挪到 `run("watch.py")` 之后它一次都不会输出，而只查
+    「stdout 里有没有 WARN」的断言照样绿（变异 M6b 实测）——症状原样复活。
     """
     over = wg_budget.AGENT_TOOL_TIMEOUT * 2
     with temp_dir(prefix="wg-rehang-") as home:
@@ -589,9 +607,12 @@ def 显式超预算的监听自己告警():
         write_events(home, [event(2, 5, "@机器人 在吗")])
         quiet = run_script(home, "listen.py", "--cycles", "1", "--timeout",
                            str(wg_budget.WAIT_BUDGET), "--no-digest")
+    warn_at = index_of(loud.stdout, "WARN")
+    wait_at = index_of(loud.stdout, "等最多")
     return (loud.returncode == 0 and "WARN" in loud.stdout
             and f"--timeout {over}" in loud.stdout
-            and quiet.returncode == 0 and "WARN" not in quiet.stdout)
+            and quiet.returncode == 0 and "WARN" not in quiet.stdout
+            and warn_at >= 0 and wait_at >= 0 and warn_at < wait_at)
 
 
 @case

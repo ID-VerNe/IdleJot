@@ -187,7 +187,9 @@ def report(exclude_pids=None, resident_pid=None):
             timeout = spec.get("timeout")
             if timeout is None:
                 # 不猜：命令行里没写就是没写，它跑的是启动时那份代码的默认值。
-                detail = "--timeout 未显式指定（生效值取决于该监听启动时的代码版本）"
+                # 当前代码的默认就是等待预算，但老监听跑的是老代码——所以两半都写。
+                detail = (f"--timeout 未显式指定（生效值取该监听启动时那版代码的默认；"
+                          f"当前默认 {wg_budget.WAIT_BUDGET}s）")
             elif wg_budget.over_budget(timeout):
                 detail = (f"--timeout {timeout} ⚠ 超预算：等待 {timeout}s + 发送余量 "
                           f"{wg_budget.SEND_BUDGET}s 已超过宿主常见工具调用超时 "

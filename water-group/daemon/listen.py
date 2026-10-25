@@ -111,6 +111,11 @@ def main():
                              "共享的等待额度约束）")
     parser.add_argument("--no-digest", action="store_true",
                         help="超时后不沉淀、不查档案，只等（给 reply.py --wait 用）")
+    parser.add_argument("--probe", action="store_true",
+                        help="门禁/测试起的临时监听标识：探针不把它算作「已有监听」，"
+                             "reply.py 的续挂判断与 --status 的监听行都跳过它（issue #94 "
+                             "分节 PB）。值守链路（reply.py 续挂、RESTART: 重挂、人工挂）"
+                             "一律不带这个参数")
     args = parser.parse_args()
 
     # 显式的超预算取值自己说一声（issue #86）。`reply.py --wait` 早就有这行 WARN，

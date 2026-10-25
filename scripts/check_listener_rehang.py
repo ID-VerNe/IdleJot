@@ -1064,22 +1064,44 @@ def 探针从真实监听读出超时():
 
 @case
 def 别的树里的监听不算已有监听():
-    """探针只认本 checkout 的监听（issue #94）。
+    """探针只认本 checkout 的监听（issue #94；对照组 issue #106）。
 
-    按 worktree 布局在 temp 下起一个异树 listen.py，先轮询 `_match_rows` 证明
-    WMI 已看见它——否则「进程还没注册」和「被过滤掉」分不开，断言会假绿；再断言
-    `listener_pids()` 与 `listener_specs()` 都不报它。异树监听被当成「已有监听」
-    的后果：`reply.py` 跳过一次必要的续挂，那一次回复之后群里就没人值守。
+    按 worktree 布局在 temp 下起一个异树 listen.py，同时起一个**本树同形监听**
+    （本仓绝对路径、`cwd=ROOT`、不带 `--probe`，与「本树门禁临时监听不算已有
+    监听」的对照组同口径）当对照。先轮询 `_match_rows` 证明 WMI 已看见两个
+    进程——否则「进程还没注册」和「被过滤掉」分不开，断言会假绿；再断言异树
+    的那个 `listener_pids()` 与 `listener_specs()` 都不报、本树对照的两个
+    finder 都必须报。
+
+    对照组防的是「过滤层整体失效」（issue #106）：只断言「异树不被报出」时，
+    把两个 finder 改成永远返回空（或把 `_own_checkout` 改成永远 False），
+    异树照样「不被报出」，用例全绿——而异树监听「不被报出」与「什么都不报出」
+    在断言下长得一模一样。契约 22 声明的后半句「本树的监听（含绝对路径起的
+    孤儿）仍必须被认出」，自此才有断言兜底。
+
+    异树监听被当成「已有监听」的后果：`reply.py` 跳过一次必要的续挂，那一次
+    回复之后群里就没人值守。断言都做在进程**活着**的时候（收树之后再查，死
+    进程谁也查不到，「不过滤」的坏实现也照样绿）。
     """
     if os.name != "nt":
         return True  # 本仓只跑 Windows（探针在 posix 上是 ps 兑底）
     with temp_dir(prefix="wg-foreign-") as home:
+        fixture_home(home)
         script = home / "water-group" / "daemon" / "listen.py"
         script.parent.mkdir(parents=True, exist_ok=True)
         script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
-        proc = subprocess.Popen([sys.executable, str(script), "--timeout", "1"],
-                                cwd=str(home), stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL)
+        procs = [subprocess.Popen([sys.executable, str(script), "--timeout", "1"],
+                                  cwd=str(home), stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL)]
+        # 对照组（issue #106）：本树同形监听，两个 finder 都必须认出它——
+        # 只钉「异树不报」时，过滤层整体失效（恒空 / _own_checkout 恒 False）
+        # 会让这条用例假绿。
+        procs.append(subprocess.Popen(
+            [sys.executable, str(DAEMON / "listen.py"),
+             "--cycles", "1", "--timeout", "20", "--no-digest"],
+            cwd=str(ROOT), env=child_env(home),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        foreign, plain = str(procs[0].pid), str(procs[1].pid)
         raw = []
         ok = False
         try:
@@ -1087,20 +1109,22 @@ def 别的树里的监听不算已有监听():
             while time.time() < deadline:
                 raw = [pid for pid, _ in wg_up_probe._match_rows(
                     "daemon[\\\\/]listen\\.py", exclude=up.self_pids())]
-                if str(proc.pid) in raw:
+                if foreign in raw and plain in raw:
                     break
                 time.sleep(1)
-            if str(proc.pid) not in raw:
-                ok = False  # WMI 始终没看见它：用例前提不成立，不能当通过
+            if foreign not in raw or plain not in raw:
+                ok = False  # WMI 始终没看见：用例前提不成立，不能当通过
             else:
                 # 断言必须在进程**活着**的时候做（独立复核抓出的假绿）：收树
                 # 之后再查，死进程谁也查不到，「不过滤」的坏实现也照样绿。
-                ok = (str(proc.pid) not in up.listener_pids()
-                      and all(str(s.get("pid")) != str(proc.pid)
-                              for s in up.listener_specs()))
+                pids = up.listener_pids()
+                specs = [str(s.get("pid")) for s in up.listener_specs()]
+                ok = (foreign not in pids and foreign not in specs
+                      and plain in pids and plain in specs)
         finally:
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                           capture_output=True)
+            for proc in procs:
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                               capture_output=True)
     return ok
 
 

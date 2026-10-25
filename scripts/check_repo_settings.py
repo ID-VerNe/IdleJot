@@ -10,12 +10,19 @@ issue #78 追加「门禁复核的平台侧两态政策」。门禁脚本是这�
 要求 review 则自己的 PR 拿不到非本人批准——所以政策按**可合并维护者数量**
 （有 push 权限的 collaborator）分两态，两态都钉：
 
-- 维护者 >= 2：`required_pull_request_reviews` 至少 1 人，且 `.github/CODEOWNERS`
-  覆盖门禁执行链路径（`scripts/check_*.py`、`scripts/gates.json`、
-  `scripts/run_gates.py`、`.github/workflows/ci.yml`）——issue #78 候选 1/2；
+- 维护者 >= 2：`required_pull_request_reviews` 至少 1 人**且来自 code owner**
+  （`require_code_owner_reviews` 为 true，否则 CODEOWNERS 只是装饰、任意可合并者
+  都能批门禁改动），且 `.github/CODEOWNERS` 覆盖门禁执行链路径——issue #78 候选 1/2；
 - 维护者 <= 1：reviews 必须为 null、CODEOWNERS 不得覆盖门禁路径——此时复核靠
   issue #62 的「不同上下文 agent + 结论贴 PR」（`check_gate_change_review.py`
   机器校验段存在性），CODEOWNERS 在没要求 review 时不产生强制、只制造虚假安全感。
+
+门禁执行链 = `scripts/check_*.py`（按磁盘展开）、`scripts/gates.json`、
+`scripts/run_gates.py`、`.github/workflows/ci.yml`，外加 `.githooks/` 下全部钩子
+（pre-push 跑发布门禁 + 每推送 sha 的 CI 等价复跑，commit-msg 跑 commit message
+发布门禁——改钩子同样能静默削弱门禁链）。#62 的 review 链
+（`check_gate_change_review.py` 的 PATTERNS）只含前四类，用途是「PR 正文必须
+交代」，与这里的「CODEOWNERS 覆盖」是两回事，故意不一致。
 
 第二个维护者就位时本门禁转红，并按打印的命令翻转（CODEOWNERS 模板 + protection
 PUT）；翻转后平台强制生效。两态断言随维护者数量自动切换，设置漂移即红。
@@ -25,13 +32,14 @@ CI 的 `GITHUB_TOKEN` 只有 `contents: read`，读 branch protection 会 403，
 
     python scripts/check_repo_settings.py
     python scripts/check_repo_settings.py --branch slim
-    python scripts/check_repo_settings.py --self-test   # 离线 A/B 夹具（匹配器 + 两态政策）
+    python scripts/check_repo_settings.py --self-test   # 离线 A/B 夹具（匹配器 + 两态政策 + 翻转模板自洽）
 
 退出码：0 全绿；1 设置不符；2 无法探测（`gh` 缺失 / 未登录 / 权限不足）。
 """
 import argparse
 import fnmatch
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -60,7 +68,8 @@ TEAM_PROTECTION_FIX = (
     '第二个维护者就位后，把分支保护翻成平台强制（PowerShell）：\n'
     '  @\'\n'
     '  {"required_status_checks":{"strict":true,"contexts":["checks"]},"enforce_admins":false,'
-    '"required_pull_request_reviews":{"required_approving_review_count":1},'
+    '"required_pull_request_reviews":{"required_approving_review_count":1,'
+    '"require_code_owner_reviews":true},'
     '"restrictions":null,"allow_force_pushes":false,"allow_deletions":false}\n'
     '  \'@ | gh api -X PUT repos/:owner/:repo/branches/slim/protection --input -'
 )
@@ -69,7 +78,8 @@ TEAM_CODEOWNERS_FIX = (
     '  /scripts/check_*.py        @<维护者一> @<第二个维护者>\n'
     '  /scripts/gates.json        @<维护者一> @<第二个维护者>\n'
     '  /scripts/run_gates.py      @<维护者一> @<第二个维护者>\n'
-    '  /.github/workflows/ci.yml  @<维护者一> @<第二个维护者>'
+    '  /.github/workflows/ci.yml  @<维护者一> @<第二个维护者>\n'
+    '  /.githooks/                @<维护者一> @<第二个维护者>'
 )
 
 
@@ -174,9 +184,14 @@ def hooks_problems():
 
 
 def gate_paths(root=ROOT):
-    """门禁执行链路径：`scripts/check_*.py` 按磁盘展开成逐个脚本，另三个是单文件。"""
+    """门禁执行链路径：`scripts/check_*.py` 按磁盘展开成逐个脚本，另三个是单文件，
+    再加 `.githooks/` 下全部钩子（issue #78：钩子是门禁的执行入口，改它同样能
+    静默削弱门禁链）。钩子按磁盘枚举，将来加钩子自动进链；目录不存在返回空。"""
     paths = [f'scripts/{path.name}' for path in sorted((root / 'scripts').glob('check_*.py'))]
     paths += ['scripts/gates.json', 'scripts/run_gates.py', '.github/workflows/ci.yml']
+    hooks = root / '.githooks'
+    if hooks.is_dir():
+        paths += [f'.githooks/{path.name}' for path in sorted(hooks.iterdir()) if path.is_file()]
     return paths
 
 
@@ -235,7 +250,7 @@ def policy_problems(maintainers, protection, codeowners, paths):
     """issue #78 两态复核政策的问题列表（纯函数，供 --self-test 离线夹具）。
 
     maintainers <= 1：reviews 必须为 null、CODEOWNERS 不得覆盖门禁路径；
-    maintainers >= 2：reviews 至少 1 人且 CODEOWNERS 覆盖全部门禁路径。
+    maintainers >= 2：reviews 至少 1 人且来自 code owner、CODEOWNERS 覆盖全部门禁路径。
     """
     problems = []
     reviews = (protection or {}).get('required_pull_request_reviews')
@@ -247,6 +262,11 @@ def policy_problems(maintainers, protection, codeowners, paths):
             problems.append(
                 f'有 {maintainers} 个可合并维护者，但分支保护没要求 review'
                 '（required_pull_request_reviews 缺失或人数 < 1）')
+        if reviews and reviews.get('require_code_owner_reviews') is not True:
+            problems.append(
+                f'有 {maintainers} 个可合并维护者，分支保护却没要求 code owner 审查'
+                '（require_code_owner_reviews 不为 true）：CODEOWNERS 只是装饰，'
+                '任意有合并权限者都能批准门禁改动')
         if uncovered:
             problems.append(
                 f'有 {maintainers} 个可合并维护者，但 .github/CODEOWNERS 未覆盖门禁路径：'
@@ -268,7 +288,7 @@ def policy_summary(maintainers, codeowners, paths):
     """全绿时的复核政策一行摘要。"""
     if maintainers >= 2:
         return (f'{maintainers} 个可合并维护者：平台强制就位'
-                f'（review ≥1 人、CODEOWNERS 覆盖 {len(paths)} 个门禁路径）')
+                f'（review ≥1 人且来自 code owner、CODEOWNERS 覆盖 {len(paths)} 个门禁路径）')
     return (f'{maintainers} 个可合并维护者：单人口径'
             '（不要求 review、CODEOWNERS 不覆盖门禁路径；复核走 #62 agent 流程）')
 
@@ -293,38 +313,80 @@ MATCHER_FIXTURES = [
      ['scripts/check_publication.py', 'scripts/gates.json'], {'scripts/gates.json'}),
     ('scripts @someone', ['scripts/gates.json'], {'scripts/gates.json'}),
     ('*.json @someone', ['scripts/gates.json', 'scripts/run_gates.py'], {'scripts/gates.json'}),
+    ('/.githooks/ @someone', ['.githooks/pre-push'], {'.githooks/pre-push'}),
+    ('* @someone', ['.githooks/commit-msg'], {'.githooks/commit-msg'}),
+    ('/docs/ @someone', ['.githooks/pre-push'], set()),
+    ('/.githooks/ @x\n!.githooks/pre-push',
+     ['.githooks/pre-push', '.githooks/commit-msg'], {'.githooks/commit-msg'}),
 ]
 
 POLICY_FIXTURE_PATHS = (
     'scripts/check_publication.py', 'scripts/gates.json', 'scripts/run_gates.py',
-    '.github/workflows/ci.yml',
+    '.github/workflows/ci.yml', '.githooks/pre-push', '.githooks/commit-msg',
 )
 ALL_GATES_CODEOWNERS = (
     '/scripts/check_*.py @x\n/scripts/gates.json @x\n'
-    '/scripts/run_gates.py @x\n/.github/workflows/ci.yml @x'
+    '/scripts/run_gates.py @x\n/.github/workflows/ci.yml @x\n/.githooks/ @x'
 )
 POLICY_FIXTURES = [
     # (维护者数, required_pull_request_reviews, CODEOWNERS 文本, 期望是否有问题, 用例名)
     (1, None, '', False, '单人 + 无 review + 无 CODEOWNERS（现状口径）'),
     (1, None, '/scripts/ @x', True, '单人 + CODEOWNERS 覆盖门禁路径（虚假安全感）'),
+    (1, None, '/.githooks/ @x', True, '单人 + CODEOWNERS 只覆盖钩子（同样虚假安全感）'),
     (1, {'required_approving_review_count': 1}, '', True, '单人 + 要求 review（自己 PR 不可合并）'),
-    (2, {'required_approving_review_count': 1}, ALL_GATES_CODEOWNERS, False,
-     '双维护者 + review≥1 + CODEOWNERS 全覆盖'),
-    (2, {'required_approving_review_count': 1}, '* @x', False, '双维护者 + review≥1 + 通配覆盖'),
+    (2, {'required_approving_review_count': 1, 'require_code_owner_reviews': True},
+     ALL_GATES_CODEOWNERS, False, '双维护者 + review≥1 + code owner 审查 + CODEOWNERS 全覆盖'),
+    (2, {'required_approving_review_count': 1, 'require_code_owner_reviews': True},
+     '* @x', False, '双维护者 + review≥1 + code owner 审查 + 通配覆盖'),
     (2, None, '', True, '双维护者 + 无 review + 无 CODEOWNERS'),
     (2, {'required_approving_review_count': 1}, '/docs/ @x', True,
      '双维护者 + review 但 CODEOWNERS 只覆盖 docs'),
     (2, {'required_approving_review_count': 0}, '/scripts/ @x', True, '双维护者 + review 人数 0'),
     (2, None, ALL_GATES_CODEOWNERS, True,
      '双维护者 + 无 review + CODEOWNERS 全覆盖（隔离 review 维度，独立复核追改）'),
+    (2, {'required_approving_review_count': 1, 'require_code_owner_reviews': False},
+     ALL_GATES_CODEOWNERS, True,
+     '双维护者 + review≥1 但没要求 code owner 审查（CODEOWNERS 是装饰，隔离新维度）'),
 ]
 
 
+def protection_payload(fix_text):
+    """从翻转命令文本里抽出分支保护 JSON 载荷；抽不到或不是合法 JSON 时返回 None。"""
+    match = re.search(r'\{.*\}', fix_text)
+    if not match:
+        return None
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+
+
+def template_problems():
+    """翻转模板与门禁链的自洽性（issue #78）：CODEOWNERS 模板必须覆盖磁盘全部门禁
+    路径、protection 载荷必须要求 code owner 审查——模板与 gate_paths() 漂移即红，
+    将来加新钩子/新门禁却忘记改模板会被这里抓住。"""
+    problems = []
+    paths = gate_paths()
+    covered = codeowners_covers(TEAM_CODEOWNERS_FIX, paths)
+    uncovered = [path for path in paths if path not in covered]
+    if uncovered:
+        problems.append('TEAM_CODEOWNERS_FIX 模板未覆盖门禁路径：' + '、'.join(uncovered))
+    payload = protection_payload(TEAM_PROTECTION_FIX)
+    if payload is None:
+        problems.append('TEAM_PROTECTION_FIX 里抽不出合法的分支保护 JSON 载荷')
+    elif ((payload.get('required_pull_request_reviews') or {})
+          .get('require_code_owner_reviews') is not True):
+        problems.append('TEAM_PROTECTION_FIX 载荷没要求 code owner 审查'
+                        '（require_code_owner_reviews 不为 true）')
+    return problems
+
+
 def self_test():
-    """离线 A/B 夹具：CODEOWNERS 匹配器 8 组 + 两态复核政策 9 组（issue #78）。
+    """离线 A/B 夹具：CODEOWNERS 匹配器 + 两态复核政策 + 翻转模板自洽（issue #78）。
 
     政策夹具按「维度隔离」设计：每条断言分支至少有一组只暴露该维度的用例
-    （双人态 review 断言由「全覆盖 + 无 review」隔离，混因用例不替代隔离用例）。
+    （双人态 review 断言由「全覆盖 + 无 review」隔离，混因用例不替代隔离用例）；
+    code owner 审查维度同理，由「review≥1 + 全覆盖 + 没要求 code owner 审查」隔离。
     """
     failures = []
     for text, paths, expected in MATCHER_FIXTURES:
@@ -337,11 +399,13 @@ def self_test():
         if bool(problems) != expect_problem:
             failures.append(f'政策夹具「{name}」：期望{"有" if expect_problem else "无"}问题，'
                             f'实得 {problems or "无"}')
+    for problem in template_problems():
+        failures.append(f'翻转模板自洽：{problem}')
     if failures:
         for line in failures:
             print(f'SELF-TEST FAIL {line}')
         return 1
-    print('SELF-TEST OK CODEOWNERS 匹配器与两态复核政策的 A/B 夹具全部符合预期')
+    print('SELF-TEST OK CODEOWNERS 匹配器、两态复核政策与翻转模板自洽的 A/B 夹具全部符合预期')
     return 0
 
 
@@ -349,7 +413,7 @@ def main():
     parser = argparse.ArgumentParser(description='仓库平台侧设置只读探测（issue #58 / #78）')
     parser.add_argument('--branch', default='slim', help='受保护的分支名（默认 slim）')
     parser.add_argument('--self-test', action='store_true',
-                        help='离线 A/B 夹具：CODEOWNERS 匹配器 + 两态复核政策')
+                        help='离线 A/B 夹具：CODEOWNERS 匹配器 + 两态复核政策 + 翻转模板自洽')
     args = parser.parse_args()
     if args.self_test:
         return self_test()

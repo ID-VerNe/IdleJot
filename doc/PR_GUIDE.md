@@ -133,7 +133,7 @@ python scripts/check_gate_change_review.py --base origin/slim --body-file <PR �
 
 没有 PR 上下文（本机 parity、`push` 事件）时它打印 `SKIP` 并放行——校验只在有正文的 PR 上有意义。
 
-> 平台侧强制由 `scripts/check_repo_settings.py` 钉住（`manual` 档，合并前后本机跑，`--self-test` 离线验夹具）：可合并维护者（有 push 权限的 collaborator）只有 1 人时，断言「分支保护不要求 review、`.github/CODEOWNERS` 不覆盖门禁路径」——单人下建 CODEOWNERS 等价于自己给自己放行，没要求 review 时它更不产生强制、只制造虚假安全感；此时复核靠「不同上下文的 agent + 结论贴 PR」这一条。出现第二个维护者时该门禁转红，按它打印的命令翻转：CODEOWNERS 把 `/scripts/check_*.py`、`/scripts/gates.json`、`/scripts/run_gates.py`、`/.github/workflows/ci.yml` 归维护者，分支保护 `required_pull_request_reviews` 至少 1 人。翻转后平台强制生效，两态断言随维护者数量自动切换，设置漂移即红（issue #78）。
+> 平台侧强制由 `scripts/check_repo_settings.py` 钉住（`manual` 档，合并前后本机跑，`--self-test` 离线验夹具）：可合并维护者（有 push 权限的 collaborator）只有 1 人时，断言「分支保护不要求 review、`.github/CODEOWNERS` 不覆盖门禁路径」——单人下建 CODEOWNERS 等价于自己给自己放行，没要求 review 时它更不产生强制、只制造虚假安全感；此时复核靠「不同上下文的 agent + 结论贴 PR」这一条。出现第二个维护者时该门禁转红，按它打印的命令翻转：CODEOWNERS 把 `/scripts/check_*.py`、`/scripts/gates.json`、`/scripts/run_gates.py`、`/.github/workflows/ci.yml` 与 `/.githooks/`（钩子是门禁执行入口：发布门禁与每推送 sha 的 CI 等价复跑都从那里起，改钩子同样能静默削弱门禁链）归维护者，分支保护 `required_pull_request_reviews` 至少 1 人且 `require_code_owner_reviews` 为 true——少了后者 CODEOWNERS 只是装饰，任意有合并权限者都能批门禁改动。翻转后平台强制生效，两态断言随维护者数量自动切换，设置漂移即红；`--self-test` 另校验翻转模板与磁盘门禁路径零漂移、且 protection 载荷要求 code owner 审查（issue #78）。
 
 ## 开 PR 前自查
 

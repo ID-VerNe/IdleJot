@@ -423,7 +423,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 69 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
 | 70 | `reply` | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
 
-共 70 个 CI 门禁，分 5 个分片（`static` 14、`runtime` 15、`mcp` 16、`storage` 9、`reply` 16）；`manual` 15、`stale` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
+共 70 个 CI 门禁，分 5 个分片（`static` 14、`runtime` 15、`mcp` 16、`storage` 9、`reply` 16）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
 <!-- gates:ci:end -->
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

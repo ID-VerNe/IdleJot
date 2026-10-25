@@ -29,7 +29,7 @@
 11. 文档（`AGENTS.md` / `README.md` / `.agents/rules/water_group.md` / `SKILL.md`）
     里的 `--timeout` 示例不得超预算——Agent 照抄的是它们，不是源码。守护脚本里的
     字符串字面量（`up.py --status` 的提示串）同扫，注释与 docstring 不算推荐值。
-    仓外那份私有 SOP 口径不同，由第 17 条单扫。
+    仓外那份私有 SOP 口径不同，由第 19 条单扫。
 12. `watch.py` 裸跑时的 `--timeout` 默认值同样不超预算，且 argparse 的实际 default
     必须等于模块常量（写死 `default=240` 而常量仍是 90 会绕过第 8 条）。
 13. `--status` 的「监听」行必须带上每个监听**实际的** `--timeout`（issue #86）：
@@ -38,14 +38,23 @@
 15. `listen.py` 显式传超预算 `--timeout` 时自己打 WARN（与 `reply.py --wait` 同口径），
     预算内的取值不得出现 WARN。
 16. 探针必须从**真实进程**的命令行里读出 `--timeout`（WMI 那条查询曾经只取 pid）。
-17. 仓外的私有 SOP（`~/.water-group/rules/*.md`）里的示例命令同样不得超预算——
+17. 默认形态（不传 `--cycles`）自己就能回来：rc=0、只跑一轮、末行 `NO_WORK` +
+    `RESTART:`。整次调用的等待额度由所有轮次共享，不能每轮领一份新的（issue #88）。
+18. 不限轮数（`--cycles 0`）也得在额度内收手，不是不等就是被宿主砍掉。
+19. `clamp_wait()` 只给事实：额度用尽时返回 0，已经过去的时间要从额度里扣掉，
+    超预算的取值压回额度内；`listen.py --cycles` 的 argparse 实际 default 必须是 1
+    （写死 `default=0` 就退回无限轮）。
+20. `clamp_wait()` 算出来的秒数必须真的交给 `watch.py`，而且打印的秒数要跟它
+    一致：只断言「函数算得对」时，把实等改回传入值仍全绿（issue #88 复核）。
+
+19. 仓外的私有 SOP（`~/.water-group/rules/*.md`）里的示例命令同样不得超预算——
     它是 Agent「动手前先读」的最高权威文档，却不在第 11 条的扫描范围里，于是
     权威路径反向：仓库说 90、私有 SOP 说 240 / 300（issue #87）。扫的是**可照抄
     的片段**（围栏代码块的整行 + 行内代码），不是全文：私有文档里有「`--wait 180`
     会被砍掉」这类故意讲反面的解释，全文正则扫会误报。私有库不存在时跳过。
-18. 私有 SOP 的扫描器**、接线与模块级绑定**都必须真能报出漂移：脏样本必被抓，
+20. 私有 SOP 的扫描器**、接线与模块级绑定**都必须真能报出漂移：脏样本必被抓，
     干净样本与反面示例必被放过，判定层的跳过条件、模块级绑定的取根时机与
-    `@case` 注册也必被覆盖。否则第 17 条在 CI 上（没有私有库）就是永远绿的空壳。
+    `@case` 注册也必被覆盖。否则第 19 条在 CI 上（没有私有库）就是永远绿的空壳。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -67,12 +76,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # `import check_fixture_support` 之前先把 env 里的数据根**记下来**：那模块在 import 期
 # 会把它钉成临时目录，事后只剩夹具目录。这里记的是「import 之前真实的那些值」，
-# 契约 18 用它们当锚点——验「模块级的 PRIVATE_HOME 仍由它们解析而来」。
+# 契约 20 用它们当锚点——验「模块级的 PRIVATE_HOME 仍由它们解析而来」。
 # 锚点只用公开信息（env + 家目录），不碰别的模块的私有变量：绑在
 # `check_fixture_support._PINNED_HOME` 上时，那变量一旦改名，锚点就静默消失。
 # 两条腿都要记：`WATER_GROUP_HOME` 与 `IDLEJOT_WG_HOME`（后者是
 # `scripts/check_publication.py` 认的正式候选）。少记一条，锚点在只设了那条的
-# 机器上就会算出另一个根，契约 18 平白变红。
+# 机器上就会算出另一个根，契约 20 平白变红。
 _PRE_WGH = os.environ.get("WATER_GROUP_HOME")
 _PRE_IWGH = os.environ.get("IDLEJOT_WG_HOME")
 
@@ -562,12 +571,140 @@ def 常驻周期不长于等待预算():
 
 
 @case
+def 默认路径自己返回():
+    """默认形态（不传 `--cycles`）必须在预算内自己返回（issue #88）。
+
+    #88 之前 `--cycles` 的 argparse default 是 0 = 不限轮，`while True` 永远
+    转下去：宿主在 120s 处截断这次调用，进程树连同 `watch.py` 一起被杀，监听
+    就此静默消失——而 `--status` 在那之前一直报「已挂」。本门禁里调 `listen.py`
+    的契约全都显式带 `--cycles 1`，默认路径一次都没被测过，这里补上。
+
+    断言不是「有输出」，而是「自己回来了」：rc=0、只跑了 1 轮、末行 `NO_WORK`
+    + `RESTART:`。timeout 给 30s 而不是默认的 120s：回归时要快速变红，而不是把
+    整条门禁挂到超时。
+    """
+    with temp_dir(prefix="wg-rehang-") as home:
+        fixture_home(home)
+        proc = run_script(home, "listen.py", "--timeout", "1", timeout=30)
+    out = proc.stdout
+    return (proc.returncode == 0
+            and len(re.findall(r"第 \d+ 轮", out)) == 1
+            and index_of(out, "NO_WORK") >= 0
+            and index_of(out, "RESTART:") > index_of(out, "NO_WORK"))
+
+
+@case
+def 不限轮数也在额度内收手():
+    """`--cycles 0`（不限轮数）也得在额度内收手（issue #88）。
+
+    「不限轮数」在 #88 之前是字面意思上的无限：整次调用永不返回，等宿主来砍，
+    进程树连同子监听一起死。这里把预算压到 1s、每轮只花 0.2s，断言它自己收手
+    （`NO_WORK` + `RESTART:` + 一行说明），而不是把整次调用拖到宿主超时。
+
+    压预算、假扮 `watch.py`（返回 2 = 静默超时）是刻意的：真实额度 90s，CI 跑
+    满要 90s，而这条要测的恰恰是「自己收手」这个分支。假扮的 `watch.py` 另有
+    一个 50 轮上限：回归时（循环没有收手点）要在第 51 轮抛错变红，而不是把整条
+    门禁挂死——挂死的门禁比红的门禁难查得多。
+    """
+    originals = (wg_budget.WAIT_BUDGET, listen.run, sys.argv)
+    calls = []
+
+    def fake_run(script, *args):
+        calls.append(script)
+        if len(calls) > 50:
+            raise RuntimeError("轮数没有收手：50 轮之后仍在循环")
+        time.sleep(0.2)
+        return 2
+
+    buf = io.StringIO()
+    try:
+        wg_budget.WAIT_BUDGET = 1
+        listen.run = fake_run
+        sys.argv = ["listen.py", "--timeout", "1", "--cycles", "0", "--no-digest"]
+        with contextlib.redirect_stdout(buf):
+            code = listen.main()
+    finally:
+        wg_budget.WAIT_BUDGET, listen.run, sys.argv = originals
+    out = buf.getvalue()
+    return (code == 0 and "NO_WORK" in out and "RESTART:" in out
+            and "等待额度" in out)
+
+
+@case
+def 轮数上限由等待预算决定():
+    """整次调用的等待额度是所有轮次共享的**总额**（issue #88）。
+
+    `AGENTS.md` 写的是「单次调用最多能等 WAIT_BUDGET=90」，所以这一轮能等多少
+    要减掉已经过去的部分，而不是每轮都领一份新的额度。这里钉住四件事：额度用尽
+    时返回 0（调用方该收手）、已经过去的时间要扣掉、超预算的取值压回额度内、
+    以及 `listen.py --cycles` 的 argparse **实际** default 必须是有界的 1。
+
+    最后一条用 `_arg_default` 解析 argparse 自己的 `default=`：只断言模块常量
+    不够，写死 `default=0` 而别处仍留 1 时，「常量有界」照样绿（#83 的同类坑）。
+    """
+    wait_budget = wg_budget.WAIT_BUDGET
+    return (wg_budget.clamp_wait(10, 0) == 10
+            and wg_budget.clamp_wait(wait_budget, 0) == wait_budget
+            and wg_budget.clamp_wait(10, wait_budget) == 0
+            and wg_budget.clamp_wait(10, wait_budget + 5) == 0
+            and wg_budget.clamp_wait(10, wait_budget - 5) == 5
+            and wg_budget.clamp_wait(wait_budget * 2, 0) == wait_budget
+            # 已经过去的时间不能是负数：负 elapsed 会让额度凭空多出一截
+            # （clamp_wait(300, -5) 曾等于 95 > WAIT_BUDGET），负值按 0 算。
+            and wg_budget.clamp_wait(wait_budget * 2, -5) == wait_budget
+            and _arg_default("water-group/daemon/listen.py", "--cycles") == 1)
+
+
+@case
+def 传给watch的秒数被额度夹住():
+    """`clamp_wait()` 的结果必须真的用在 `watch.py` 上（issue #88）。
+
+    只断言「`clamp_wait()` 算得对」不够：把 `run("watch.py", "--timeout", str(wait))`
+    改回 `str(args.timeout)`，前十九条照样全绿（变异实测），而 `--timeout 300` 时
+    `watch.py` 实等 300s > 宿主 120s —— 进程树连同子监听一起被杀、监听静默消失，
+    正是 #88 的症状。所以这里钉两条：**实收秒数 ≤ 预算**，且**打印的秒数 == 实收
+    秒数**（后者挡住「打印按夹住的值、实等按传入的值」这种半改）。
+
+    样本必须用**超预算**的取值：`--timeout 90` 恰好等于额度，压不出差异，测了
+    等于没测。
+
+    `listen.run` 被换成探针（返回 2 = 静默超时），所以这条不真的等 90s；断言的是
+    「算出来的秒数被交出去」而不是「等够了那么久」。
+    """
+    originals = (listen.run, sys.argv)
+    seen = []
+
+    def spy(script, *args):
+        seen.append((script, args))
+        return 2
+
+    buf = io.StringIO()
+    try:
+        listen.run = spy
+        sys.argv = ["listen.py", "--timeout", "300", "--cycles", "1", "--no-digest"]
+        with contextlib.redirect_stdout(buf):
+            code = listen.main()
+    finally:
+        listen.run, sys.argv = originals
+
+    out = buf.getvalue()
+    passed = [int(args[args.index("--timeout") + 1])
+              for script, args in seen
+              if script == "watch.py" and "--timeout" in args]
+    printed = next((ln for ln in lines(out) if ln.startswith("等最多")), "")
+    return (code == 0 and passed
+            and max(passed) <= wg_budget.WAIT_BUDGET
+            and f"等最多 {max(passed)}s" in printed)
+
+
+@case
 def 等待开始前声明边界():
     """进入 `watch.py` 之前必须说一句「在等、等多久」（issue #83）。
 
-    这条是 issue 的决定性一条：`listen.py` 按设计不返回，群里一直安静时宿主迟早
-    会截断这次调用，而截断路径上一个字都不打印。所以断言不是「有输出」，而是
-    「等待开始那一句在 `TIMEOUT` 之前就出来了」——被砍掉时它是唯一的痕迹。
+    这条是 issue 的决定性一条：`listen.py` 按设计有界（issue #88 之前是「按设计
+    不返回」），但调用方仍可能显式要一个装不下的取值——那种情况下宿主迟早会截断
+    这次调用，而截断路径上一个字都不打印。所以断言不是「有输出」，而是「等待开始
+    那一句在 `TIMEOUT` 之前就出来了」——被砍掉时它是唯一的痕迹。
 
     锚点必须是 `TIMEOUT`（`watch.py` 等完之后才打的那行），不能用 `NO_WORK`：
     两者都在等待之后，把这句话挪到 `run()` 下面仍然会排在 `NO_WORK` 前面，
@@ -631,7 +768,7 @@ def 示例命令不超预算():
     文档按正则在原文上扫；守护脚本只扫**字符串字面量**（AST，跳过 docstring 与
     注释）：注释里写「300s 会怎样」是解释，不是推荐值，按原文扫会把解释也判红。
 
-    仓外那份私有 SOP 口径不同，由第 17 条单扫（见「私有SOP示例不超预算」）。
+    仓外那份私有 SOP 口径不同，由第 19 条单扫（见「私有SOP示例不超预算」）。
     """
     over = []
     for rel in DOC_SAMPLES:
@@ -832,7 +969,7 @@ def 私有SOP扫描器能识别漂移():
                       and ("water_group.md", 5) in hits
                       and ("water_group.md", 4) not in hits)
 
-        # 2) 接线：调契约 17 的函数体，脏根必须红，干净根与不存在的根必须绿
+        # 2) 接线：调契约 19 的函数体，脏根必须红，干净根与不存在的根必须绿
         saved_home = PRIVATE_HOME
         try:
             with contextlib.redirect_stdout(io.StringIO()):
@@ -858,7 +995,7 @@ def 私有SOP扫描器能识别漂移():
         #    必须仍由它解析而来。取根时机一旦被颠倒，它会落回夹具目录，issue #87
         #    的盲区原样重现——而上面三层验的都是函数，照样全绿。
         #    两条腿都要喂（WATER_GROUP_HOME 与 IDLEJOT_WG_HOME）：少喂一条，
-        #    只设了那条的机器上锚点会算出另一个根，契约 18 平白变红。
+        #    只设了那条的机器上锚点会算出另一个根，契约 20 平白变红。
         expected_home = _live_private_home({"WATER_GROUP_HOME": _PRE_WGH,
                                             "IDLEJOT_WG_HOME": _PRE_IWGH})
         bound_ok = PRIVATE_HOME == expected_home

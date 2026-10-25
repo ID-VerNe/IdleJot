@@ -10,17 +10,26 @@ that never returns is invisible: it can be digesting for an hour and the agent
 that started it will never know. Returning turns "something happened" into a
 completion the caller actually observes.
 
+Bounded, not just exiting (issue #88): one call may wait for the whole budget,
+but not more -- the budget is a total shared by every round, not a fresh
+allowance per round. An unbounded loop was the same silent failure as a
+never-exiting process: the host cut the call at its own timeout and the whole
+process tree went with it, so the listener was gone while everything still
+looked fine.
+
 That design only works if the caller knows the next step, which it used to have
 to remember (issue #69). So every exit ends with a ``RESTART:`` line the caller
 can paste as-is: the exit itself stays the same, and "the listener is gone"
 stops looking exactly like "nothing happened".
 
 Exit codes:
-  0  there is work -- a wake was printed, or the dossier is due
+  0  there is work -- a wake was printed, or the dossier is due -- or the
+     wait is over and nothing happened
   1  the event stream is unreadable, or a child could not be started
 """
 import argparse
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -51,7 +60,8 @@ def python_exe():
 def restart_hint(timeout):
     """打印一行可直接粘贴的重挂命令。
 
-    listen.py 按设计只活一轮；Agent 读到 WAKE 之后去回消息、读图，下一次
+    listen.py 按设计有界：默认跑完一轮就退出（issue #88 之前默认是无限轮，
+    整次调用装不进一次工具调用）。Agent 读到 WAKE 之后去回消息、读图，下一次
     挂载全靠记性——2026-10-24 一晚上因此掉了 3 次（issue #69）。把「下一步」
     写在退出输出里，就不需要任何记忆：唤醒与重挂指令出现在同一块文本里。
 
@@ -96,7 +106,9 @@ def main():
     parser = argparse.ArgumentParser(description="等消息；闲下来就沉淀积压，有事就退出叫人")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
                         help=f"每轮静默等待多少秒（默认 {DEFAULT_TIMEOUT}，即等待预算）")
-    parser.add_argument("--cycles", type=int, default=0, help="最多循环几轮，0 表示不限（调试用）")
+    parser.add_argument("--cycles", type=int, default=1,
+                        help="最多循环几轮（默认 1；0 表示不限轮数，但仍受整次调用"
+                             "共享的等待额度约束）")
     parser.add_argument("--no-digest", action="store_true",
                         help="超时后不沉淀、不查档案，只等（给 reply.py --wait 用）")
     args = parser.parse_args()
@@ -104,22 +116,37 @@ def main():
     # 显式的超预算取值自己说一声（issue #86）。`reply.py --wait` 早就有这行 WARN，
     # `listen.py` 没有——同一个预算、两种静默，而这里正是那个会被静默截断的进程。
     # 必须打在等待之前：被宿主截断的路径上一个字都不会再打印（issue #83）。
+    #
+    # 后半句是按「会不会真被截断」写的（issue #88 合并上游后改）：超预算的取值
+    # 会被压回等待预算（`clamp_wait` 管单轮），所以这里**不会**因此被截断——
+    # 照旧写「很可能被截断」就是一句假话，而输出里的假话比没有输出更坏。
     if wg_budget.over_budget(args.timeout):
         print(f"WARN: --timeout {args.timeout}s 加上发送余量 {wg_budget.SEND_BUDGET}s 已超过"
-              f"常见工具调用超时 {wg_budget.AGENT_TOOL_TIMEOUT}s，很可能在拿到唤醒之前被截断",
+              f"常见工具调用超时 {wg_budget.AGENT_TOOL_TIMEOUT}s；本次已压回等待预算 "
+              f"{wg_budget.WAIT_BUDGET}s（issue #88），不会因此被截断",
               flush=True)
 
     cycles = 0
+    started = time.monotonic()
     while True:
+        # 这一轮实际能等多久：额度 WAIT_BUDGET 是整次调用共享的**总额**
+        # （issue #88），由所有轮次分摊，不是每轮领一份新的。
+        wait = wg_budget.clamp_wait(args.timeout, time.monotonic() - started)
+        if wait <= 0:
+            # 额度用尽：自己收手。等宿主来砍的话，进程树会连同 watch.py 一起死，
+            # 监听就此静默消失，而 `--status` 在那之前一直报「已挂」（issue #88）。
+            print("NO_WORK")
+            print(f"这一轮等不下去了（每轮要等 {args.timeout}s、等待额度 "
+                  f"{wg_budget.WAIT_BUDGET}s，已跑 {cycles} 轮），本次调用到此为止")
+            restart_hint(args.timeout)
+            return 0
         cycles += 1
-
-        # 等待开始前把边界说出来（issue #83）。listen.py 按设计不返回：群里一直
-        # 安静时宿主迟早会截断这次调用，而截断路径上 run_passthrough 不会回写任何
-        # 输出 —— 「我挂上了、正在等」这句话只能打在等待之前。
-        print(f"等最多 {args.timeout}s（第 {cycles} 轮）…"
+        # 等待开始前把边界说出来（issue #83）。边界这句话只能打在等待之前——
+        # 一旦被截断，run_passthrough 不会回写任何输出。
+        print(f"等最多 {wait}s（第 {cycles} 轮）…"
               f"若宿主超时短于此值，本进程会连同 watch.py 一起被杀，本行之后不会再有输出",
               flush=True)
-        rc = run("watch.py", "--timeout", str(args.timeout))
+        rc = run("watch.py", "--timeout", str(wait))
         if rc == 0:
             # watch.py already printed the wake lines and the closing WAKE, and
             # run() wrote that block out in one piece. Printing WAKE again here

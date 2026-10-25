@@ -1131,18 +1131,35 @@ def 私有SOP扫描器能识别漂移():
     CI 上没有私有库 →「私有SOP示例不超预算」恒绿；没有这条自检，就分不清「没问题」
     和「根本没扫」。四层都要验：
 
-    1. 扫描器：脏的被抓、干净的放过、反面示例（`` `--wait 180` 会被砍掉 ``）放过；
+    1. 扫描器：脏的被抓、干净的放过、反面示例（超预算但不点名的行内代码）放过；
     2. 接线：**直接调用上面那条契约的函数体**（把数据根换掉），脏的必须红，
        干净的与不存在的根必须绿；
     3. 根解析：`WATER_GROUP_HOME` / `IDLEJOT_WG_HOME` 指到哪，数据根就该解析到哪；
+       **家目录兜底腿（`~/.water-group`）也要认**——它的期望值不经被测函数自己算，
+       否则兜底腿被删掉或改指别处时这一层照样绿，而 `PRIVATE_HOME` 变 `None`
+       会让判定层静默跳过，issue #87 的盲区原样重现；
     4. 模块级绑定与注册：`PRIVATE_HOME` 必须仍由 import **之前**记下的 env 值解析
        而来（取根时机被颠倒时它会落进夹具目录，issue #87 的盲区原样重现）、
        本机有私有库时不能是 `None`、契约本身不能从 `CASES` 里被摘掉。
+       锚点按口径**独立拼装**，不经被测函数自己算（自指就等于没测）。
 
     第 2 层刻意直接调函数体而不是复制它的逻辑：把契约改成永远 `return True`，
     或者把跳过条件放宽，复制逻辑的自检照样绿，直接调就会红。第 4 层同理：
     前三层验的都是函数，模块级的绑定与注册出了错，它们照样全绿。
+
+    **夹具样本的秒数取自 `wg_budget.WAIT_BUDGET` 的相对值，不写死具体数字**
+    （脏 = 预算 +1、干净 = 预算本身、反面示例 = 预算 +2）。写死会让这条自检
+    在**预算常量一改**时假红：脏样本不再是「超预算」的那一侧，判定层就不再
+    报它，自检随之变红——而预算变化本身并不是本次改动坏了（同一个坑：
+    #79 的「默认 240s」、#83 的「--timeout 300」）。
     """
+    # 脏样本必须**恰好超预算一格**；干净样本**恰好等于预算**（判定层是严格
+    # `> WAIT_BUDGET`，等于不算超）；反面示例要比脏样本还大，确保它在任何
+    # 预算下都是「超预算」的值 —— 它该被放过的理由是**没有点名 daemon 脚本**，
+    # 不是「值不够大」。
+    over_val = wg_budget.WAIT_BUDGET + 1
+    clean_val = wg_budget.WAIT_BUDGET
+    counter_val = wg_budget.WAIT_BUDGET + 2
     with temp_dir(prefix="wg-sop-selftest-") as home:
         dirty_root = home / "dirty-root"
         clean_root = home / "clean-root"
@@ -1150,17 +1167,17 @@ def 私有SOP扫描器能识别漂移():
             (root / "rules").mkdir(parents=True, exist_ok=True)
         (dirty_root / "rules" / "water_group.md").write_text(
             "```bash\n"
-            "python water-group/daemon/watch.py --timeout 240\n"
+            f"python water-group/daemon/watch.py --timeout {over_val}\n"
             "```\n"
-            "工具调用有超时上限，`--wait 180` 会被砍掉。\n"
-            "但 `reply.py <id> \"<正文>\" --wait 240` 是推荐写法。\n",
+            f"工具调用有超时上限，`--wait {counter_val}` 会被砍掉。\n"
+            f"但 `reply.py <id> \"<正文>\" --wait {over_val}` 是推荐写法。\n",
             encoding="utf-8")
         (clean_root / "rules" / "water_group.md").write_text(
             "```bash\n"
-            "python water-group/daemon/watch.py --timeout 90\n"
+            f"python water-group/daemon/watch.py --timeout {clean_val}\n"
             "```\n"
-            "工具调用有超时上限，`--wait 180` 会被砍掉。\n"
-            "但 `reply.py <id> \"<正文>\" --wait 90` 是推荐写法。\n",
+            f"工具调用有超时上限，`--wait {counter_val}` 会被砍掉。\n"
+            f"但 `reply.py <id> \"<正文>\" --wait {clean_val}` 是推荐写法。\n",
             encoding="utf-8")
 
         # 1) 扫描器：脏的被抓、反面示例放过
@@ -1184,21 +1201,39 @@ def 私有SOP扫描器能识别漂移():
             globals()["PRIVATE_HOME"] = saved_home
         wired_ok = dirty_red and clean_green and missing_green
 
-        # 3) 根解析：env 指到哪就解析到哪（两条腿都要认）
+        # 3) 根解析：env 指到哪就解析到哪。**三条腿都要认**——两条 env 腿
+        #    （`WATER_GROUP_HOME` / `IDLEJOT_WG_HOME`）之外还有家目录兜底腿
+        #    （`~/.water-group`）。兜底腿的**期望值不经被测函数自己算**：
+        #    直接按口径拼出 `Path.home()/".water-group"`，再拿被测函数的解析
+        #    结果来比。否则这一层自指（用 `_live_private_home` 算期望值），
+        #    兜底腿被删掉或改指别处时它照样绿——而 `PRIVATE_HOME` 会变 None，
+        #    判定层随即静默跳过，issue #87 的盲区原样重现。
         resolved = _live_private_home({"WATER_GROUP_HOME": str(dirty_root)})
         root_ok = resolved is not None and Path(resolved) == dirty_root
         resolved_alt = _live_private_home({"IDLEJOT_WG_HOME": str(dirty_root)})
         root_ok = root_ok and (resolved_alt is not None
                                and Path(resolved_alt) == dirty_root)
+        # 兜底腿：喂空 env → 只剩家目录腿可用。家目录本身不存在时这条腿
+        # 压根不成立，跳过（CI 与全新机器都属正常情况）。
+        home_leg = Path.home() / ".water-group"
+        if home_leg.is_dir():
+            resolved_home = _live_private_home({})
+            root_ok = root_ok and (resolved_home is not None
+                                   and Path(resolved_home) == home_leg)
 
         # 4) 模块级绑定与注册：取根时机被颠倒 / 绑定被置空 / case 注册被摘掉。
         #    锚点是 import 之前记下的 env 快照（公开信息）：模块级的 PRIVATE_HOME
         #    必须仍由它解析而来。取根时机一旦被颠倒，它会落回夹具目录，issue #87
         #    的盲区原样重现——而上面三层验的都是函数，照样全绿。
-        #    两条腿都要喂（WATER_GROUP_HOME 与 IDLEJOT_WG_HOME）：少喂一条，
+        #    两条 env 腿都要喂（WATER_GROUP_HOME 与 IDLEJOT_WG_HOME）：少喂一条，
         #    只设了那条的机器上锚点会算出另一个根，契约 27 平白变红。
-        expected_home = _live_private_home({"WATER_GROUP_HOME": _PRE_WGH,
-                                            "IDLEJOT_WG_HOME": _PRE_IWGH})
+        #    锚点**不经被测函数自己算**（`_live_private_home` 自指 = 它自己坏了
+        #    也测不出来）：按口径独立拼出三腿里第一个真是目录的那个。
+        expected_home = None
+        for cand in (_PRE_WGH, _PRE_IWGH, str(Path.home() / ".water-group")):
+            if cand and Path(cand).is_dir():
+                expected_home = Path(cand)
+                break
         bound_ok = PRIVATE_HOME == expected_home
         registered_ok = 私有SOP示例不超预算 in CASES
 

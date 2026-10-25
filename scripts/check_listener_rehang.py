@@ -37,9 +37,9 @@
     权威路径反向：仓库说 90、私有 SOP 说 240 / 300（issue #87）。扫的是**可照抄
     的片段**（围栏代码块的整行 + 行内代码），不是全文：私有文档里有「`--wait 180`
     会被砍掉」这类故意讲反面的解释，全文正则扫会误报。私有库不存在时跳过。
-14. 私有 SOP 的扫描器**与接线**都必须真能报出漂移：脏样本必被抓，干净样本与反面
-    示例必被放过，判定层的跳过条件也必被覆盖。否则第 13 条在 CI 上（没有私有库）
-    就是永远绿的空壳。
+14. 私有 SOP 的扫描器**、接线与模块级绑定**都必须真能报出漂移：脏样本必被抓，
+    干净样本与反面示例必被放过，判定层的跳过条件、模块级绑定的取根时机与
+    `@case` 注册也必被覆盖。否则第 13 条在 CI 上（没有私有库）就是永远绿的空壳。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -231,6 +231,16 @@ def _quoted_timeouts(rel):
                 and id(node) not in docs):
             found += re.findall(r"--timeout[ =](\d+)", node.value)
     return found
+
+
+def _is_under(child, parent):
+    """`child` 是否落在 `parent` 之内（含相等）。"""
+    try:
+        child = Path(child).resolve()
+        parent = Path(parent).resolve()
+    except OSError:
+        return False
+    return child == parent or parent in child.parents
 
 
 def _sop_snippets(text):
@@ -628,15 +638,19 @@ def 私有SOP扫描器能识别漂移():
     （issue #87）。
 
     CI 上没有私有库 →「私有SOP示例不超预算」恒绿；没有这条自检，就分不清「没问题」
-    和「根本没扫」。三层都要验：
+    和「根本没扫」。四层都要验：
 
     1. 扫描器：脏的被抓、干净的放过、反面示例（`` `--wait 180` 会被砍掉 ``）放过；
     2. 接线：**直接调用上面那条契约的函数体**（把数据根换掉），脏的必须红，
        干净的与不存在的根必须绿；
-    3. 根解析：`WATER_GROUP_HOME` 指到哪，数据根就该解析到哪。
+    3. 根解析：`WATER_GROUP_HOME` 指到哪，数据根就该解析到哪；
+    4. 模块级绑定与注册：`PRIVATE_HOME` 不能落在夹具目录里（取根时机被颠倒时它
+       会落进去，issue #87 的盲区原样重现）、本机有私有库时不能是 `None`、
+       契约本身不能从 `CASES` 里被摘掉。
 
     第 2 层刻意直接调函数体而不是复制它的逻辑：把契约改成永远 `return True`，
-    或者把跳过条件放宽，复制逻辑的自检照样绿，直接调就会红。
+    或者把跳过条件放宽，复制逻辑的自检照样绿，直接调就会红。第 4 层同理：
+    前三层验的都是函数，模块级的绑定与注册出了错，它们照样全绿。
     """
     with temp_dir(prefix="wg-sop-selftest-") as home:
         dirty_root = home / "dirty-root"
@@ -683,7 +697,18 @@ def 私有SOP扫描器能识别漂移():
         resolved = _live_private_home({"WATER_GROUP_HOME": str(dirty_root)})
         root_ok = resolved is not None and Path(resolved) == dirty_root
 
-    return scanner_ok and wired_ok and root_ok
+        # 4) 模块级绑定与注册：取根时机被颠倒 / 绑定被置空 / case 注册被摘掉
+        pinned = getattr(check_fixture_support, "_PINNED_HOME", None)
+        bound_ok = True
+        if pinned is not None and PRIVATE_HOME is not None:
+            # 取根若发生在 `import check_fixture_support` 之后，PRIVATE_HOME 会落回
+            # 夹具目录 —— 仓外永远扫不到，issue #87 的盲区原样重现，而上面三层全绿。
+            bound_ok = not _is_under(PRIVATE_HOME, pinned)
+        if (Path.home() / ".water-group").is_dir() and PRIVATE_HOME is None:
+            bound_ok = False
+        registered_ok = 私有SOP示例不超预算 in CASES
+
+    return scanner_ok and wired_ok and root_ok and bound_ok and registered_ok
 
 
 def main():

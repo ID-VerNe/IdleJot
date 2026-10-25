@@ -37,8 +37,9 @@
     权威路径反向：仓库说 90、私有 SOP 说 240 / 300（issue #87）。扫的是**可照抄
     的片段**（围栏代码块的整行 + 行内代码），不是全文：私有文档里有「`--wait 180`
     会被砍掉」这类故意讲反面的解释，全文正则扫会误报。私有库不存在时跳过。
-14. 私有 SOP 扫描器必须真能报出漂移：脏样本必被抓，干净样本与反面示例必被放过。
-    否则第 13 条在 CI 上（没有私有库）就是永远绿的空壳。
+14. 私有 SOP 的扫描器**与接线**都必须真能报出漂移：脏样本必被抓，干净样本与反面
+    示例必被放过，判定层的跳过条件也必被覆盖。否则第 13 条在 CI 上（没有私有库）
+    就是永远绿的空壳。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -59,16 +60,19 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
-def _live_private_home():
+def _live_private_home(env=None):
     """真实的私有数据根（**必须在** import `check_fixture_support` 之前调用）。
 
     `check_fixture_support` 在 import 期把 `WATER_GROUP_HOME` 钉成临时目录（防夹具
     写进实机，issue #79/#89）。之后再取就只剩夹具目录，仓外的私有规则永远扫不到
     （issue #87）。口径与 `scripts/check_publication.py` / `scripts/check_tmp_hygiene.py`
     一致：env 优先，`~/.water-group` 兜底，只有真是目录才算数。
+
+    `env` 只给自检用（传一份假的 env 映射），生产路径走默认的 `os.environ`。
     """
-    for cand in (os.environ.get("WATER_GROUP_HOME"),
-                 os.environ.get("IDLEJOT_WG_HOME"),
+    source = os.environ if env is None else env
+    for cand in (source.get("WATER_GROUP_HOME"),
+                 source.get("IDLEJOT_WG_HOME"),
                  Path.home() / ".water-group"):
         if cand and Path(cand).is_dir():
             return Path(cand)
@@ -608,7 +612,7 @@ def 私有SOP示例不超预算():
     """
     if PRIVATE_HOME is None:
         return True
-    rules_dir = PRIVATE_HOME / "rules"
+    rules_dir = Path(PRIVATE_HOME) / "rules"
     if not rules_dir.is_dir():
         return True
     over = _private_sop_over_budget(rules_dir)
@@ -620,33 +624,66 @@ def 私有SOP示例不超预算():
 
 @case
 def 私有SOP扫描器能识别漂移():
-    """扫描器必须真能报出漂移，否则上面那条在 CI 上是永远绿的空壳（issue #87）。
+    """扫描器**与接线**都必须真能报出漂移，否则上面那条在 CI 上是永远绿的空壳
+    （issue #87）。
 
     CI 上没有私有库 →「私有SOP示例不超预算」恒绿；没有这条自检，就分不清「没问题」
-    和「根本没扫」。三份样本各自只该命中该命中的：脏的被抓、干净的放过、
-    反面示例（`` `--wait 180` 会被砍掉 ``）也放过。
+    和「根本没扫」。三层都要验：
+
+    1. 扫描器：脏的被抓、干净的放过、反面示例（`` `--wait 180` 会被砍掉 ``）放过；
+    2. 接线：**直接调用上面那条契约的函数体**（把数据根换掉），脏的必须红，
+       干净的与不存在的根必须绿；
+    3. 根解析：`WATER_GROUP_HOME` 指到哪，数据根就该解析到哪。
+
+    第 2 层刻意直接调函数体而不是复制它的逻辑：把契约改成永远 `return True`，
+    或者把跳过条件放宽，复制逻辑的自检照样绿，直接调就会红。
     """
     with temp_dir(prefix="wg-sop-selftest-") as home:
-        rules = home / "rules"
-        rules.mkdir(parents=True, exist_ok=True)
-        (rules / "dirty.md").write_text(
+        dirty_root = home / "dirty-root"
+        clean_root = home / "clean-root"
+        for root in (dirty_root, clean_root):
+            (root / "rules").mkdir(parents=True, exist_ok=True)
+        (dirty_root / "rules" / "water_group.md").write_text(
             "```bash\n"
             "python water-group/daemon/watch.py --timeout 240\n"
-            "```\n", encoding="utf-8")
-        (rules / "clean.md").write_text(
-            "```bash\n"
-            "python water-group/daemon/watch.py --timeout 90\n"
-            "```\n", encoding="utf-8")
-        (rules / "counter.md").write_text(
+            "```\n"
             "工具调用有超时上限，`--wait 180` 会被砍掉。\n"
             "但 `reply.py <id> \"<正文>\" --wait 240` 是推荐写法。\n",
             encoding="utf-8")
-        over = _private_sop_over_budget(rules)
-    hits = {(name, idx) for name, idx, _flag in over}
-    return (("dirty.md", 2) in hits
-            and ("counter.md", 2) in hits
-            and ("counter.md", 1) not in hits
-            and ("clean.md", 2) not in hits)
+        (clean_root / "rules" / "water_group.md").write_text(
+            "```bash\n"
+            "python water-group/daemon/watch.py --timeout 90\n"
+            "```\n"
+            "工具调用有超时上限，`--wait 180` 会被砍掉。\n"
+            "但 `reply.py <id> \"<正文>\" --wait 90` 是推荐写法。\n",
+            encoding="utf-8")
+
+        # 1) 扫描器：脏的被抓、反面示例放过
+        over = _private_sop_over_budget(dirty_root / "rules")
+        hits = {(name, idx) for name, idx, _flag in over}
+        scanner_ok = (("water_group.md", 2) in hits
+                      and ("water_group.md", 5) in hits
+                      and ("water_group.md", 4) not in hits)
+
+        # 2) 接线：调契约 13 的函数体，脏根必须红，干净根与不存在的根必须绿
+        saved_home = PRIVATE_HOME
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                globals()["PRIVATE_HOME"] = dirty_root
+                dirty_red = not 私有SOP示例不超预算()
+                globals()["PRIVATE_HOME"] = clean_root
+                clean_green = 私有SOP示例不超预算()
+                globals()["PRIVATE_HOME"] = None
+                missing_green = 私有SOP示例不超预算()
+        finally:
+            globals()["PRIVATE_HOME"] = saved_home
+        wired_ok = dirty_red and clean_green and missing_green
+
+        # 3) 根解析：env 指到哪就解析到哪
+        resolved = _live_private_home({"WATER_GROUP_HOME": str(dirty_root)})
+        root_ok = resolved is not None and Path(resolved) == dirty_root
+
+    return scanner_ok and wired_ok and root_ok
 
 
 def main():

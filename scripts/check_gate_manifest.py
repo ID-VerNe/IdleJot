@@ -255,13 +255,18 @@ def agents_problem(text, block):
 
 
 def tally_self_test(manifest):
-    """自检：把计数句里每个非 ci 档位逐个抠掉，断言检查器都会红（issue #90）。
+    """自检：把计数句里的档位逐个搞坏，断言检查器每次都会红（issue #90）。
 
     没有这一条，新增的断言可能写成「怎么跑都绿」；这一条保证它真能钉住
     原症状（生成器少列一档 → 报错）。
 
     逐档做而不是只锚 `dead`：档位集合以后可能变（退休一个档位），
     锚死单个档位名会误红。扣的是分号**之后**那段（分号前是分片名）。
+
+    两个方向都要测，缺一不可：
+    - 少列一档（档位名整个抠掉）——原 issue 的症状；
+    - 数字写错（档位名留着、数字 +1）——否则有人删掉数字比对断言时，
+      自检不会拦（抠档位名的场景照样让自检通过）。
     """
     block = render(manifest)
     lines = block.splitlines()
@@ -272,21 +277,35 @@ def tally_self_test(manifest):
     if '；' not in line:
         return ['自检失败：渲染结果的计数句缺少「；」分隔的档位计数部分']
     head, tail = line.split('；', 1)
+
+    def broken_tail_of(new_tail):
+        return '\n'.join(lines[:index] + [head + '；' + new_tail] + lines[index + 1:])
+
     problems = []
     for name in BUCKETS:
         if name == 'ci':
             continue
-        token = f'`{name}` '
-        if token not in tail:
+        pattern = re.compile(rf'`{re.escape(name)}`\s*(\d+)')
+        match = pattern.search(tail)
+        if not match:
             problems.append(f'自检失败：渲染结果的计数句里没有 {name} 档')
             continue
-        broken_tail = re.sub(rf'`{re.escape(name)}`\s*\d+', '', tail, count=1)
-        broken = '\n'.join(lines[:index] + [head + '；' + broken_tail] + lines[index + 1:])
-        found = tally_problems(manifest, broken)
+        # 方向一：少列一档（档位名整个抠掉）
+        found = tally_problems(manifest, broken_tail_of(pattern.sub('', tail, count=1)))
         if not found:
             problems.append(f'自检失败：计数句少列 {name} 档时检查器没有报错')
         elif not any(name in item for item in found):
             problems.append(f'自检失败：少列 {name} 档时报错没提到它：{found}')
+        # 方向二：数字写错（档位名留着，数字 +1）
+        wrong = str(int(match.group(1)) + 1)
+        found = tally_problems(
+            manifest,
+            broken_tail_of(tail[:match.start()] + f'`{name}` {wrong}' + tail[match.end():]),
+        )
+        if not found:
+            problems.append(f'自检失败：计数句 {name} 档数字写错时检查器没有报错')
+        elif not any(name in item for item in found):
+            problems.append(f'自检失败：{name} 档数字写错时报错没提到它：{found}')
     return problems
 
 

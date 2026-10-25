@@ -4,7 +4,7 @@
 之后没有任何东西保证下一次挂上：Agent 回消息、读图、写 issue 的几十秒里，
 @ 落进文件而没人看。三次都是用户主动问「是不是没挂上」才发现的。
 
-这条门禁钉十四个契约，任何一处退回旧行为都红：
+这条门禁钉住下面这些契约（编号是分组，一组里可能有多条断言），任何一处退回旧行为都红：
 
 1. `listen.py` 的每种退出（WAKE / NO_WORK / WATCH_FAILED）都以一行
    `RESTART: <python> water-group/daemon/listen.py --timeout N` 收尾，且短等待
@@ -29,17 +29,24 @@
 11. 文档（`AGENTS.md` / `README.md` / `.agents/rules/water_group.md` / `SKILL.md`）
     里的 `--timeout` 示例不得超预算——Agent 照抄的是它们，不是源码。守护脚本里的
     字符串字面量（`up.py --status` 的提示串）同扫，注释与 docstring 不算推荐值。
-    仓外那份私有 SOP 口径不同，由第 13 条单扫。
+    仓外那份私有 SOP 口径不同，由第 17 条单扫。
 12. `watch.py` 裸跑时的 `--timeout` 默认值同样不超预算，且 argparse 的实际 default
     必须等于模块常量（写死 `default=240` 而常量仍是 90 会绕过第 8 条）。
-13. 仓外的私有 SOP（`~/.water-group/rules/*.md`）里的示例命令同样不得超预算——
+13. `--status` 的「监听」行必须带上每个监听**实际的** `--timeout`（issue #86）：
+    修复前的监听行只有 pid，修复前起的超预算监听和修复后起的健康监听长得一模一样。
+14. 超预算的监听必须在状态行里被点名（带 ⚠ 与秒数），预算内的不得被误报。
+15. `listen.py` 显式传超预算 `--timeout` 时自己打 WARN（与 `reply.py --wait` 同口径），
+    预算内的取值不得出现 WARN。
+16. 探针必须从**真实进程**的命令行里读出 `--timeout`（WMI 那条查询曾经只取 pid）。
+17. 仓外的私有 SOP（`~/.water-group/rules/*.md`）里的示例命令同样不得超预算——
     它是 Agent「动手前先读」的最高权威文档，却不在第 11 条的扫描范围里，于是
     权威路径反向：仓库说 90、私有 SOP 说 240 / 300（issue #87）。扫的是**可照抄
     的片段**（围栏代码块的整行 + 行内代码），不是全文：私有文档里有「`--wait 180`
     会被砍掉」这类故意讲反面的解释，全文正则扫会误报。私有库不存在时跳过。
-14. 私有 SOP 的扫描器**、接线与模块级绑定**都必须真能报出漂移：脏样本必被抓，
+18. 私有 SOP 的扫描器**、接线与模块级绑定**都必须真能报出漂移：脏样本必被抓，
     干净样本与反面示例必被放过，判定层的跳过条件、模块级绑定的取根时机与
-    `@case` 注册也必被覆盖。否则第 13 条在 CI 上（没有私有库）就是永远绿的空壳。
+    `@case` 注册也必被覆盖。否则第 17 条在 CI 上（没有私有库）就是永远绿的空壳。
+
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -180,6 +187,43 @@ def index_of(out, prefix):
         if ln.startswith(prefix):
             return idx
     return -1
+
+
+def status_listener_line(specs):
+    """`up.py --status` 的「监听」行（进程探针被换成给定的 specs）。
+
+    `report()` 是总览屏：每一层的答案都汇到那几行里。这里只换掉会碰到真机器
+    的那几处（进程探针、端口探测、账号探测、配置体检），其余照常跑，断言只看
+    「监听」那一行——它必须说得出每个监听实际用的 `--timeout`（issue #86）。
+
+    `listener_pids` 也一起打桩：issue #86 之前只有它，于是「新门禁 × 旧代码」
+    红在**行为**上（行里只有 pid、没有秒数），而不是 AttributeError。
+    """
+    names = ("listener_specs", "listener_pids", "supervisor_pids", "commands_pids",
+             "login_info", "port_open", "config_problems")
+    saved = {name: getattr(up, name, None) for name in names}
+    pids = [str(s.get("pid")) for s in specs]
+    up.listener_specs = lambda *args, **kwargs: [dict(s) for s in specs]
+    up.listener_pids = lambda *args, **kwargs: list(pids)
+    up.supervisor_pids = lambda *args, **kwargs: []
+    up.commands_pids = lambda *args, **kwargs: []
+    up.login_info = lambda *args, **kwargs: None
+    up.port_open = lambda *args, **kwargs: False
+    # 配置体检清空：不带 self_account 的告警会往监听行里塞一个 ⚠，那不是本组
+    # 断言要认的东西（配置那组由 check_config_fail_loud.py 管）。
+    up.config_problems = lambda *args, **kwargs: []
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            up.report()
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                if hasattr(up, name):
+                    delattr(up, name)
+            else:
+                setattr(up, name, value)
+    return next((ln for ln in buf.getvalue().splitlines() if ln.startswith("监听")), "")
 
 
 def _arg_default(rel, flag):
@@ -584,7 +628,7 @@ def 示例命令不超预算():
     文档按正则在原文上扫；守护脚本只扫**字符串字面量**（AST，跳过 docstring 与
     注释）：注释里写「300s 会怎样」是解释，不是推荐值，按原文扫会把解释也判红。
 
-    仓外那份私有 SOP 由下一条契约单扫（口径不同，见「私有SOP示例不超预算」）。
+    仓外那份私有 SOP 口径不同，由第 17 条单扫（见「私有SOP示例不超预算」）。
     """
     over = []
     for rel in DOC_SAMPLES:
@@ -600,6 +644,114 @@ def 示例命令不超预算():
         print("  " + "; ".join(over))
     return not over
 
+
+@case
+def 状态行报出监听实际超时():
+    """`--status` 的监听行必须带上它实际的 `--timeout`（issue #86）。
+
+    修复前那行只有 pid：修复前起的监听（`--timeout 300`）和修复后起的
+    （`--timeout 90`）在状态里长得一模一样，Agent 无从判断自己挂的是不是那个
+    能活的。断言不是「有提示」，而是 pid 与秒数同时在行里。
+
+    探针值刻意取 `WAIT_BUDGET - 10` 而不是 `WAIT_BUDGET` 本身（独立复核建议）：
+    取值恰好等于模块常量时，「永远报常量」的坏实现输出逐字相同，断言区分不出
+    （变异 M4 实测：那样写门禁仍全绿，而一个活着的 60s 监听会被显示成 90）。
+    """
+    probe = wg_budget.WAIT_BUDGET - 10
+    line = status_listener_line([{"pid": "1111", "timeout": probe}])
+    return "1111" in line and f"--timeout {probe}" in line
+
+
+@case
+def 超预算监听在状态行里被点名():
+    """超预算的监听必须在状态行里被点名，预算内的不得被误报（issue #86）。
+
+    这是本 issue 的要害：`--status` 是操作者（和 Agent）唯一的只读诊断入口，
+    它得能回答「我挂的是不是那个能活的」。断言 ⚠ 与秒数同时在行里。
+
+    同一行还要装得下**多个**监听（独立复核建议）：实机上「一个健康监听 + 一个
+    修复前起的旧监听」同时存在是最常见的场景，只报第一个的话旧监听被整条漏掉，
+    #86「旧监听在状态里一眼看得出」直接失效（变异 M7 实测）。
+    """
+    over = wg_budget.AGENT_TOOL_TIMEOUT * 2
+    inside = wg_budget.WAIT_BUDGET - 10
+    loud = status_listener_line([{"pid": "2222", "timeout": over}])
+    quiet = status_listener_line([{"pid": "3333", "timeout": inside}])
+    both = status_listener_line([{"pid": "4444", "timeout": inside},
+                                 {"pid": "5555", "timeout": over}])
+    return ("2222" in loud and f"--timeout {over}" in loud
+            and "⚠" in loud and "超预算" in loud
+            and "3333" in quiet and "⚠" not in quiet
+            and "4444" in both and "5555" in both
+            and f"--timeout {inside}" in both and f"--timeout {over}" in both)
+
+
+@case
+def 显式超预算的监听自己告警():
+    """`listen.py` 显式传超预算 `--timeout` 时必须自己说一声（issue #86）。
+
+    `reply.py --wait` 早就有这行 WARN（reply.py:788），`listen.py` 没有——同一个
+    预算、两种静默，而这里正是那个会被静默截断的进程。两次运行各用一份干净的
+    夹具：唤醒会被 watch.py 消费掉，第二次跑就只剩等待了。
+
+    WARN 必须在**等待开始之前**（独立复核建议）：被宿主截断的路径上一个字都不
+    会再打印，把 WARN 挪到 `run("watch.py")` 之后它一次都不会输出，而只查
+    「stdout 里有没有 WARN」的断言照样绿（变异 M6b 实测）——症状原样复活。
+    """
+    over = wg_budget.AGENT_TOOL_TIMEOUT * 2
+    with temp_dir(prefix="wg-rehang-") as home:
+        fixture_home(home)
+        write_events(home, [event(1, 5, "@机器人 在吗")])
+        loud = run_script(home, "listen.py", "--cycles", "1", "--timeout",
+                          str(over), "--no-digest")
+    with temp_dir(prefix="wg-rehang-") as home:
+        fixture_home(home)
+        write_events(home, [event(2, 5, "@机器人 在吗")])
+        quiet = run_script(home, "listen.py", "--cycles", "1", "--timeout",
+                           str(wg_budget.WAIT_BUDGET), "--no-digest")
+    warn_at = index_of(loud.stdout, "WARN")
+    wait_at = index_of(loud.stdout, "等最多")
+    return (loud.returncode == 0 and "WARN" in loud.stdout
+            and f"--timeout {over}" in loud.stdout
+            and quiet.returncode == 0 and "WARN" not in quiet.stdout
+            and warn_at >= 0 and wait_at >= 0 and warn_at < wait_at)
+
+
+@case
+def 探针从真实监听读出超时():
+    """探针必须从**真实进程**的命令行里读出 `--timeout`（issue #86）。
+
+    纯正则只能证明解析函数本身。这里起一个真的 `daemon/listen.py`（带
+    `--timeout 300`），让探针去 WMI 里认它：那条查询曾经只取 pid 不取命令行
+    （`wg_up_probe.py:82-84`），正则写得再好也读不到那个数。
+    """
+    if os.name != "nt":
+        return True  # 本仓只跑 Windows（探针在 posix 上是 ps 兜底）
+    specs_of = getattr(up, "listener_specs", None)
+    if specs_of is None:
+        return False  # 旧代码没有这层探针：读不出命令行里的 --timeout
+    over = 300
+    with temp_dir(prefix="wg-listener-") as home:
+        script = home / "daemon" / "listen.py"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+        proc = subprocess.Popen([sys.executable, str(script), "--timeout", str(over)],
+                                cwd=str(ROOT), env=child_env(home),
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        specs = []
+        try:
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                specs = specs_of(exclude=up.self_pids())
+                if any(str(s.get("pid")) == str(proc.pid) for s in specs):
+                    break
+                time.sleep(1)
+        finally:
+            # 收树：venv 的 python.exe 是个转发器，真解释器是它的子进程。
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           capture_output=True)
+    mine = [s for s in specs if str(s.get("pid")) == str(proc.pid)]
+    return bool(mine) and mine[0].get("timeout") == over
 
 @case
 def 私有SOP示例不超预算():

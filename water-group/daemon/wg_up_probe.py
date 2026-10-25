@@ -156,9 +156,10 @@ def _own_checkout(cmdline):
     found = _ABS_LISTEN.search(cmdline or "")
     if not found:
         return True
-    root = os.path.normcase(str(ROOT))
-    script = os.path.normcase(found.group(0))
-    return script == root or script.startswith(root.rstrip("\\/") + os.sep)
+    # normcase 抹平大小写与 `/`、`\` 之差；归属判定交给 pathlib，不手工拼分隔符。
+    root = Path(os.path.normcase(str(ROOT)))
+    script = Path(os.path.normcase(found.group(0)))
+    return script == root or root in script.parents
 
 
 def supervisor_pids(exclude=None):

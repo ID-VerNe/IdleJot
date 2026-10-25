@@ -123,8 +123,8 @@ def main():
             # 额度用尽：自己收手。等宿主来砍的话，进程树会连同 watch.py 一起死，
             # 监听就此静默消失，而 `--status` 在那之前一直报「已挂」（issue #88）。
             print("NO_WORK")
-            print(f"等待额度 {wg_budget.WAIT_BUDGET}s 已用尽（已跑 {cycles} 轮），"
-                  f"本次调用到此为止")
+            print(f"这一轮等不下去了（每轮要等 {args.timeout}s、等待额度 "
+                  f"{wg_budget.WAIT_BUDGET}s，已跑 {cycles} 轮），本次调用到此为止")
             restart_hint(args.timeout)
             return 0
         cycles += 1

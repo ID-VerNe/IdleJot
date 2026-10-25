@@ -37,14 +37,14 @@ def over_budget(seconds):
 def clamp_wait(timeout, elapsed=0.0):
     """这一轮实际还能等多少秒（额度是所有轮次共享的总额，issue #88）。
 
-    `timeout` 是调用方要的每轮等待秒数，`elapsed` 是这次调用已经过去的秒数。
-    返回 0 表示额度已经用尽：调用方该自己收手，而不是等宿主来砍——被砍时
-    进程树连同子监听一起死，监听就此静默消失。
+    `timeout` 是调用方要的每轮等待秒数，`elapsed` 是这次调用已经过去的秒数（负值
+    按 0 算：否则额度会凭空多出一截）。返回 0 表示额度已经用尽：调用方该自己收手，
+    而不是等宿主来砍——被砍时进程树连同子监听一起死，监听就此静默消失。
 
     额度往大取整（ceil）：默认调用是「等最多 90s」，截断成 89s 会让边界行
     与文档对不上，而差的那一秒本来就还在额度里。
 
     与 `over_budget()` 一样，这里只给事实：压回多少、什么时候收手，交给调用方。
     """
-    remaining = WAIT_BUDGET - float(elapsed)
+    remaining = WAIT_BUDGET - max(0.0, float(elapsed))
     return max(0, min(int(timeout), math.ceil(remaining)))

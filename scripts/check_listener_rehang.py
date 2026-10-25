@@ -4,7 +4,7 @@
 之后没有任何东西保证下一次挂上：Agent 回消息、读图、写 issue 的几十秒里，
 @ 落进文件而没人看。三次都是用户主动问「是不是没挂上」才发现的。
 
-这条门禁钉十九个契约（下面按主题分组），任何一处退回旧行为都红：
+这条门禁钉二十个契约（下面按主题分组），任何一处退回旧行为都红：
 
 1. `listen.py` 的每种退出（WAKE / NO_WORK / WATCH_FAILED）都以一行
    `RESTART: <python> water-group/daemon/listen.py --timeout N` 收尾，且短等待
@@ -37,6 +37,8 @@
 15. `clamp_wait()` 只给事实：额度用尽时返回 0，已经过去的时间要从额度里扣掉，
     超预算的取值压回额度内；`listen.py --cycles` 的 argparse 实际 default 必须是 1
     （写死 `default=0` 就退回无限轮）。
+16. `clamp_wait()` 算出来的秒数必须真的交给 `watch.py`，而且打印的秒数要跟它
+    一致：只断言「函数算得对」时，把实等改回传入值仍全绿（issue #88 复核）。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -500,7 +502,52 @@ def 轮数上限由等待预算决定():
             and wg_budget.clamp_wait(10, wait_budget + 5) == 0
             and wg_budget.clamp_wait(10, wait_budget - 5) == 5
             and wg_budget.clamp_wait(wait_budget * 2, 0) == wait_budget
+            # 已经过去的时间不能是负数：负 elapsed 会让额度凭空多出一截
+            # （clamp_wait(300, -5) 曾等于 95 > WAIT_BUDGET），负值按 0 算。
+            and wg_budget.clamp_wait(wait_budget * 2, -5) == wait_budget
             and _arg_default("water-group/daemon/listen.py", "--cycles") == 1)
+
+
+@case
+def 传给watch的秒数被额度夹住():
+    """`clamp_wait()` 的结果必须真的用在 `watch.py` 上（issue #88）。
+
+    只断言「`clamp_wait()` 算得对」不够：把 `run("watch.py", "--timeout", str(wait))`
+    改回 `str(args.timeout)`，前十九条照样全绿（变异实测），而 `--timeout 300` 时
+    `watch.py` 实等 300s > 宿主 120s —— 进程树连同子监听一起被杀、监听静默消失，
+    正是 #88 的症状。所以这里钉两条：**实收秒数 ≤ 预算**，且**打印的秒数 == 实收
+    秒数**（后者挡住「打印按夹住的值、实等按传入的值」这种半改）。
+
+    样本必须用**超预算**的取值：`--timeout 90` 恰好等于额度，压不出差异，测了
+    等于没测。
+
+    `listen.run` 被换成探针（返回 2 = 静默超时），所以这条不真的等 90s；断言的是
+    「算出来的秒数被交出去」而不是「等够了那么久」。
+    """
+    originals = (listen.run, sys.argv)
+    seen = []
+
+    def spy(script, *args):
+        seen.append((script, args))
+        return 2
+
+    buf = io.StringIO()
+    try:
+        listen.run = spy
+        sys.argv = ["listen.py", "--timeout", "300", "--cycles", "1", "--no-digest"]
+        with contextlib.redirect_stdout(buf):
+            code = listen.main()
+    finally:
+        listen.run, sys.argv = originals
+
+    out = buf.getvalue()
+    passed = [int(args[args.index("--timeout") + 1])
+              for script, args in seen
+              if script == "watch.py" and "--timeout" in args]
+    printed = next((ln for ln in lines(out) if ln.startswith("等最多")), "")
+    return (code == 0 and passed
+            and max(passed) <= wg_budget.WAIT_BUDGET
+            and f"等最多 {max(passed)}s" in printed)
 
 
 @case

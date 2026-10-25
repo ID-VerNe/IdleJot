@@ -37,6 +37,9 @@
 15. `listen.py` 显式传超预算 `--timeout` 时自己打 WARN（与 `reply.py --wait` 同口径），
     预算内的取值不得出现 WARN。
 16. 探针必须从**真实进程**的命令行里读出 `--timeout`（WMI 那条查询曾经只取 pid）。
+17. 透传样本值必须真的落在透传区间里且不等于常量本身；预算收缩到装不下
+    「短等待」与「预算内」两个区间时，红在**预算不自洽**上，不红在重挂提示的
+    措辞上（issue #95：合法的预算收缩不许变成门禁假红）。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -232,6 +235,22 @@ def _quoted_timeouts(rel):
                 and id(node) not in docs):
             found += re.findall(r"--timeout[ =](\d+)", node.value)
     return found
+
+
+def inside_probe():
+    """透传区间内的样本值；预算装不下区间时返回 None（issue #95）。
+
+    透传条件是 `SHORT_WAIT <= timeout <= WAIT_BUDGET`（listen.restart_hint），
+    所以样本取 `max(WAIT_BUDGET - 10, SHORT_WAIT + 10)` 夹进区间；但裸夹会在
+    `WAIT_BUDGET <= SHORT_WAIT + 20` 时恰好夹到 `WAIT_BUDGET` 本身——#86 的
+    教训是探针恰好等于常量时，「永远报常量」的坏实现区分不出，所以再往里收
+    一格。两个前提都不成立（`WAIT_BUDGET < SHORT_WAIT + 10`）时返回 None，
+    由 `预算装得下透传区间` 那条契约点名，这里不硬测区间外的值。
+    """
+    if wg_budget.WAIT_BUDGET < listen.SHORT_WAIT + 10:
+        return None
+    return min(max(wg_budget.WAIT_BUDGET - 10, listen.SHORT_WAIT + 10),
+               wg_budget.WAIT_BUDGET - 1)
 
 
 # ---------- listen.py：退出时给出可粘贴的下一步 ----------
@@ -483,12 +502,28 @@ def 等待开始前声明边界():
 
 
 @case
+def 预算装得下透传区间():
+    """预算合法收缩不许把门禁变成绊脚石（issue #95 候选 2）。
+
+    透传样本要落在 `[SHORT_WAIT, WAIT_BUDGET]` 且不等于常量本身，前提是预算
+    装得下「短等待」与「预算内」两个区间。预算小到装不下时，那是**预算本身**
+    要重新设计（`SHORT_WAIT` 是给 `reply.py --wait` 这类有界等待用的），红在
+    预算不自洽上，而不是让 `超预算的取值不写进重挂命令` 以无关的签名假红。
+    """
+    return listen.SHORT_WAIT + 10 <= wg_budget.WAIT_BUDGET
+
+
+@case
 def 超预算的取值不写进重挂命令():
     """RESTART 行不推荐撑不住的取值（issue #83）。
 
     `restart_hint` 原来把任何 ≥60s 的取值原样透传，于是 `--timeout 300` 被推荐
     回来、被截断、再被推荐回来。现在三个区间：短等待回到常驻周期、超预算压回
     预算、其余原样透传。
+
+    透传样本由 `inside_probe()` 取（issue #95）：直接用 `WAIT_BUDGET - 10` 的话，
+    预算合法收缩到 ≤70 时样本落进短等待夹回区间，断言以与被测行为无关的理由
+    假红——预算装不下区间时这里跳过透传样本，红交给 `预算装得下透传区间`。
     """
     def hint(seconds):
         buf = io.StringIO()
@@ -496,12 +531,19 @@ def 超预算的取值不写进重挂命令():
             listen.restart_hint(seconds)
         return buf.getvalue()
 
-    inside = wg_budget.WAIT_BUDGET - 10
+    inside = inside_probe()
+    if inside is None:
+        print(f"  WAIT_BUDGET {wg_budget.WAIT_BUDGET} 装不下透传区间"
+              f"（需 >= SHORT_WAIT+10 = {listen.SHORT_WAIT + 10}），透传样本跳过，"
+              f"由『预算装得下透传区间』点名")
+        passes_through = True
+    else:
+        passes_through = f"--timeout {inside}" in hint(inside)
     return (f"--timeout {wg_budget.WAIT_BUDGET}" in hint(300)
             and f"--timeout {wg_budget.WAIT_BUDGET}" in hint(wg_budget.AGENT_TOOL_TIMEOUT * 2)
             and f"--timeout {wg_budget.WAIT_BUDGET}" in hint(wg_budget.WAIT_BUDGET)
             and f"--timeout {wg_budget.WAIT_BUDGET}" in hint(1)
-            and f"--timeout {inside}" in hint(inside))
+            and passes_through)
 
 
 @case

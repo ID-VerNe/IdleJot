@@ -66,11 +66,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # `import check_fixture_support` 之前先把 env 里的数据根**记下来**：那模块在 import 期
-# 会把它钉成临时目录，事后只剩夹具目录。这里记的是「import 之前真实的那个值」，
-# 契约 18 用它当锚点——验「模块级的 PRIVATE_HOME 仍由它解析而来」。
+# 会把它钉成临时目录，事后只剩夹具目录。这里记的是「import 之前真实的那些值」，
+# 契约 18 用它们当锚点——验「模块级的 PRIVATE_HOME 仍由它们解析而来」。
 # 锚点只用公开信息（env + 家目录），不碰别的模块的私有变量：绑在
 # `check_fixture_support._PINNED_HOME` 上时，那变量一旦改名，锚点就静默消失。
+# 两条腿都要记：`WATER_GROUP_HOME` 与 `IDLEJOT_WG_HOME`（后者是
+# `scripts/check_publication.py` 认的正式候选）。少记一条，锚点在只设了那条的
+# 机器上就会算出另一个根，契约 18 平白变红。
 _PRE_WGH = os.environ.get("WATER_GROUP_HOME")
+_PRE_IWGH = os.environ.get("IDLEJOT_WG_HOME")
 
 
 def _live_private_home(env=None):
@@ -81,7 +85,7 @@ def _live_private_home(env=None):
     （issue #87）。口径与 `scripts/check_publication.py` / `scripts/check_tmp_hygiene.py`
     一致：env 优先，`~/.water-group` 兜底，只有真是目录才算数。
 
-    `env` 只给自检用（传一份假的 env 映射），生产路径走默认的 `os.environ`。
+    `env` 只给自检用（传一份 import 之前的 env 快照），生产路径走默认的 `os.environ`。
     """
     source = os.environ if env is None else env
     for cand in (source.get("WATER_GROUP_HOME"),
@@ -752,6 +756,7 @@ def 探针从真实监听读出超时():
     mine = [s for s in specs if str(s.get("pid")) == str(proc.pid)]
     return bool(mine) and mine[0].get("timeout") == over
 
+
 @case
 def 私有SOP示例不超预算():
     """仓外的私有规则文档同样不得教超预算的取值（issue #87）。
@@ -791,7 +796,7 @@ def 私有SOP扫描器能识别漂移():
     1. 扫描器：脏的被抓、干净的放过、反面示例（`` `--wait 180` 会被砍掉 ``）放过；
     2. 接线：**直接调用上面那条契约的函数体**（把数据根换掉），脏的必须红，
        干净的与不存在的根必须绿；
-    3. 根解析：`WATER_GROUP_HOME` 指到哪，数据根就该解析到哪；
+    3. 根解析：`WATER_GROUP_HOME` / `IDLEJOT_WG_HOME` 指到哪，数据根就该解析到哪；
     4. 模块级绑定与注册：`PRIVATE_HOME` 必须仍由 import **之前**记下的 env 值解析
        而来（取根时机被颠倒时它会落进夹具目录，issue #87 的盲区原样重现）、
        本机有私有库时不能是 `None`、契约本身不能从 `CASES` 里被摘掉。
@@ -827,7 +832,7 @@ def 私有SOP扫描器能识别漂移():
                       and ("water_group.md", 5) in hits
                       and ("water_group.md", 4) not in hits)
 
-        # 2) 接线：调契约 13 的函数体，脏根必须红，干净根与不存在的根必须绿
+        # 2) 接线：调契约 17 的函数体，脏根必须红，干净根与不存在的根必须绿
         saved_home = PRIVATE_HOME
         try:
             with contextlib.redirect_stdout(io.StringIO()):
@@ -841,15 +846,21 @@ def 私有SOP扫描器能识别漂移():
             globals()["PRIVATE_HOME"] = saved_home
         wired_ok = dirty_red and clean_green and missing_green
 
-        # 3) 根解析：env 指到哪就解析到哪
+        # 3) 根解析：env 指到哪就解析到哪（两条腿都要认）
         resolved = _live_private_home({"WATER_GROUP_HOME": str(dirty_root)})
         root_ok = resolved is not None and Path(resolved) == dirty_root
+        resolved_alt = _live_private_home({"IDLEJOT_WG_HOME": str(dirty_root)})
+        root_ok = root_ok and (resolved_alt is not None
+                               and Path(resolved_alt) == dirty_root)
 
         # 4) 模块级绑定与注册：取根时机被颠倒 / 绑定被置空 / case 注册被摘掉。
-        #    锚点是 import 之前记下的 env 值（公开信息）：模块级的 PRIVATE_HOME
+        #    锚点是 import 之前记下的 env 快照（公开信息）：模块级的 PRIVATE_HOME
         #    必须仍由它解析而来。取根时机一旦被颠倒，它会落回夹具目录，issue #87
         #    的盲区原样重现——而上面三层验的都是函数，照样全绿。
-        expected_home = _live_private_home({"WATER_GROUP_HOME": _PRE_WGH})
+        #    两条腿都要喂（WATER_GROUP_HOME 与 IDLEJOT_WG_HOME）：少喂一条，
+        #    只设了那条的机器上锚点会算出另一个根，契约 18 平白变红。
+        expected_home = _live_private_home({"WATER_GROUP_HOME": _PRE_WGH,
+                                            "IDLEJOT_WG_HOME": _PRE_IWGH})
         bound_ok = PRIVATE_HOME == expected_home
         registered_ok = 私有SOP示例不超预算 in CASES
 

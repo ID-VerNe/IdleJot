@@ -14,7 +14,9 @@
    与清单完全一致——分片只加在清单里会让 CI 静默漏跑，必须拦住；
 7. 生成段末尾的计数句覆盖 `BUCKETS` 里每个非 `ci` 档位且数量与清单一致
    （issue #90）——渲染与 AGENTS.md 逐字节相等时，生成器硬编码档位会让两边
-   一起错，只有拿 `BUCKETS` 反查文本才能发现漏报。
+   一起错，只有拿 `BUCKETS` 反查文本才能发现漏报；
+8. 档位集合与清单一致（issue #90）：`BUCKETS` 是手写元组，正是 issue #90 的病根
+   （手写档位表漂移）。拿清单里的档位键反查它，清单多一档或少一档都红。
 
 维护者模式 `--write` 重写 AGENTS.md §5.1 生成段；门禁本身只读。
 
@@ -40,6 +42,8 @@ SHARD_NAME = re.compile(r'^[a-z][a-z0-9_]*$')
 MATRIX = re.compile(r'shard:\s*\[([^\]]*)\]')
 COUNT_RE = re.compile(r'`([a-z_]+)`\s*(\d+)')
 CI_COUNT_RE = re.compile(r'^共 (\d+) 个 CI 门禁')
+# 清单里的非档位键（其余 list 型顶层键都算档位）。
+META_KEYS = ('shards',)
 
 
 def load_manifest():
@@ -166,6 +170,27 @@ def render(manifest):
     return '\n'.join(lines)
 
 
+def bucket_key_problems(manifest):
+    """清单里的档位键必须都在 `BUCKETS` 里（issue #90）。
+
+    `BUCKETS` 是本文件里的手写元组，正是 issue #90 的病根（手写档位表漂移）。
+    如果它少了一个档位，`render()` 与计数句断言会**同时**不再要求该档，
+    文档随之少一档而门禁仍绿。清单是唯一事实来源（issue #59），所以反过来
+    拿清单的档位键钉死 `BUCKETS`：清单有而 `BUCKETS` 没有 → 红。
+
+    退休一个档位要同时改两处（清单删键 + `BUCKETS` 删项），这是刻意的：
+    档位集合变动必须是显式动作，不能靠漏改手写元组发生。
+    """
+    listed = {
+        key for key, rows in manifest.items()
+        if isinstance(rows, list) and key not in META_KEYS
+    }
+    return [
+        f'{name}: 清单里有这个档位，但 BUCKETS 里没有（档位集合必须两处一致）'
+        for name in sorted(listed - set(BUCKETS))
+    ]
+
+
 def tally_problems(manifest, block):
     """生成段末尾的计数句是否覆盖 BUCKETS 里每个非 ci 档位、数量对不对（issue #90）。
 
@@ -230,25 +255,39 @@ def agents_problem(text, block):
 
 
 def tally_self_test(manifest):
-    """自检：把 `dead` 从计数句里抠掉，断言检查器仍会红（issue #90）。
+    """自检：把计数句里每个非 ci 档位逐个抠掉，断言检查器都会红（issue #90）。
 
     没有这一条，新增的断言可能写成「怎么跑都绿」；这一条保证它真能钉住
     原症状（生成器少列一档 → 报错）。
+
+    逐档做而不是只锚 `dead`：档位集合以后可能变（退休一个档位），
+    锚死单个档位名会误红。扣的是分号**之后**那段（分号前是分片名）。
     """
     block = render(manifest)
     lines = block.splitlines()
     index = next((i for i, line in enumerate(lines) if line.startswith('共 ')), None)
     if index is None:
         return ['自检失败：渲染结果里找不到计数句']
-    if '`dead`' not in lines[index]:
-        return ['自检失败：渲染结果的计数句里没有 dead 档']
-    lines[index] = lines[index].replace('`dead` ', '', 1)
-    problems = tally_problems(manifest, '\n'.join(lines))
-    if not problems:
-        return ['自检失败：计数句少列 `dead` 档时检查器没有报错']
-    if not any('dead' in item for item in problems):
-        return [f'自检失败：报错没提到 dead 档：{problems}']
-    return []
+    line = lines[index]
+    if '；' not in line:
+        return ['自检失败：渲染结果的计数句缺少「；」分隔的档位计数部分']
+    head, tail = line.split('；', 1)
+    problems = []
+    for name in BUCKETS:
+        if name == 'ci':
+            continue
+        token = f'`{name}` '
+        if token not in tail:
+            problems.append(f'自检失败：渲染结果的计数句里没有 {name} 档')
+            continue
+        broken_tail = re.sub(rf'`{re.escape(name)}`\s*\d+', '', tail, count=1)
+        broken = '\n'.join(lines[:index] + [head + '；' + broken_tail] + lines[index + 1:])
+        found = tally_problems(manifest, broken)
+        if not found:
+            problems.append(f'自检失败：计数句少列 {name} 档时检查器没有报错')
+        elif not any(name in item for item in found):
+            problems.append(f'自检失败：少列 {name} 档时报错没提到它：{found}')
+    return problems
 
 
 def main():
@@ -262,19 +301,6 @@ def main():
 
     manifest = load_manifest()
 
-    # 计数句断言先自检：证明「少列一档时它会红」，否则这条断言可能怎么跑都绿。
-    self_problems = tally_self_test(manifest)
-    for item in self_problems:
-        print(f'  FAIL {item}')
-    if self_problems:
-        print(f'FAIL: {len(self_problems)} 处计数句自检问题')
-        return 1
-    print('  ok  计数句自检：少列一档时断言会红')
-
-    if args.self_test:
-        print('PASS: 计数句断言的自检通过。')
-        return 0
-
     shards_shape, shards = shard_problems(manifest)
     problems, seen = schema_problems(manifest, shards)
     problems = shards_shape + problems
@@ -285,6 +311,16 @@ def main():
         return 1
     print(f'  ok  形状：{len(seen)} 个条目、五档齐全、无重名')
     print(f'  ok  分片：{len(shards)} 个（{"、".join(shards)}），每个 ci 条目都有归属')
+
+    # 档位集合必须两处一致（issue #90）：清单是唯一事实来源，
+    # BUCKETS 是手写元组，少一档会让 render 与断言同时不再要求该档。
+    bucket_problems = bucket_key_problems(manifest)
+    if bucket_problems:
+        for item in bucket_problems:
+            print(f'  FAIL {item}')
+        print(f'FAIL: {len(bucket_problems)} 处档位集合不一致')
+        return 1
+    print(f'  ok  档位集合：清单与 BUCKETS 一致（{"、".join(BUCKETS)}）')
 
     drift = workflow_problems(shards)
     if drift:
@@ -307,7 +343,33 @@ def main():
         return 1
     print(f'  ok  磁盘 {len(disk)} 个 check_*.py 全部有归属')
 
+    # 计数句断言先自检：证明「少列一档时它会红」，否则这条断言可能怎么跑都绿。
+    # 放在形状校验之后：render() 要求清单条目带 shard，畸形清单先由形状断言报错。
+    self_problems = tally_self_test(manifest)
+    for item in self_problems:
+        print(f'  FAIL {item}')
+    if self_problems:
+        print(f'FAIL: {len(self_problems)} 处计数句自检问题')
+        return 1
+    print('  ok  计数句自检：少列一档时断言会红')
+
+    if args.self_test:
+        print('PASS: 计数句断言的自检通过。')
+        return 0
+
     block = render(manifest)
+    # 计数句必须覆盖 BUCKETS 里每个非 ci 档位（issue #90）：
+    # 渲染结果与 AGENTS.md 逐字节相等时，生成器少列一档会让两边一起错。
+    # 放在最前面：--write 也不许把坏块写进 AGENTS.md。
+    tally = tally_problems(manifest, block)
+    if tally:
+        for item in tally:
+            print(f'  FAIL 计数句：{item}')
+        print('FAIL: 计数句漏报或写错档位')
+        return 1
+    counts = '、'.join(f'{name} {len(bucket(manifest, name))}' for name in BUCKETS)
+    print(f'  ok  计数句覆盖全部非 ci 档位（{counts}）')
+
     text = AGENTS.read_text(encoding='utf-8')
     if args.write:
         swapped = swap_block(text, block)
@@ -326,16 +388,6 @@ def main():
         print(f'  FAIL {problem}')
         print('FAIL: AGENTS §5.1 与清单漂移')
         return 1
-    # 计数句必须覆盖 BUCKETS 里每个非 ci 档位（issue #90）：
-    # 渲染结果与 AGENTS.md 逐字节相等时，生成器少列一档会让两边一起错。
-    tally = tally_problems(manifest, block)
-    if tally:
-        for item in tally:
-            print(f'  FAIL 计数句：{item}')
-        print('FAIL: 计数句漏报或写错档位')
-        return 1
-    counts = '、'.join(f'{name} {len(bucket(manifest, name))}' for name in BUCKETS)
-    print(f'  ok  计数句覆盖全部非 ci 档位（{counts}）')
     print(f'  ok  AGENTS §5.1 与清单一致（{counts}）')
     print('PASS: 门禁清单是唯一事实来源。')
     return 0

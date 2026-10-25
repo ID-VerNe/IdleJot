@@ -53,6 +53,11 @@
 「等最多 90s（第 1 轮）…」，`RESTART:` 行只推荐不超预算的取值（短的回常驻周期、超的压回
 预算），文档里的 `--timeout` 示例也由 `scripts/check_listener_rehang.py` 逐个扫。
 
+**状态行看得见预算（issue #86）**：`up.py --status` 的「监听」行会报出每个监听**实际的**
+`--timeout`（从命令行读，不是从源码推的），超预算的那个带 ⚠ 点名——修复前起的旧监听
+（远超预算的旧默认值）在状态里一眼看得出，不必再另跑一条 PowerShell 查 WMI。
+`listen.py` 显式传超预算的 `--timeout` 时也会自己打一行 `WARN`。
+
 追问窗口：回复成功后 `reply.py` 自动开窗（默认再跟 10 条或静默 180 秒），群里继续聊的
 几句也会唤醒监听（唤醒行带 `[追问]` 前缀），话题能接着走；`--no-followup` 单次关闭。
 它是插件（issue #4 PD2a）：参数与开关在 `config.json` 的 `plugins.followup`

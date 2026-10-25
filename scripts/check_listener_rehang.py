@@ -29,7 +29,7 @@
 11. 文档（`AGENTS.md` / `README.md` / `.agents/rules/water_group.md` / `SKILL.md`）
     里的 `--timeout` 示例不得超预算——Agent 照抄的是它们，不是源码。守护脚本里的
     字符串字面量（`up.py --status` 的提示串）同扫，注释与 docstring 不算推荐值。
-    仓外那份私有 SOP 口径不同，由第 22 条单扫。
+    仓外那份私有 SOP 口径不同，由第 23 条单扫。
 12. `watch.py` 裸跑时的 `--timeout` 默认值同样不超预算，且 argparse 的实际 default
     必须等于模块常量（写死 `default=240` 而常量仍是 90 会绕过第 8 条）。
 13. `--status` 的「监听」行必须带上每个监听**实际的** `--timeout`（issue #86）：
@@ -49,15 +49,18 @@
 21. 透传样本值必须真的落在透传区间里且不等于常量本身；预算收缩到装不下
     「短等待」与「预算内」两个区间时，红在**预算不自洽**上，不红在重挂提示的
     措辞上（issue #95：合法的预算收缩不许变成门禁假红）。
+22. 监听探针按仓库根圈定（issue #94）：别的 worktree / 门禁临时起的 listen.py
+    不算「已有监听」，`reply.py` 的续挂判断与 `--status` 的监听行都只看本树；
+    本树的监听（含绝对路径起的孤儿）仍必须被认出。
 
-22. 仓外的私有 SOP（`~/.water-group/rules/*.md`）里的示例命令同样不得超预算——
+23. 仓外的私有 SOP（`~/.water-group/rules/*.md`）里的示例命令同样不得超预算——
     它是 Agent「动手前先读」的最高权威文档，却不在第 11 条的扫描范围里，于是
     权威路径反向：仓库说 90、私有 SOP 说 240 / 300（issue #87）。扫的是**可照抄
     的片段**（围栏代码块的整行 + 行内代码），不是全文：私有文档里有「`--wait 180`
     会被砍掉」这类故意讲反面的解释，全文正则扫会误报。私有库不存在时跳过。
-23. 私有 SOP 的扫描器**、接线与模块级绑定**都必须真能报出漂移：脏样本必被抓，
+24. 私有 SOP 的扫描器**、接线与模块级绑定**都必须真能报出漂移：脏样本必被抓，
     干净样本与反面示例必被放过，判定层的跳过条件、模块级绑定的取根时机与
-    `@case` 注册也必被覆盖。否则第 22 条在 CI 上（没有私有库）就是永远绿的空壳。
+    `@case` 注册也必被覆盖。否则第 23 条在 CI 上（没有私有库）就是永远绿的空壳。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -79,12 +82,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # `import check_fixture_support` 之前先把 env 里的数据根**记下来**：那模块在 import 期
 # 会把它钉成临时目录，事后只剩夹具目录。这里记的是「import 之前真实的那些值」，
-# 契约 23 用它们当锚点——验「模块级的 PRIVATE_HOME 仍由它们解析而来」。
+# 契约 24 用它们当锚点——验「模块级的 PRIVATE_HOME 仍由它们解析而来」。
 # 锚点只用公开信息（env + 家目录），不碰别的模块的私有变量：绑在
 # `check_fixture_support._PINNED_HOME` 上时，那变量一旦改名，锚点就静默消失。
 # 两条腿都要记：`WATER_GROUP_HOME` 与 `IDLEJOT_WG_HOME`（后者是
 # `scripts/check_publication.py` 认的正式候选）。少记一条，锚点在只设了那条的
-# 机器上就会算出另一个根，契约 23 平白变红。
+# 机器上就会算出另一个根，契约 24 平白变红。
 _PRE_WGH = os.environ.get("WATER_GROUP_HOME")
 _PRE_IWGH = os.environ.get("IDLEJOT_WG_HOME")
 
@@ -121,6 +124,7 @@ import reply  # noqa: E402
 import up  # noqa: E402
 import watch  # noqa: E402
 import wg_budget  # noqa: E402
+import wg_up_probe  # noqa: E402  (issue #94 新用例轮询原始匹配行要用 _match_rows)
 
 # 外部测试变量会把 state 又指回实机，这里必须清掉，只留临时数据根。
 ISOLATING_VARS = ("IDLEJOT_WG_STATE", "TULPA_WG_STATE", "IDLEJOT_WG_DB",
@@ -810,7 +814,7 @@ def 示例命令不超预算():
     文档按正则在原文上扫；守护脚本只扫**字符串字面量**（AST，跳过 docstring 与
     注释）：注释里写「300s 会怎样」是解释，不是推荐值，按原文扫会把解释也判红。
 
-    仓外那份私有 SOP 口径不同，由第 22 条单扫（见「私有SOP示例不超预算」）。
+    仓外那份私有 SOP 口径不同，由第 23 条单扫（见「私有SOP示例不超预算」）。
     """
     over = []
     for rel in DOC_SAMPLES:
@@ -906,6 +910,10 @@ def 探针从真实监听读出超时():
     纯正则只能证明解析函数本身。这里起一个真的 `daemon/listen.py`（带
     `--timeout 300`），让探针去 WMI 里认它：那条查询曾经只取 pid 不取命令行
     （`wg_up_probe.py:82-84`），正则写得再好也读不到那个数。
+
+    起的是**本仓**的 listen.py 而不是 temp 下的假脚本（issue #94）：探针现在
+    按仓库根圈定监听，temp 下的假脚本会被判成异树——那是新用例的活，这条只管
+    「本树监听被认出且读得出预算」。
     """
     if os.name != "nt":
         return True  # 本仓只跑 Windows（探针在 posix 上是 ps 兜底）
@@ -914,10 +922,9 @@ def 探针从真实监听读出超时():
         return False  # 旧代码没有这层探针：读不出命令行里的 --timeout
     over = 300
     with temp_dir(prefix="wg-listener-") as home:
-        script = home / "daemon" / "listen.py"
-        script.parent.mkdir(parents=True, exist_ok=True)
-        script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
-        proc = subprocess.Popen([sys.executable, str(script), "--timeout", str(over)],
+        fixture_home(home)
+        proc = subprocess.Popen([sys.executable, str(DAEMON / "listen.py"),
+                                 "--timeout", str(over)],
                                 cwd=str(ROOT), env=child_env(home),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         specs = []
@@ -934,6 +941,48 @@ def 探针从真实监听读出超时():
                            capture_output=True)
     mine = [s for s in specs if str(s.get("pid")) == str(proc.pid)]
     return bool(mine) and mine[0].get("timeout") == over
+
+
+@case
+def 别的树里的监听不算已有监听():
+    """探针只认本 checkout 的监听（issue #94）。
+
+    按 worktree 布局在 temp 下起一个异树 listen.py，先轮询 `_match_rows` 证明
+    WMI 已看见它——否则「进程还没注册」和「被过滤掉」分不开，断言会假绿；再断言
+    `listener_pids()` 与 `listener_specs()` 都不报它。异树监听被当成「已有监听」
+    的后果：`reply.py` 跳过一次必要的续挂，那一次回复之后群里就没人值守。
+    """
+    if os.name != "nt":
+        return True  # 本仓只跑 Windows（探针在 posix 上是 ps 兑底）
+    with temp_dir(prefix="wg-foreign-") as home:
+        script = home / "water-group" / "daemon" / "listen.py"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+        proc = subprocess.Popen([sys.executable, str(script), "--timeout", "1"],
+                                cwd=str(home), stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        raw = []
+        ok = False
+        try:
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                raw = [pid for pid, _ in wg_up_probe._match_rows(
+                    "daemon[\\\\/]listen\\.py", exclude=up.self_pids())]
+                if str(proc.pid) in raw:
+                    break
+                time.sleep(1)
+            if str(proc.pid) not in raw:
+                ok = False  # WMI 始终没看见它：用例前提不成立，不能当通过
+            else:
+                # 断言必须在进程**活着**的时候做（独立复核抓出的假绿）：收树
+                # 之后再查，死进程谁也查不到，「不过滤」的坏实现也照样绿。
+                ok = (str(proc.pid) not in up.listener_pids()
+                      and all(str(s.get("pid")) != str(proc.pid)
+                              for s in up.listener_specs()))
+        finally:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           capture_output=True)
+    return ok
 
 
 @case
@@ -1011,7 +1060,7 @@ def 私有SOP扫描器能识别漂移():
                       and ("water_group.md", 5) in hits
                       and ("water_group.md", 4) not in hits)
 
-        # 2) 接线：调契约 22 的函数体，脏根必须红，干净根与不存在的根必须绿
+        # 2) 接线：调契约 23 的函数体，脏根必须红，干净根与不存在的根必须绿
         saved_home = PRIVATE_HOME
         try:
             with contextlib.redirect_stdout(io.StringIO()):
@@ -1037,7 +1086,7 @@ def 私有SOP扫描器能识别漂移():
         #    必须仍由它解析而来。取根时机一旦被颠倒，它会落回夹具目录，issue #87
         #    的盲区原样重现——而上面三层验的都是函数，照样全绿。
         #    两条腿都要喂（WATER_GROUP_HOME 与 IDLEJOT_WG_HOME）：少喂一条，
-        #    只设了那条的机器上锚点会算出另一个根，契约 23 平白变红。
+        #    只设了那条的机器上锚点会算出另一个根，契约 24 平白变红。
         expected_home = _live_private_home({"WATER_GROUP_HOME": _PRE_WGH,
                                             "IDLEJOT_WG_HOME": _PRE_IWGH})
         bound_ok = PRIVATE_HOME == expected_home

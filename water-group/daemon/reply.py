@@ -761,10 +761,11 @@ def wait_for_next(seconds):
     wake and lose it, and `reply.py` would refuse to hang a new one because
     up.listener_pids() still matches the orphan.
 
-    `--cycles 1 --no-digest` bounds it: listen.py otherwise loops forever, and a
-    tool call that never returns cannot be told apart from a hang. The digest
-    pass is skipped because it takes tens of seconds on a backlog, which would
-    make "--wait 6" take a minute.
+    `--cycles 1 --no-digest` bounds it: a tool call that never returns cannot
+    be told apart from a hang. Since issue #88 the default is already one
+    round, but an explicit bound keeps this call short whatever the default
+    becomes. The digest pass is skipped because it takes tens of seconds on a
+    backlog, which would make "--wait 6" take a minute.
 
     The output has to be relayed, not inherited (issue #91): this process is
     started by the agent without a console, so a CREATE_NO_WINDOW child would

@@ -37,7 +37,18 @@
 15. `listen.py` 显式传超预算 `--timeout` 时自己打 WARN（与 `reply.py --wait` 同口径），
     预算内的取值不得出现 WARN。
 16. 探针必须从**真实进程**的命令行里读出 `--timeout`（WMI 那条查询曾经只取 pid）。
-17. 监听探针按仓库根圈定（issue #94）：别的 worktree / 门禁临时起的 listen.py
+17. 默认形态（不传 `--cycles`）自己就能回来：rc=0、只跑一轮、末行 `NO_WORK` +
+    `RESTART:`。整次调用的等待额度由所有轮次共享，不能每轮领一份新的（issue #88）。
+18. 不限轮数（`--cycles 0`）也得在额度内收手，不是不等就是被宿主砍掉。
+19. `clamp_wait()` 只给事实：额度用尽时返回 0，已经过去的时间要从额度里扣掉，
+    超预算的取值压回额度内；`listen.py --cycles` 的 argparse 实际 default 必须是 1
+    （写死 `default=0` 就退回无限轮）。
+20. `clamp_wait()` 算出来的秒数必须真的交给 `watch.py`，而且打印的秒数要跟它
+    一致：只断言「函数算得对」时，把实等改回传入值仍全绿（issue #88 复核）。
+21. 透传样本值必须真的落在透传区间里且不等于常量本身；预算收缩到装不下
+    「短等待」与「预算内」两个区间时，红在**预算不自洽**上，不红在重挂提示的
+    措辞上（issue #95：合法的预算收缩不许变成门禁假红）。
+22. 监听探针按仓库根圈定（issue #94）：别的 worktree / 门禁临时起的 listen.py
     不算「已有监听」，`reply.py` 的续挂判断与 `--status` 的监听行都只看本树；
     本树的监听（含绝对路径起的孤儿）仍必须被认出。
 
@@ -236,6 +247,22 @@ def _quoted_timeouts(rel):
                 and id(node) not in docs):
             found += re.findall(r"--timeout[ =](\d+)", node.value)
     return found
+
+
+def inside_probe():
+    """透传区间内的样本值；预算装不下区间时返回 None（issue #95）。
+
+    透传条件是 `SHORT_WAIT <= timeout <= WAIT_BUDGET`（listen.restart_hint），
+    所以样本取 `max(WAIT_BUDGET - 10, SHORT_WAIT + 10)` 夹进区间；但裸夹会在
+    `WAIT_BUDGET <= SHORT_WAIT + 20` 时恰好夹到 `WAIT_BUDGET` 本身——#86 的
+    教训是探针恰好等于常量时，「永远报常量」的坏实现区分不出，所以再往里收
+    一格。两个前提都不成立（`WAIT_BUDGET < SHORT_WAIT + 10`）时返回 None，
+    由 `预算装得下透传区间` 那条契约点名，这里不硬测区间外的值。
+    """
+    if wg_budget.WAIT_BUDGET < listen.SHORT_WAIT + 10:
+        return None
+    return min(max(wg_budget.WAIT_BUDGET - 10, listen.SHORT_WAIT + 10),
+               wg_budget.WAIT_BUDGET - 1)
 
 
 # ---------- listen.py：退出时给出可粘贴的下一步 ----------
@@ -463,12 +490,140 @@ def 常驻周期不长于等待预算():
 
 
 @case
+def 默认路径自己返回():
+    """默认形态（不传 `--cycles`）必须在预算内自己返回（issue #88）。
+
+    #88 之前 `--cycles` 的 argparse default 是 0 = 不限轮，`while True` 永远
+    转下去：宿主在 120s 处截断这次调用，进程树连同 `watch.py` 一起被杀，监听
+    就此静默消失——而 `--status` 在那之前一直报「已挂」。本门禁里调 `listen.py`
+    的契约全都显式带 `--cycles 1`，默认路径一次都没被测过，这里补上。
+
+    断言不是「有输出」，而是「自己回来了」：rc=0、只跑了 1 轮、末行 `NO_WORK`
+    + `RESTART:`。timeout 给 30s 而不是默认的 120s：回归时要快速变红，而不是把
+    整条门禁挂到超时。
+    """
+    with temp_dir(prefix="wg-rehang-") as home:
+        fixture_home(home)
+        proc = run_script(home, "listen.py", "--timeout", "1", timeout=30)
+    out = proc.stdout
+    return (proc.returncode == 0
+            and len(re.findall(r"第 \d+ 轮", out)) == 1
+            and index_of(out, "NO_WORK") >= 0
+            and index_of(out, "RESTART:") > index_of(out, "NO_WORK"))
+
+
+@case
+def 不限轮数也在额度内收手():
+    """`--cycles 0`（不限轮数）也得在额度内收手（issue #88）。
+
+    「不限轮数」在 #88 之前是字面意思上的无限：整次调用永不返回，等宿主来砍，
+    进程树连同子监听一起死。这里把预算压到 1s、每轮只花 0.2s，断言它自己收手
+    （`NO_WORK` + `RESTART:` + 一行说明），而不是把整次调用拖到宿主超时。
+
+    压预算、假扮 `watch.py`（返回 2 = 静默超时）是刻意的：真实额度 90s，CI 跑
+    满要 90s，而这条要测的恰恰是「自己收手」这个分支。假扮的 `watch.py` 另有
+    一个 50 轮上限：回归时（循环没有收手点）要在第 51 轮抛错变红，而不是把整条
+    门禁挂死——挂死的门禁比红的门禁难查得多。
+    """
+    originals = (wg_budget.WAIT_BUDGET, listen.run, sys.argv)
+    calls = []
+
+    def fake_run(script, *args):
+        calls.append(script)
+        if len(calls) > 50:
+            raise RuntimeError("轮数没有收手：50 轮之后仍在循环")
+        time.sleep(0.2)
+        return 2
+
+    buf = io.StringIO()
+    try:
+        wg_budget.WAIT_BUDGET = 1
+        listen.run = fake_run
+        sys.argv = ["listen.py", "--timeout", "1", "--cycles", "0", "--no-digest"]
+        with contextlib.redirect_stdout(buf):
+            code = listen.main()
+    finally:
+        wg_budget.WAIT_BUDGET, listen.run, sys.argv = originals
+    out = buf.getvalue()
+    return (code == 0 and "NO_WORK" in out and "RESTART:" in out
+            and "等待额度" in out)
+
+
+@case
+def 轮数上限由等待预算决定():
+    """整次调用的等待额度是所有轮次共享的**总额**（issue #88）。
+
+    `AGENTS.md` 写的是「单次调用最多能等 WAIT_BUDGET=90」，所以这一轮能等多少
+    要减掉已经过去的部分，而不是每轮都领一份新的额度。这里钉住四件事：额度用尽
+    时返回 0（调用方该收手）、已经过去的时间要扣掉、超预算的取值压回额度内、
+    以及 `listen.py --cycles` 的 argparse **实际** default 必须是有界的 1。
+
+    最后一条用 `_arg_default` 解析 argparse 自己的 `default=`：只断言模块常量
+    不够，写死 `default=0` 而别处仍留 1 时，「常量有界」照样绿（#83 的同类坑）。
+    """
+    wait_budget = wg_budget.WAIT_BUDGET
+    return (wg_budget.clamp_wait(10, 0) == 10
+            and wg_budget.clamp_wait(wait_budget, 0) == wait_budget
+            and wg_budget.clamp_wait(10, wait_budget) == 0
+            and wg_budget.clamp_wait(10, wait_budget + 5) == 0
+            and wg_budget.clamp_wait(10, wait_budget - 5) == 5
+            and wg_budget.clamp_wait(wait_budget * 2, 0) == wait_budget
+            # 已经过去的时间不能是负数：负 elapsed 会让额度凭空多出一截
+            # （clamp_wait(300, -5) 曾等于 95 > WAIT_BUDGET），负值按 0 算。
+            and wg_budget.clamp_wait(wait_budget * 2, -5) == wait_budget
+            and _arg_default("water-group/daemon/listen.py", "--cycles") == 1)
+
+
+@case
+def 传给watch的秒数被额度夹住():
+    """`clamp_wait()` 的结果必须真的用在 `watch.py` 上（issue #88）。
+
+    只断言「`clamp_wait()` 算得对」不够：把 `run("watch.py", "--timeout", str(wait))`
+    改回 `str(args.timeout)`，前十九条照样全绿（变异实测），而 `--timeout 300` 时
+    `watch.py` 实等 300s > 宿主 120s —— 进程树连同子监听一起被杀、监听静默消失，
+    正是 #88 的症状。所以这里钉两条：**实收秒数 ≤ 预算**，且**打印的秒数 == 实收
+    秒数**（后者挡住「打印按夹住的值、实等按传入的值」这种半改）。
+
+    样本必须用**超预算**的取值：`--timeout 90` 恰好等于额度，压不出差异，测了
+    等于没测。
+
+    `listen.run` 被换成探针（返回 2 = 静默超时），所以这条不真的等 90s；断言的是
+    「算出来的秒数被交出去」而不是「等够了那么久」。
+    """
+    originals = (listen.run, sys.argv)
+    seen = []
+
+    def spy(script, *args):
+        seen.append((script, args))
+        return 2
+
+    buf = io.StringIO()
+    try:
+        listen.run = spy
+        sys.argv = ["listen.py", "--timeout", "300", "--cycles", "1", "--no-digest"]
+        with contextlib.redirect_stdout(buf):
+            code = listen.main()
+    finally:
+        listen.run, sys.argv = originals
+
+    out = buf.getvalue()
+    passed = [int(args[args.index("--timeout") + 1])
+              for script, args in seen
+              if script == "watch.py" and "--timeout" in args]
+    printed = next((ln for ln in lines(out) if ln.startswith("等最多")), "")
+    return (code == 0 and passed
+            and max(passed) <= wg_budget.WAIT_BUDGET
+            and f"等最多 {max(passed)}s" in printed)
+
+
+@case
 def 等待开始前声明边界():
     """进入 `watch.py` 之前必须说一句「在等、等多久」（issue #83）。
 
-    这条是 issue 的决定性一条：`listen.py` 按设计不返回，群里一直安静时宿主迟早
-    会截断这次调用，而截断路径上一个字都不打印。所以断言不是「有输出」，而是
-    「等待开始那一句在 `TIMEOUT` 之前就出来了」——被砍掉时它是唯一的痕迹。
+    这条是 issue 的决定性一条：`listen.py` 按设计有界（issue #88 之前是「按设计
+    不返回」），但调用方仍可能显式要一个装不下的取值——那种情况下宿主迟早会截断
+    这次调用，而截断路径上一个字都不打印。所以断言不是「有输出」，而是「等待开始
+    那一句在 `TIMEOUT` 之前就出来了」——被砍掉时它是唯一的痕迹。
 
     锚点必须是 `TIMEOUT`（`watch.py` 等完之后才打的那行），不能用 `NO_WORK`：
     两者都在等待之后，把这句话挪到 `run()` 下面仍然会排在 `NO_WORK` 前面，
@@ -487,12 +642,28 @@ def 等待开始前声明边界():
 
 
 @case
+def 预算装得下透传区间():
+    """预算合法收缩不许把门禁变成绊脚石（issue #95 候选 2）。
+
+    透传样本要落在 `[SHORT_WAIT, WAIT_BUDGET]` 且不等于常量本身，前提是预算
+    装得下「短等待」与「预算内」两个区间。预算小到装不下时，那是**预算本身**
+    要重新设计（`SHORT_WAIT` 是给 `reply.py --wait` 这类有界等待用的），红在
+    预算不自洽上，而不是让 `超预算的取值不写进重挂命令` 以无关的签名假红。
+    """
+    return listen.SHORT_WAIT + 10 <= wg_budget.WAIT_BUDGET
+
+
+@case
 def 超预算的取值不写进重挂命令():
     """RESTART 行不推荐撑不住的取值（issue #83）。
 
     `restart_hint` 原来把任何 ≥60s 的取值原样透传，于是 `--timeout 300` 被推荐
     回来、被截断、再被推荐回来。现在三个区间：短等待回到常驻周期、超预算压回
     预算、其余原样透传。
+
+    透传样本由 `inside_probe()` 取（issue #95）：直接用 `WAIT_BUDGET - 10` 的话，
+    预算合法收缩到 ≤70 时样本落进短等待夹回区间，断言以与被测行为无关的理由
+    假红——预算装不下区间时这里跳过透传样本，红交给 `预算装得下透传区间`。
     """
     def hint(seconds):
         buf = io.StringIO()
@@ -500,12 +671,19 @@ def 超预算的取值不写进重挂命令():
             listen.restart_hint(seconds)
         return buf.getvalue()
 
-    inside = wg_budget.WAIT_BUDGET - 10
+    inside = inside_probe()
+    if inside is None:
+        print(f"  WAIT_BUDGET {wg_budget.WAIT_BUDGET} 装不下透传区间"
+              f"（需 >= SHORT_WAIT+10 = {listen.SHORT_WAIT + 10}），透传样本跳过，"
+              f"由『预算装得下透传区间』点名")
+        passes_through = True
+    else:
+        passes_through = f"--timeout {inside}" in hint(inside)
     return (f"--timeout {wg_budget.WAIT_BUDGET}" in hint(300)
             and f"--timeout {wg_budget.WAIT_BUDGET}" in hint(wg_budget.AGENT_TOOL_TIMEOUT * 2)
             and f"--timeout {wg_budget.WAIT_BUDGET}" in hint(wg_budget.WAIT_BUDGET)
             and f"--timeout {wg_budget.WAIT_BUDGET}" in hint(1)
-            and f"--timeout {inside}" in hint(inside))
+            and passes_through)
 
 
 @case

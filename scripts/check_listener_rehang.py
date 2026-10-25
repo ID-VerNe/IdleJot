@@ -60,7 +60,6 @@
     截断」，都不许再出现「很可能…被截断」（issue #97）。
 25. 边界行推荐的「更短」取值必须真的更短：严格小于实际等待值（因此也小于
     `WAIT_BUDGET`）；折半后不足一秒时只留 `--no-wait`（issue #97）。
-
 26. 仓外的私有 SOP（`~/.water-group/rules/*.md`）里的示例命令同样不得超预算——
     它是 Agent「动手前先读」的最高权威文档，却不在第 11 条的扫描范围里，于是
     权威路径反向：仓库说 90、私有 SOP 说 240 / 300（issue #87）。扫的是**可照抄
@@ -69,6 +68,11 @@
 27. 私有 SOP 的扫描器**、接线与模块级绑定**都必须真能报出漂移：脏样本必被抓，
     干净样本与反面示例必被放过，判定层的跳过条件、模块级绑定的取根时机与
     `@case` 注册也必被覆盖。否则第 26 条在 CI 上（没有私有库）就是永远绿的空壳。
+
+28. 本树门禁/测试起的临时监听（命令行带 `--probe`）不算「已有监听」：
+    `listener_pids()` 与 `listener_specs()` 都不报它，`reply.py` 的续挂判断
+    与 `--status` 的监听行因此不受跑门禁影响；不带 `--probe` 的本树监听
+    （含绝对路径起的孤儿）仍必须被认出（issue #94 分节 PB）。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -404,7 +408,7 @@ def 静默超时后带重挂提示():
     with temp_dir(prefix="wg-rehang-") as home:
         fixture_home(home)
         proc = run_script(home, "listen.py", "--cycles", "1", "--timeout", "1",
-                          "--no-digest")
+                          "--no-digest", "--probe")
     out = proc.stdout
     work = index_of(out, "NO_WORK")
     restart = index_of(out, "RESTART:")
@@ -417,7 +421,7 @@ def 唤醒之后带重挂提示():
         fixture_home(home)
         write_events(home, [event(1, 5, "@机器人 在吗")])
         proc = run_script(home, "listen.py", "--cycles", "1", "--timeout", "10",
-                          "--no-digest")
+                          "--no-digest", "--probe")
     out = proc.stdout
     wake = index_of(out, "WAKE")
     restart = index_of(out, "RESTART:")
@@ -429,7 +433,7 @@ def 重挂命令可原样粘贴且回到常驻周期():
     with temp_dir(prefix="wg-rehang-") as home:
         fixture_home(home)
         proc = run_script(home, "listen.py", "--cycles", "1", "--timeout", "1",
-                          "--no-digest")
+                          "--no-digest", "--probe")
     hint = next((ln for ln in lines(proc.stdout) if ln.startswith("RESTART:")), "")
     # 短等待 1s 是 reply --wait 的临时边界，重挂必须回到常驻周期；
     # --cycles / --no-digest 同样不该透传。周期值读常量而不是写死 300（issue #83）：
@@ -574,7 +578,7 @@ def 父子超预算措辞不矛盾():
         fixture_home(home)
         write_events(home, [event(1, 5, "@机器人 在吗")])
         child = run_script(home, "listen.py", "--cycles", "1", "--timeout",
-                           str(over), "--no-digest")
+                           str(over), "--no-digest", "--probe")
     both = loud + child.stdout
     return (child.returncode == 0
             and "不会因此被截断" in loud
@@ -707,7 +711,8 @@ def 默认路径自己返回():
     """
     with temp_dir(prefix="wg-rehang-") as home:
         fixture_home(home)
-        proc = run_script(home, "listen.py", "--timeout", "1", timeout=30)
+        proc = run_script(home, "listen.py", "--timeout", "1", "--probe",
+                          timeout=30)
     out = proc.stdout
     return (proc.returncode == 0
             and len(re.findall(r"第 \d+ 轮", out)) == 1
@@ -836,7 +841,7 @@ def 等待开始前声明边界():
     with temp_dir(prefix="wg-rehang-") as home:
         fixture_home(home)
         proc = run_script(home, "listen.py", "--cycles", "1", "--timeout", "1",
-                          "--no-digest")
+                          "--no-digest", "--probe")
     out = proc.stdout
     waiting = index_of(out, "等最多 1s（第 1 轮）")
     timed_out = index_of(out, "TIMEOUT")
@@ -988,12 +993,12 @@ def 显式超预算的监听自己告警():
         fixture_home(home)
         write_events(home, [event(1, 5, "@机器人 在吗")])
         loud = run_script(home, "listen.py", "--cycles", "1", "--timeout",
-                          str(over), "--no-digest")
+                          str(over), "--no-digest", "--probe")
     with temp_dir(prefix="wg-rehang-") as home:
         fixture_home(home)
         write_events(home, [event(2, 5, "@机器人 在吗")])
         quiet = run_script(home, "listen.py", "--cycles", "1", "--timeout",
-                           str(wg_budget.WAIT_BUDGET), "--no-digest")
+                           str(wg_budget.WAIT_BUDGET), "--no-digest", "--probe")
     warn_at = index_of(loud.stdout, "WARN")
     wait_at = index_of(loud.stdout, "等最多")
     return (loud.returncode == 0 and "WARN" in loud.stdout
@@ -1013,33 +1018,39 @@ def 探针从真实监听读出超时():
     起的是**本仓**的 listen.py 而不是 temp 下的假脚本（issue #94）：探针现在
     按仓库根圈定监听，temp 下的假脚本会被判成异树——那是新用例的活，这条只管
     「本树监听被认出且读得出预算」。
+
+    进程带 `--probe`（issue #94 PB：本树门禁临时监听不进过滤层），所以断言
+    从「`listener_specs()` 认出它」调整为「`_match_rows` 原始匹配到它 +
+    `parse_timeout` 读出 300」——端到端契约不变（WMI 查询拿到命令行 → 解析
+    出秒数，`listener_specs` 的 timeout 字段本来就是这条链的产物），过滤层
+    由「本树门禁临时监听不算已有监听」那条钉。
     """
     if os.name != "nt":
         return True  # 本仓只跑 Windows（探针在 posix 上是 ps 兜底）
-    specs_of = getattr(up, "listener_specs", None)
-    if specs_of is None:
-        return False  # 旧代码没有这层探针：读不出命令行里的 --timeout
+    if not hasattr(wg_up_probe, "parse_timeout"):
+        return False  # 旧代码没有这层解析：读不出命令行里的 --timeout
     over = 300
     with temp_dir(prefix="wg-listener-") as home:
         fixture_home(home)
         proc = subprocess.Popen([sys.executable, str(DAEMON / "listen.py"),
-                                 "--timeout", str(over)],
+                                 "--timeout", str(over), "--probe"],
                                 cwd=str(ROOT), env=child_env(home),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        specs = []
+        rows = []
         try:
             deadline = time.time() + 30
             while time.time() < deadline:
-                specs = specs_of(exclude=up.self_pids())
-                if any(str(s.get("pid")) == str(proc.pid) for s in specs):
+                rows = wg_up_probe._match_rows("daemon[\\\\/]listen\\.py",
+                                               exclude=up.self_pids())
+                if any(str(pid) == str(proc.pid) for pid, _ in rows):
                     break
                 time.sleep(1)
         finally:
             # 收树：venv 的 python.exe 是个转发器，真解释器是它的子进程。
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
                            capture_output=True)
-    mine = [s for s in specs if str(s.get("pid")) == str(proc.pid)]
-    return bool(mine) and mine[0].get("timeout") == over
+    mine = [cmdline for pid, cmdline in rows if str(pid) == str(proc.pid)]
+    return bool(mine) and wg_up_probe.parse_timeout(mine[0]) == over
 
 
 @case
@@ -1192,6 +1203,60 @@ def 私有SOP扫描器能识别漂移():
         registered_ok = 私有SOP示例不超预算 in CASES
 
     return scanner_ok and wired_ok and root_ok and bound_ok and registered_ok
+
+
+@case
+def 本树门禁临时监听不算已有监听():
+    """本树门禁起的临时监听不算「已有监听」（issue #94 PB）。
+
+    按仓库根圈定（PA）只挡得住**别的树**：门禁在**本树**起的临时监听用的是
+    本仓绝对路径（`run_script` 的 `str(DAEMON / "listen.py")` + `cwd=ROOT`），
+    命令行形状与真监听同根，`_own_checkout()` 认不出来——issue #94 复现里
+    那样的进程被 `listener_pids()` 报出，挂机时跑门禁，`reply.py` 的续挂
+    判断就跟着跳过一次必要的续挂，门禁跑完临时监听退出，群里没人值守。
+
+    这里起两个同形本树监听（本仓绝对路径、`cwd=ROOT`、隔离
+    `WATER_GROUP_HOME`）：一个带 `--probe`（门禁临时标识），一个不带。先轮询
+    `_match_rows` 证明 WMI 都看见了它们（否则「进程还没注册」和「被过滤掉」
+    分不开）；再断言带 `--probe` 的两个 finder 都不报，**不带 `--probe` 的
+    必须报**——后半条防的是「过滤层整体失效」的坏实现：把两个 finder 改成
+    永远返回空，前半条照样绿，而不带 `--probe` 的本树监听（`reply.py` 续挂、
+    `RESTART:` 重挂、人工挂的）会被一起漏掉，那正是 issue #94 要保的东西。
+
+    断言都做在进程**活着**的时候（独立复核抓出的假绿）：收树之后再查，死
+    进程谁也查不到，「不过滤」的坏实现也照样绿。
+    """
+    if os.name != "nt":
+        return True  # 本仓只跑 Windows（探针在 posix 上是 ps 兑底）
+    with temp_dir(prefix="wg-probe-") as home:
+        fixture_home(home)
+        procs = []
+        try:
+            for extra in (("--probe",), ()):
+                procs.append(subprocess.Popen(
+                    [sys.executable, str(DAEMON / "listen.py"),
+                     "--cycles", "1", "--timeout", "20", "--no-digest", *extra],
+                    cwd=str(ROOT), env=child_env(home),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            marked, plain = str(procs[0].pid), str(procs[1].pid)
+            raw = []
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                raw = [pid for pid, _ in wg_up_probe._match_rows(
+                    "daemon[\\\\/]listen\\.py", exclude=up.self_pids())]
+                if marked in raw and plain in raw:
+                    break
+                time.sleep(1)
+            if marked not in raw or plain not in raw:
+                return False  # WMI 没看见：用例前提不成立，不能当通过
+            pids = up.listener_pids()
+            specs = [str(s.get("pid")) for s in up.listener_specs()]
+            return (marked not in pids and marked not in specs
+                    and plain in pids and plain in specs)
+        finally:
+            for proc in procs:
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                               capture_output=True)
 
 
 def main():

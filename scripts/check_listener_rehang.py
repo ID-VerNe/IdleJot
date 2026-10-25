@@ -47,7 +47,6 @@
     干净样本与反面示例必被放过，判定层的跳过条件、模块级绑定的取根时机与
     `@case` 注册也必被覆盖。否则第 17 条在 CI 上（没有私有库）就是永远绿的空壳。
 
-
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
     .venv/Scripts/python.exe scripts/check_listener_rehang.py
@@ -68,7 +67,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # `import check_fixture_support` 之前先把 env 里的数据根**记下来**：那模块在 import 期
 # 会把它钉成临时目录，事后只剩夹具目录。这里记的是「import 之前真实的那个值」，
-# 契约 14 用它当锚点——验「模块级的 PRIVATE_HOME 仍由它解析而来」。
+# 契约 18 用它当锚点——验「模块级的 PRIVATE_HOME 仍由它解析而来」。
 # 锚点只用公开信息（env + 家目录），不碰别的模块的私有变量：绑在
 # `check_fixture_support._PINNED_HOME` 上时，那变量一旦改名，锚点就静默消失。
 _PRE_WGH = os.environ.get("WATER_GROUP_HOME")

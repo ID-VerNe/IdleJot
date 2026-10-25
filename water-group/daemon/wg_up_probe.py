@@ -20,8 +20,13 @@ import re
 import socket
 import subprocess
 import time
+from pathlib import Path
 
 import winconsole  # noqa: E402  (探针与 taskkill 都是控制台程序，开窗抑制走它，issue #39)
+
+# 本 checkout 的仓库根（issue #94）：监听探针用它把「别的 worktree / 门禁临时起的
+# listen.py」排除出去。探针层不认识配置，但认识自己住在哪棵树里是分内事。
+ROOT = Path(__file__).resolve().parents[2]
 
 NAPCAT_PORTS = (43000, 43001)
 BACKEND_PORTS = (47860, 48777)
@@ -33,7 +38,9 @@ STOP_PORTS = NAPCAT_PORTS + BACKEND_PORTS
 #
 # listen.py is deliberately absent: it is the agent's one-shot loop, not part of the
 # stack, and it exits on its own after a wake. Killing it here would also kill a
-# listener that is mid-`--wait` in some other turn.
+# listener that is mid-`--wait` in some other turn. Consistently, `listener_pids()`
+# answers for *this* checkout only (issue #94) -- it never reports another tree's
+# listener, so a stop here neither sees nor touches one.
 #
 # Multi-group (`--stop --group A`) is not implemented yet; when it is, these
 # fingerprints have to carry the group argument. See doc/MULTI_GROUP_PLAN.md.
@@ -128,6 +135,32 @@ def _match_pids(pattern, exclude=None):
     return [pid for pid, _ in _match_rows(pattern, exclude)]
 
 
+# A listen.py script path written as an absolute path (issue #94). Only the drive
+# letter anchors the match, so mixed separators (`water-group\daemon/listen.py`)
+# still count; the venv interpreter path never ends in `listen.py` and cannot
+# match. A command line without one was launched relative to the repo root -- the
+# only way the daemon is ever started relatively (`reply.py` passes `cwd=ROOT`,
+# the `RESTART:` hint assumes the same) -- so it belongs to this tree.
+_ABS_LISTEN = re.compile(r"[A-Za-z]:[\\/][^\s|]*listen\.py")
+
+
+def _own_checkout(cmdline):
+    """False when the command line pins listen.py to another checkout (issue #94).
+
+    Worktrees are the norm here (one per issue), and gate scripts spawn throwaway
+    listeners in temp trees, so "matches daemon/listen.py" is not ownership.
+    Known limit: WMI does not expose a process's cwd, so a foreign listener
+    started with a *relative* path is indistinguishable from ours -- every
+    existing start path is either absolute or rooted at the repo root.
+    """
+    found = _ABS_LISTEN.search(cmdline or "")
+    if not found:
+        return True
+    root = os.path.normcase(str(ROOT))
+    script = os.path.normcase(found.group(0))
+    return script == root or script.startswith(root.rstrip("\\/") + os.sep)
+
+
 def supervisor_pids(exclude=None):
     """PIDs of a live guard loop: either supervisor.py or this script resident.
 
@@ -160,14 +193,21 @@ def transient_pids(exclude=None):
 
 
 def listener_pids(exclude=None):
-    """PIDs of the agent's listen.py loop.
+    """PIDs of *this* checkout's listen.py loop (issue #94 scopes it to the tree).
 
     That loop is the only thing that turns "a message arrived" into "wake the
     agent", and it lives for exactly one wake. An empty answer here is not a
     harmless idle state: the collector keeps writing events and nobody ever reads
     them, which looks to the group like the bot stopped hearing them.
+
+    The answer is scoped to the tree this probe itself lives in. The bare script
+    pattern also matches listen.py processes started from other worktrees and by
+    gate scripts, and consumers then misread them as "a listener is already
+    up": `reply.py` skipped a necessary re-hang that way, and a `--status` pid
+    belonging to another tree invited a `taskkill` that broke the gate mid-run.
     """
-    return _match_pids("daemon[\\\\/]listen\\.py", exclude)
+    return [pid for pid, cmdline in _match_rows("daemon[\\\\/]listen\\.py", exclude)
+            if _own_checkout(cmdline)]
 
 
 def parse_timeout(cmdline):
@@ -182,16 +222,19 @@ def parse_timeout(cmdline):
 
 
 def listener_specs(exclude=None):
-    """`[{"pid": str, "timeout": int | None}]` for every live listen.py.
+    """`[{"pid": str, "timeout": int | None}]` for this checkout's listen.py.
 
     The timeout comes off the command line, because that is the only place a
     running listener says which budget it is on (issue #86): `--status` used to
     report the pid alone, so a listener started before the budget fix looked
     exactly like one started after it -- and the old one dies on the next quiet
-    stretch without a word on the way out.
+    stretch without a word on the way out. Scoped to this tree like
+    `listener_pids()` (issue #94): another worktree's listener is not ours to
+    report, diagnose, or kill.
     """
     return [{"pid": pid, "timeout": parse_timeout(cmdline)}
-            for pid, cmdline in _match_rows("daemon[\\\\/]listen\\.py", exclude)]
+            for pid, cmdline in _match_rows("daemon[\\\\/]listen\\.py", exclude)
+            if _own_checkout(cmdline)]
 
 
 def commands_pids(exclude=None):

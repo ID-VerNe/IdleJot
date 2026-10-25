@@ -51,7 +51,9 @@
 上一个字都不打印——Agent 看到的最后一行停在「等下一次唤醒…」，分不清是被杀还是还在等。
 要短一点用 `--wait 60`，要立刻返回用 `--no-wait`。`listen.py` 每轮进入 `watch.py` 之前会打
 「等最多 90s（第 1 轮）…」，`RESTART:` 行只推荐不超预算的取值（短的回常驻周期、超的压回
-预算），文档里的 `--timeout` 示例也由 `scripts/check_listener_rehang.py` 逐个扫。
+预算），文档里的 `--timeout` 示例也由 `scripts/check_listener_rehang.py` 逐个扫；
+**仓外的私有规则 `~/.water-group/rules/*.md` 同样在扫**（issue #87）——它不在仓内，
+但「动手前先读」的最高权威文档不能教超预算的取值。
 
 追问窗口：回复成功后 `reply.py` 自动开窗（默认再跟 10 条或静默 180 秒），群里继续聊的
 几句也会唤醒监听（唤醒行带 `[追问]` 前缀），话题能接着走；`--no-followup` 单次关闭。

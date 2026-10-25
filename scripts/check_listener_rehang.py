@@ -29,6 +29,7 @@
 11. 文档（`AGENTS.md` / `README.md` / `.agents/rules/water_group.md` / `SKILL.md`）
     里的 `--timeout` 示例不得超预算——Agent 照抄的是它们，不是源码。守护脚本里的
     字符串字面量（`up.py --status` 的提示串）同扫，注释与 docstring 不算推荐值。
+    仓外那份私有 SOP 口径不同，由第 26 条单扫。
 12. `watch.py` 裸跑时的 `--timeout` 默认值同样不超预算，且 argparse 的实际 default
     必须等于模块常量（写死 `default=240` 而常量仍是 90 会绕过第 8 条）。
 13. `--status` 的「监听」行必须带上每个监听**实际的** `--timeout`（issue #86）：
@@ -60,6 +61,15 @@
 25. 边界行推荐的「更短」取值必须真的更短：严格小于实际等待值（因此也小于
     `WAIT_BUDGET`）；折半后不足一秒时只留 `--no-wait`（issue #97）。
 
+26. 仓外的私有 SOP（`~/.water-group/rules/*.md`）里的示例命令同样不得超预算——
+    它是 Agent「动手前先读」的最高权威文档，却不在第 11 条的扫描范围里，于是
+    权威路径反向：仓库说 90、私有 SOP 说 240 / 300（issue #87）。扫的是**可照抄
+    的片段**（围栏代码块的整行 + 行内代码），不是全文：私有文档里有「`--wait 180`
+    会被砍掉」这类故意讲反面的解释，全文正则扫会误报。私有库不存在时跳过。
+27. 私有 SOP 的扫描器**、接线与模块级绑定**都必须真能报出漂移：脏样本必被抓，
+    干净样本与反面示例必被放过，判定层的跳过条件、模块级绑定的取根时机与
+    `@case` 注册也必被覆盖。否则第 26 条在 CI 上（没有私有库）就是永远绿的空壳。
+
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
     .venv/Scripts/python.exe scripts/check_listener_rehang.py
@@ -77,6 +87,40 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# `import check_fixture_support` 之前先把 env 里的数据根**记下来**：那模块在 import 期
+# 会把它钉成临时目录，事后只剩夹具目录。这里记的是「import 之前真实的那些值」，
+# 契约 27 用它们当锚点——验「模块级的 PRIVATE_HOME 仍由它们解析而来」。
+# 锚点只用公开信息（env + 家目录），不碰别的模块的私有变量：绑在
+# `check_fixture_support._PINNED_HOME` 上时，那变量一旦改名，锚点就静默消失。
+# 两条腿都要记：`WATER_GROUP_HOME` 与 `IDLEJOT_WG_HOME`（后者是
+# `scripts/check_publication.py` 认的正式候选）。少记一条，锚点在只设了那条的
+# 机器上就会算出另一个根，契约 27 平白变红。
+_PRE_WGH = os.environ.get("WATER_GROUP_HOME")
+_PRE_IWGH = os.environ.get("IDLEJOT_WG_HOME")
+
+
+def _live_private_home(env=None):
+    """真实的私有数据根（**必须在** import `check_fixture_support` 之前调用）。
+
+    `check_fixture_support` 在 import 期把 `WATER_GROUP_HOME` 钉成临时目录（防夹具
+    写进实机，issue #79/#89）。之后再取就只剩夹具目录，仓外的私有规则永远扫不到
+    （issue #87）。口径与 `scripts/check_publication.py` / `scripts/check_tmp_hygiene.py`
+    一致：env 优先，`~/.water-group` 兜底，只有真是目录才算数。
+
+    `env` 只给自检用（传一份 import 之前的 env 快照），生产路径走默认的 `os.environ`。
+    """
+    source = os.environ if env is None else env
+    for cand in (source.get("WATER_GROUP_HOME"),
+                 source.get("IDLEJOT_WG_HOME"),
+                 Path.home() / ".water-group"):
+        if cand and Path(cand).is_dir():
+            return Path(cand)
+    return None
+
+
+PRIVATE_HOME = _live_private_home()
+
 import check_fixture_support  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
 from check_fixture_support import temp_dir  # noqa: E402
 
@@ -102,6 +146,16 @@ DOC_SAMPLES = ("AGENTS.md", "README.md", ".agents/rules/water_group.md",
 # 守护脚本里也有会被人照抄的提示串（`up.py --status` 的「下一步」）。
 DAEMON_SOURCES = tuple(sorted(p.relative_to(ROOT).as_posix()
                               for p in (DAEMON.glob("*.py"))))
+
+# 私有规则文档在仓外（`~/.water-group/rules/`），但它是 Agent「动手前先读」的最高
+# 权威文档（`AGENTS.md` §0 与 `SKILL.md` 都这么写），示例命令同样不得超预算
+# （issue #87）。脚本名单不硬编码：daemon 脚本会增删，名单从目录实时取。
+DAEMON_NAMES = tuple(sorted(Path(rel).name for rel in DAEMON_SOURCES))
+_DAEMON_ALTS = "|".join(re.escape(name) for name in DAEMON_NAMES)
+DAEMON_HINT_RE = re.compile(r"daemon/" + (f"|{_DAEMON_ALTS}" if _DAEMON_ALTS else ""))
+TIMEOUT_FLAG_RE = re.compile(r"--(?:timeout|wait)[ =](\d+)")
+FENCE_RE = re.compile(r"^\s*```")
+INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 
 CASES = []
 
@@ -290,6 +344,56 @@ def inside_probe():
         return None
     return min(max(wg_budget.WAIT_BUDGET - 10, listen.SHORT_WAIT + 10),
                wg_budget.WAIT_BUDGET - 1)
+
+
+def _sop_snippets(text):
+    """私有规则文档里**可照抄**的片段（issue #87）。
+
+    两类片段的口径不同，所以分开返回：
+
+    - 围栏代码块里的整行：命令本身就是照抄对象，块里任何 `--timeout N` /
+      `--wait N` 都算推荐值。
+    - 行内代码（`` `...` ``）：多半是「引用某个参数名」（如 `` `--wait` ``），
+      只有片段里点名了 daemon 脚本时才算推荐值。否则「`--wait 180` 会被砍掉」
+      这类**故意讲反面**的解释会被误判——那是私有 SOP 里的真实陷阱。
+    """
+    blocks, inlines = [], []
+    fenced = False
+    for idx, line in enumerate(text.splitlines(), 1):
+        if FENCE_RE.match(line):
+            fenced = not fenced
+            continue
+        if fenced:
+            blocks.append((idx, line))
+            continue
+        for match in INLINE_CODE_RE.finditer(line):
+            inlines.append((idx, match.group(1)))
+    return blocks, inlines
+
+
+def _private_sop_over_budget(rules_dir):
+    """私有规则文档里超预算的照抄取值（issue #87）。
+
+    返回 [(文件名, 行号, 原文片段)]，供契约打印。
+    """
+    over = []
+    for path in sorted(Path(rules_dir).glob("*.md")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        blocks, inlines = _sop_snippets(text)
+        for idx, line in blocks:
+            for match in TIMEOUT_FLAG_RE.finditer(line):
+                if int(match.group(1)) > wg_budget.WAIT_BUDGET:
+                    over.append((path.name, idx, match.group(0)))
+        for idx, snippet in inlines:
+            if not DAEMON_HINT_RE.search(snippet):
+                continue
+            for match in TIMEOUT_FLAG_RE.finditer(snippet):
+                if int(match.group(1)) > wg_budget.WAIT_BUDGET:
+                    over.append((path.name, idx, match.group(0)))
+    return over
 
 
 # ---------- listen.py：退出时给出可粘贴的下一步 ----------
@@ -808,6 +912,8 @@ def 示例命令不超预算():
 
     文档按正则在原文上扫；守护脚本只扫**字符串字面量**（AST，跳过 docstring 与
     注释）：注释里写「300s 会怎样」是解释，不是推荐值，按原文扫会把解释也判红。
+
+    仓外那份私有 SOP 口径不同，由第 26 条单扫（见「私有SOP示例不超预算」）。
     """
     over = []
     for rel in DOC_SAMPLES:
@@ -976,6 +1082,116 @@ def 别的树里的监听不算已有监听():
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
                            capture_output=True)
     return ok
+
+
+@case
+def 私有SOP示例不超预算():
+    """仓外的私有规则文档同样不得教超预算的取值（issue #87）。
+
+    私有 SOP（`~/.water-group/rules/*.md`）是 Agent「动手前先读」的最高权威文档
+    （`AGENTS.md` §0 与 `SKILL.md` 都这么写），而第 11 条只扫仓内那四份——于是权威
+    路径反向：仓库说 90、私有 SOP 说 240 / 300，Agent 照抄后者就复现 #83 原报。
+
+    口径与第 11 条**不同**，别当同一件事：这里扫的是「可照抄的片段」（围栏代码块
+    的整行 + 行内代码），不是全文。私有文档里有「`--wait 180` 会被砍掉」这类**故意
+    讲反面**的解释，全文正则扫会误报；行内代码还要求点名 daemon 脚本才算推荐值。
+    围栏块里不点名脚本也照样算——块里的命令本身就是照抄对象。
+
+    私有库不存在（CI、全新机器）时跳过：这条在 CI 上恒绿，所以另配一条自检契约
+    证明扫描器不是瞎的。
+    """
+    if PRIVATE_HOME is None:
+        return True
+    rules_dir = Path(PRIVATE_HOME) / "rules"
+    if not rules_dir.is_dir():
+        return True
+    over = _private_sop_over_budget(rules_dir)
+    if over:
+        print("  " + "; ".join(f"rules/{name}:{idx}: {flag}"
+                                for name, idx, flag in over))
+    return not over
+
+
+@case
+def 私有SOP扫描器能识别漂移():
+    """扫描器**与接线**都必须真能报出漂移，否则上面那条在 CI 上是永远绿的空壳
+    （issue #87）。
+
+    CI 上没有私有库 →「私有SOP示例不超预算」恒绿；没有这条自检，就分不清「没问题」
+    和「根本没扫」。四层都要验：
+
+    1. 扫描器：脏的被抓、干净的放过、反面示例（`` `--wait 180` 会被砍掉 ``）放过；
+    2. 接线：**直接调用上面那条契约的函数体**（把数据根换掉），脏的必须红，
+       干净的与不存在的根必须绿；
+    3. 根解析：`WATER_GROUP_HOME` / `IDLEJOT_WG_HOME` 指到哪，数据根就该解析到哪；
+    4. 模块级绑定与注册：`PRIVATE_HOME` 必须仍由 import **之前**记下的 env 值解析
+       而来（取根时机被颠倒时它会落进夹具目录，issue #87 的盲区原样重现）、
+       本机有私有库时不能是 `None`、契约本身不能从 `CASES` 里被摘掉。
+
+    第 2 层刻意直接调函数体而不是复制它的逻辑：把契约改成永远 `return True`，
+    或者把跳过条件放宽，复制逻辑的自检照样绿，直接调就会红。第 4 层同理：
+    前三层验的都是函数，模块级的绑定与注册出了错，它们照样全绿。
+    """
+    with temp_dir(prefix="wg-sop-selftest-") as home:
+        dirty_root = home / "dirty-root"
+        clean_root = home / "clean-root"
+        for root in (dirty_root, clean_root):
+            (root / "rules").mkdir(parents=True, exist_ok=True)
+        (dirty_root / "rules" / "water_group.md").write_text(
+            "```bash\n"
+            "python water-group/daemon/watch.py --timeout 240\n"
+            "```\n"
+            "工具调用有超时上限，`--wait 180` 会被砍掉。\n"
+            "但 `reply.py <id> \"<正文>\" --wait 240` 是推荐写法。\n",
+            encoding="utf-8")
+        (clean_root / "rules" / "water_group.md").write_text(
+            "```bash\n"
+            "python water-group/daemon/watch.py --timeout 90\n"
+            "```\n"
+            "工具调用有超时上限，`--wait 180` 会被砍掉。\n"
+            "但 `reply.py <id> \"<正文>\" --wait 90` 是推荐写法。\n",
+            encoding="utf-8")
+
+        # 1) 扫描器：脏的被抓、反面示例放过
+        over = _private_sop_over_budget(dirty_root / "rules")
+        hits = {(name, idx) for name, idx, _flag in over}
+        scanner_ok = (("water_group.md", 2) in hits
+                      and ("water_group.md", 5) in hits
+                      and ("water_group.md", 4) not in hits)
+
+        # 2) 接线：调契约 26 的函数体，脏根必须红，干净根与不存在的根必须绿
+        saved_home = PRIVATE_HOME
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                globals()["PRIVATE_HOME"] = dirty_root
+                dirty_red = not 私有SOP示例不超预算()
+                globals()["PRIVATE_HOME"] = clean_root
+                clean_green = 私有SOP示例不超预算()
+                globals()["PRIVATE_HOME"] = None
+                missing_green = 私有SOP示例不超预算()
+        finally:
+            globals()["PRIVATE_HOME"] = saved_home
+        wired_ok = dirty_red and clean_green and missing_green
+
+        # 3) 根解析：env 指到哪就解析到哪（两条腿都要认）
+        resolved = _live_private_home({"WATER_GROUP_HOME": str(dirty_root)})
+        root_ok = resolved is not None and Path(resolved) == dirty_root
+        resolved_alt = _live_private_home({"IDLEJOT_WG_HOME": str(dirty_root)})
+        root_ok = root_ok and (resolved_alt is not None
+                               and Path(resolved_alt) == dirty_root)
+
+        # 4) 模块级绑定与注册：取根时机被颠倒 / 绑定被置空 / case 注册被摘掉。
+        #    锚点是 import 之前记下的 env 快照（公开信息）：模块级的 PRIVATE_HOME
+        #    必须仍由它解析而来。取根时机一旦被颠倒，它会落回夹具目录，issue #87
+        #    的盲区原样重现——而上面三层验的都是函数，照样全绿。
+        #    两条腿都要喂（WATER_GROUP_HOME 与 IDLEJOT_WG_HOME）：少喂一条，
+        #    只设了那条的机器上锚点会算出另一个根，契约 27 平白变红。
+        expected_home = _live_private_home({"WATER_GROUP_HOME": _PRE_WGH,
+                                            "IDLEJOT_WG_HOME": _PRE_IWGH})
+        bound_ok = PRIVATE_HOME == expected_home
+        registered_ok = 私有SOP示例不超预算 in CASES
+
+    return scanner_ok and wired_ok and root_ok and bound_ok and registered_ok
 
 
 def main():

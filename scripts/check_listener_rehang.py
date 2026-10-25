@@ -73,6 +73,13 @@
     `listener_pids()` 与 `listener_specs()` 都不报它，`reply.py` 的续挂判断
     与 `--status` 的监听行因此不受跑门禁影响；不带 `--probe` 的本树监听
     （含绝对路径起的孤儿）仍必须被认出（issue #94 分节 PB）。
+29. 仓库子目录里的异树监听不算「已有监听」（issue #101）：§2.7 的 worktree
+    布局是 `<ROOT>/.tmp/wt-<issue>`——在仓库根**之内**，光看「路径落在根下」
+    判不出归属。脚本路径向 ROOT 逐级上行，跨过 `.tmp/wt-*` 槽位或任何已注册
+    worktree 根即判异树：`listener_pids()` / `listener_specs()` 不报它，
+    `reply.py` 的续挂判断与 `--status` 的监听行因此都不受影响；本树监听
+    （含绝对路径起的）仍必须被认出，根下的普通子目录（非 worktree 槽位）
+    也不算边界。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -84,8 +91,10 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -1316,6 +1325,156 @@ def 本树门禁临时监听不算已有监听():
             for proc in procs:
                 subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
                                capture_output=True)
+
+
+@case
+def 归属判定按worktree边界():
+    """`_own_checkout()` 按 worktree 边界判归属，不按「落在根下」（issue #101）。
+
+    §2.7 把每个 issue 的 worktree 放在 `<ROOT>/.tmp/wt-<issue>`——仓库根**之内**，
+    于是 `root in script.parents` 把另一棵树的监听成本树：`reply.py` 打印
+    「已有监听在跑，不再重复挂」跳过一次必要的续挂，而本树监听早已退出
+    （issue 正文的现场）。纯函数四例：
+
+    - `.tmp/wt-87/...`（异树槽位）→ False；
+    - `.tmp/plain/...`（根下的普通子目录，非槽位）→ True——防「把 `.tmp` 整个
+      当边界」的过度过滤：门禁与工具在根下别处起的监听仍算本树；
+    - 本树布局 → True；
+    - 仓库外绝对路径（#94 PA 的既有契约）→ False，不因新判据回退。
+
+    只在 Windows 上跑：`_ABS_LISTEN` 锚盘符，posix 上永远匹配不到绝对路径，
+    这条会退化成恒真空壳（本仓只跑 Windows，与其余探针用例同口径）。
+    """
+    if os.name != "nt":
+        return True
+    root = str(wg_up_probe.ROOT)
+    foreign = Path(tempfile.gettempdir()) / "wg-foreign-abc" / "water-group" \
+        / "daemon" / "listen.py"
+    return (wg_up_probe._own_checkout(
+                root + r"\.tmp\wt-87\water-group\daemon\listen.py --timeout 90") is False
+            and wg_up_probe._own_checkout(
+                root + r"\.tmp\plain\water-group\daemon\listen.py") is True
+            and wg_up_probe._own_checkout(
+                root + r"\water-group\daemon\listen.py") is True
+            and wg_up_probe._own_checkout(str(foreign)) is False)
+
+
+@case
+def 嵌套worktree里的监听不算已有监听():
+    """`.tmp/wt-*` 里的监听不算「已有监听」，本树对照必须仍被认出（issue #101）。
+
+    §2.7 的 worktree 布局是仓库根**子目录**：`<ROOT>/.tmp/wt-<issue>`。里面跑着
+    的 listen.py 绝对路径落在根下，`root in parents` 判它成本树——`reply.py`
+    于是打印「已有监听在跑，不再重复挂」，而本树监听已经退出，群里再有人 @
+    就没人叫醒（issue 正文现场）。
+
+    这里起两个进程：一个假监听按 §2.7 布局放在 `<ROOT>/.tmp/wt-<rand>/water-
+    group/daemon/listen.py`（`time.sleep` 桩，**不注册**——约定判据不依赖
+    git），一个真监听用本仓绝对路径起（对照组）。先轮询 `_match_rows` 证明
+    WMI 两个都看见了（否则「进程还没注册」和「被过滤掉」分不开，断言会假绿）；
+    再断言两个 finder 都不报槽位里的、都报本树那个——后半条防「过滤层整体
+    失效」的坏实现（永远返回空时前半条照样绿，而真监听会被一起漏掉）。
+    断言都做在进程**活着**的时候：收树之后再查，死进程谁也查不到，「不过滤」
+    的坏实现也照样绿。
+    """
+    if os.name != "nt":
+        return True  # 本仓只跑 Windows（探针在 posix 上是 ps 兜底）
+    (ROOT / ".tmp").mkdir(parents=True, exist_ok=True)
+    slot = Path(tempfile.mkdtemp(prefix="wt-", dir=str(ROOT / ".tmp")))
+    with temp_dir(prefix="wg-nested-") as home:
+        fixture_home(home)
+        procs = []
+        try:
+            script = slot / "water-group" / "daemon" / "listen.py"
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+            procs.append(subprocess.Popen(
+                [sys.executable, str(script), "--timeout", "1"],
+                cwd=str(slot), stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL))
+            procs.append(subprocess.Popen(
+                [sys.executable, str(DAEMON / "listen.py"),
+                 "--cycles", "1", "--timeout", "20", "--no-digest"],
+                cwd=str(ROOT), env=child_env(home),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            nested, mine = str(procs[0].pid), str(procs[1].pid)
+            raw = []
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                raw = [pid for pid, _ in wg_up_probe._match_rows(
+                    "daemon[\\\\/]listen\\.py", exclude=up.self_pids())]
+                if nested in raw and mine in raw:
+                    break
+                time.sleep(1)
+            if nested not in raw or mine not in raw:
+                return False  # WMI 没看见：用例前提不成立，不能当通过
+            pids = up.listener_pids()
+            specs = [str(s.get("pid")) for s in up.listener_specs()]
+            return (nested not in pids and nested not in specs
+                    and mine in pids and mine in specs)
+        finally:
+            for proc in procs:
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                               capture_output=True)
+            shutil.rmtree(slot, ignore_errors=True)
+
+
+@case
+def 非约定路径的注册worktree不算已有监听():
+    """`git worktree list` 注册表也参与边界判定（issue #101）。
+
+    约定判据（`.tmp/wt-*`）覆盖 §2.7 布局，但 worktree 不按约定放时它看不见
+    ——`git worktree add .tmp/nested-x` 这样的路径同样落在 ROOT 之下，只实现
+    约定判据的实现会把里面的监听成本树。这里真建一棵**非约定路径**的嵌套
+    worktree（注册进本仓）并起假监听，断言两个 finder 都不报它；git 不可用
+    或建不起树时跳过不红——约定判据已由『嵌套worktree里的监听不算已有监听』
+    端到端覆盖，这条只证明第二个判据真的接了线。
+    """
+    if os.name != "nt":
+        return True
+    if shutil.which("git") is None:
+        print("  git 不可用：跳过注册表用例（约定判据由上一条端到端覆盖）")
+        return True
+    (ROOT / ".tmp").mkdir(parents=True, exist_ok=True)
+    nested = Path(tempfile.mkdtemp(prefix="nested-", dir=str(ROOT / ".tmp")))
+    procs = []
+    try:
+        add = subprocess.run(["git", "-c", "core.quotepath=false", "worktree",
+                              "add", "--detach", str(nested)],
+                             cwd=str(ROOT), capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=120)
+        if add.returncode != 0:
+            print(f"  git worktree add 失败：{(add.stderr or add.stdout).strip()}")
+            return False
+        script = nested / "water-group" / "daemon" / "listen.py"
+        script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+        procs.append(subprocess.Popen(
+            [sys.executable, str(script), "--timeout", "1"],
+            cwd=str(nested), stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL))
+        foreign = str(procs[0].pid)
+        raw = []
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            raw = [pid for pid, _ in wg_up_probe._match_rows(
+                "daemon[\\\\/]listen\\.py", exclude=up.self_pids())]
+            if foreign in raw:
+                break
+            time.sleep(1)
+        if foreign not in raw:
+            return False  # WMI 没看见：用例前提不成立，不能当通过
+        pids = up.listener_pids()
+        specs = [str(s.get("pid")) for s in up.listener_specs()]
+        return foreign not in pids and foreign not in specs
+    finally:
+        for proc in procs:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           capture_output=True)
+        subprocess.run(["git", "worktree", "remove", "--force", str(nested)],
+                       cwd=str(ROOT), capture_output=True, timeout=60)
+        subprocess.run(["git", "worktree", "prune"],
+                       cwd=str(ROOT), capture_output=True, timeout=60)
+        shutil.rmtree(nested, ignore_errors=True)
 
 
 def main():

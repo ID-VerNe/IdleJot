@@ -71,7 +71,10 @@ TIMEOUT_ARG = re.compile(r"--timeout[ =](\d+)")
 # *this* tree starts its temporary listeners with this checkout's own absolute
 # script path -- indistinguishable from a real listener by shape alone. `--probe`
 # is carried by nothing on the duty path (reply.py's re-hang, the `RESTART:`
-# hint, a hand-hung loop), so skipping it costs no real listener.
+# hint, a hand-hung loop), so skipping it costs no real listener. Root scoping
+# itself needed one more boundary (issue #101): §2.7 puts each issue's worktree
+# at `<ROOT>/.tmp/wt-<issue>`, *inside* the root, so "under ROOT" alone would
+# count another tree's listener as ours -- see `_own_checkout`.
 PROBE_ARG = re.compile(r"(?:^|\s)--probe(?:\s|$)")
 
 
@@ -154,11 +157,46 @@ def _match_pids(pattern, exclude=None):
 _ABS_LISTEN = re.compile(r"[A-Za-z]:[\\/][^\s|]*listen\.py")
 
 
+def _registered_worktrees():
+    """Every worktree root registered in this repo (issue #101), normcased.
+
+    `git worktree list --porcelain` is the one authority on worktree boundaries
+    that does not depend on a naming convention: it answers "which directories
+    are checkouts of this repo", nested ones included. It is only consulted for
+    a path already known to sit under ROOT, so a listener elsewhere costs no
+    subprocess. Any failure (no git, not a repo, timeout) reads as "no extra
+    roots": the `.tmp/wt-*` convention in `_own_checkout` still covers the
+    documented layout, and a missed boundary is the pre-#101 behaviour, not a
+    crash on the wake path.
+    """
+    try:
+        out = winconsole.run_hidden(
+            ["git", "-c", "core.quotepath=false", "worktree", "list", "--porcelain"],
+            cwd=str(ROOT), capture_output=True, timeout=30)
+        roots = []
+        for line in (getattr(out, "stdout", None) or b"").decode("utf-8", "ignore").splitlines():
+            if line.startswith("worktree "):
+                roots.append(Path(os.path.normcase(line[len("worktree "):].strip())))
+        return roots
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _own_checkout(cmdline):
-    """False when the command line pins listen.py to another checkout (issue #94).
+    """False when the command line pins listen.py to another checkout (#94/#101).
 
     Worktrees are the norm here (one per issue), and gate scripts spawn throwaway
     listeners in temp trees, so "matches daemon/listen.py" is not ownership.
+
+    Neither is "under the repo root" (issue #101): §2.7 puts each issue's
+    worktree at `<ROOT>/.tmp/wt-<issue>` -- *inside* the root -- so another
+    tree's listener path lives under ROOT exactly like ours does. The walk from
+    the script up to ROOT therefore stops at the first worktree root it crosses:
+    a `.tmp/wt-*` slot (the §2.7 layout, decided without git so a pruned
+    registration still counts) or any root registered in this repo
+    (`git worktree list`). Only a path that reaches ROOT without crossing one is
+    ours.
+
     Known limit: WMI does not expose a process's cwd, so a foreign listener
     started with a *relative* path is indistinguishable from ours -- every
     existing start path is either absolute or rooted at the repo root.
@@ -169,7 +207,15 @@ def _own_checkout(cmdline):
     # normcase 抹平大小写与 `/`、`\` 之差；归属判定交给 pathlib，不手工拼分隔符。
     root = Path(os.path.normcase(str(ROOT)))
     script = Path(os.path.normcase(found.group(0)))
-    return script == root or root in script.parents
+    if script == root or root not in script.parents:
+        return script == root or root in script.parents
+    # script 在 ROOT 之下，还要问「这一路上有没有跨过另一棵 worktree 的根」
+    # （issue #101）。`parents` 由近到远，排在 ROOT 前面的那若干级才是候选边界。
+    parents = list(script.parents)
+    boundary = parents[:parents.index(root)]
+    if any(p.parent.name == ".tmp" and p.name.startswith("wt-") for p in boundary):
+        return False
+    return not any(p in _registered_worktrees() for p in boundary)
 
 
 def supervisor_pids(exclude=None):
@@ -217,10 +263,11 @@ def listener_pids(exclude=None):
     up": `reply.py` skipped a necessary re-hang that way, and a `--status` pid
     belonging to another tree invited a `taskkill` that broke the gate mid-run.
 
-    Root scoping (issue #94 PA) covers other trees; this tree's own gate
-    listeners needed a second, explicit line: they run this checkout's listen.py
-    by absolute path, so shape alone cannot tell them from a real listener. They
-    carry `--probe` (section PB) and are skipped here.
+    Root scoping (issue #94 PA) covers other trees -- including the ones nested
+    *inside* ROOT at `.tmp/wt-<issue>` (§2.7 layout, issue #101); this tree's
+    own gate listeners needed a second, explicit line: they run this checkout's
+    listen.py by absolute path, so shape alone cannot tell them from a real
+    listener. They carry `--probe` (section PB) and are skipped here.
     """
     return [pid for pid, cmdline in _match_rows("daemon[\\\\/]listen\\.py", exclude)
             if _own_checkout(cmdline) and not PROBE_ARG.search(cmdline or "")]
@@ -245,10 +292,10 @@ def listener_specs(exclude=None):
     report the pid alone, so a listener started before the budget fix looked
     exactly like one started after it -- and the old one dies on the next quiet
     stretch without a word on the way out. Scoped to this tree like
-    `listener_pids()` (issue #94): another worktree's listener is not ours to
-    report, diagnose, or kill. Gate/test listeners (`--probe`, section PB) are
-    skipped here too: reporting one invites the `taskkill` that breaks the gate
-    mid-run.
+    `listener_pids()` (issue #94, nested worktrees excluded per issue #101):
+    another worktree's listener is not ours to report, diagnose, or kill. Gate
+    listeners (`--probe`, section PB) are skipped here too: reporting one
+    invites the `taskkill` that breaks the gate mid-run.
     """
     return [{"pid": pid, "timeout": parse_timeout(cmdline)}
             for pid, cmdline in _match_rows("daemon[\\\\/]listen\\.py", exclude)

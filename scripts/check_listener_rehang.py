@@ -49,12 +49,15 @@
 21. 透传样本值必须真的落在透传区间里且不等于常量本身；预算收缩到装不下
     「短等待」与「预算内」两个区间时，红在**预算不自洽**上，不红在重挂提示的
     措辞上（issue #95：合法的预算收缩不许变成门禁假红）。
-22. `reply.py --wait` 的打印与传参都是**实际**等待值（`clamp_wait` 之后）：请求
+22. 监听探针按仓库根圈定（issue #94）：别的 worktree / 门禁临时起的 listen.py
+    不算「已有监听」，`reply.py` 的续挂判断与 `--status` 的监听行都只看本树；
+    本树的监听（含绝对路径起的孤儿）仍必须被认出。
+23. `reply.py --wait` 的打印与传参都是**实际**等待值（`clamp_wait` 之后）：请求
     240s 时打 90s、合计 120s ≤ `AGENT_TOOL_TIMEOUT`、子监听命令行 `--timeout 90`；
     预算内的取值原样透传（issue #97）。
-23. `reply.py` 与 `listen.py` 的超预算措辞不得互相矛盾：两处都写「不会因此被
+24. `reply.py` 与 `listen.py` 的超预算措辞不得互相矛盾：两处都写「不会因此被
     截断」，都不许再出现「很可能…被截断」（issue #97）。
-24. 边界行推荐的「更短」取值必须真的更短：严格小于实际等待值（因此也小于
+25. 边界行推荐的「更短」取值必须真的更短：严格小于实际等待值（因此也小于
     `WAIT_BUDGET`）；折半后不足一秒时只留 `--no-wait`（issue #97）。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
@@ -85,6 +88,7 @@ import reply  # noqa: E402
 import up  # noqa: E402
 import watch  # noqa: E402
 import wg_budget  # noqa: E402
+import wg_up_probe  # noqa: E402  (issue #94 新用例轮询原始匹配行要用 _match_rows)
 
 # 外部测试变量会把 state 又指回实机，这里必须清掉，只留临时数据根。
 ISOLATING_VARS = ("IDLEJOT_WG_STATE", "TULPA_WG_STATE", "IDLEJOT_WG_DB",
@@ -895,6 +899,10 @@ def 探针从真实监听读出超时():
     纯正则只能证明解析函数本身。这里起一个真的 `daemon/listen.py`（带
     `--timeout 300`），让探针去 WMI 里认它：那条查询曾经只取 pid 不取命令行
     （`wg_up_probe.py:82-84`），正则写得再好也读不到那个数。
+
+    起的是**本仓**的 listen.py 而不是 temp 下的假脚本（issue #94）：探针现在
+    按仓库根圈定监听，temp 下的假脚本会被判成异树——那是新用例的活，这条只管
+    「本树监听被认出且读得出预算」。
     """
     if os.name != "nt":
         return True  # 本仓只跑 Windows（探针在 posix 上是 ps 兜底）
@@ -903,10 +911,9 @@ def 探针从真实监听读出超时():
         return False  # 旧代码没有这层探针：读不出命令行里的 --timeout
     over = 300
     with temp_dir(prefix="wg-listener-") as home:
-        script = home / "daemon" / "listen.py"
-        script.parent.mkdir(parents=True, exist_ok=True)
-        script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
-        proc = subprocess.Popen([sys.executable, str(script), "--timeout", str(over)],
+        fixture_home(home)
+        proc = subprocess.Popen([sys.executable, str(DAEMON / "listen.py"),
+                                 "--timeout", str(over)],
                                 cwd=str(ROOT), env=child_env(home),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         specs = []
@@ -923,6 +930,48 @@ def 探针从真实监听读出超时():
                            capture_output=True)
     mine = [s for s in specs if str(s.get("pid")) == str(proc.pid)]
     return bool(mine) and mine[0].get("timeout") == over
+
+
+@case
+def 别的树里的监听不算已有监听():
+    """探针只认本 checkout 的监听（issue #94）。
+
+    按 worktree 布局在 temp 下起一个异树 listen.py，先轮询 `_match_rows` 证明
+    WMI 已看见它——否则「进程还没注册」和「被过滤掉」分不开，断言会假绿；再断言
+    `listener_pids()` 与 `listener_specs()` 都不报它。异树监听被当成「已有监听」
+    的后果：`reply.py` 跳过一次必要的续挂，那一次回复之后群里就没人值守。
+    """
+    if os.name != "nt":
+        return True  # 本仓只跑 Windows（探针在 posix 上是 ps 兑底）
+    with temp_dir(prefix="wg-foreign-") as home:
+        script = home / "water-group" / "daemon" / "listen.py"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+        proc = subprocess.Popen([sys.executable, str(script), "--timeout", "1"],
+                                cwd=str(home), stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        raw = []
+        ok = False
+        try:
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                raw = [pid for pid, _ in wg_up_probe._match_rows(
+                    "daemon[\\\\/]listen\\.py", exclude=up.self_pids())]
+                if str(proc.pid) in raw:
+                    break
+                time.sleep(1)
+            if str(proc.pid) not in raw:
+                ok = False  # WMI 始终没看见它：用例前提不成立，不能当通过
+            else:
+                # 断言必须在进程**活着**的时候做（独立复核抓出的假绿）：收树
+                # 之后再查，死进程谁也查不到，「不过滤」的坏实现也照样绿。
+                ok = (str(proc.pid) not in up.listener_pids()
+                      and all(str(s.get("pid")) != str(proc.pid)
+                              for s in up.listener_specs()))
+        finally:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           capture_output=True)
+    return ok
 
 
 def main():

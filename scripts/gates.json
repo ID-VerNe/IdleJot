@@ -11,7 +11,7 @@
   "ci": [
     {"name": "check_publication.py", "args": ["--history"], "shard": "static", "why": "发布门禁：凭证、个人路径、私有库 token、图片白名单与未知二进制 fail-closed；--history 另扫 commit 身份与文案"},
     {"name": "check_gate_manifest.py", "shard": "static", "why": "元门禁：磁盘 check_*.py、本清单、AGENTS §5.1 生成段与 ci.yml 分片矩阵四者零漂移"},
-    {"name": "check_gate_change_review.py", "shard": "static", "why": "门禁链改动必须在 PR 正文 `## 门禁改动` 段逐个交代（#62）；无 PR 上下文时 SKIP"},
+    {"name": "check_gate_change_review.py", "shard": "static", "why": "门禁链改动必须在 PR 正文 `## 门禁改动` 段逐个交代（#62；#107 起 `.githooks/` 钩子改动同样触发）；无 PR 上下文时 SKIP"},
     {"name": "check_path_hygiene.py", "shard": "static", "why": "路径卫生：运行时数据不许从仓库根推导（防 #14 复发）"},
     {"name": "check_no_console_child.py", "shard": "static", "why": "子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发）"},
     {"name": "check_listen_passthrough.py", "shard": "static", "why": "唤醒内容不被 listen.py 吞掉（#91）"},

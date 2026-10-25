@@ -286,7 +286,7 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
 1. **先发 issue**：按 [`doc/ISSUE_GUIDE.md`](doc/ISSUE_GUIDE.md) 立单，正文四要素（现象 / 证据链 / 影响面 / 修复候选）齐全——issue 是派活与验收的唯一依据。行为类 issue 的现象段必须带**一条可直接粘贴的复现命令**（期望输出 / 实际输出 / 触发条件齐全），给不出就贴 `needs-repro`，见 [`doc/ISSUE_GUIDE.md`](doc/ISSUE_GUIDE.md)「复现命令与 `needs-repro`」。**发布前正文过隐私门禁**（`scripts/check_publication.py --require-private --text <草稿>`），见 §5.3。
 2. **写 plan 追评到 issue 下面**：探索结论（带 `文件:行号` 证据）+ 方案 + 明确不做 + 验证方式，并含一行「用 issue 的复现命令复现：成功 / 失败（贴原始输出）」——复现失败退回发现者补充，不进实施；定稿后实施只追加不改口。
 3. **开 worktree 改代码**：`git worktree add .tmp/wt-<issue> -b type/<issue>-<slug> slim`，不在主工作区切分支；分支 / PR 标题 / commit 三处带 issue 号。大 issue 拆多个 PR 时，分节用 `P+字母`、优先级用 `P+数字`，命名落点见 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「拆分与命名规范」。
-4. **开 PR**：按 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)，正文分段齐全，修红门禁必须带基线验证段；**CI 全绿 + 无冲突才合并**（`slim` 已开分支保护、required check 为 `checks`，CI 没绿时 GitHub 直接判 `BLOCKED`；设置漂移跑 `scripts/check_repo_settings.py` 复现，见 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「合并条件」）。行为类 PR 用 `Refs #NN`，纯文档 / 纯重构才用 `Closes #NN`（见 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「关闭方式」）；diff 触及门禁链（`scripts/check_*.py` / `scripts/gates.json` / `scripts/run_gates.py` / `.github/workflows/ci.yml`）时正文另带 `## 门禁改动` 与不同上下文的复核结论（见 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「门禁改动与独立复核」，`scripts/check_gate_change_review.py` 在 CI 上校验）。PR 标题 / 正文 / commit message 同样先过 §5.3 发布门禁。
+4. **开 PR**：按 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)，正文分段齐全，修红门禁必须带基线验证段；**CI 全绿 + 无冲突才合并**（`slim` 已开分支保护、required check 为 `checks`，CI 没绿时 GitHub 直接判 `BLOCKED`；设置漂移跑 `scripts/check_repo_settings.py` 复现，见 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「合并条件」）。行为类 PR 用 `Refs #NN`，纯文档 / 纯重构才用 `Closes #NN`（见 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「关闭方式」）；diff 触及门禁链（`scripts/check_*.py` / `scripts/gates.json` / `scripts/run_gates.py` / `.github/workflows/ci.yml` / `.githooks/` 下钩子）时正文另带 `## 门禁改动` 与不同上下文的复核结论（见 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「门禁改动与独立复核」，`scripts/check_gate_change_review.py` 在 CI 上校验）。PR 标题 / 正文 / commit message 同样先过 §5.3 发布门禁。
 5. **合并后对账与回签**：修复者先做自述 vs 实际逐项核对（`git status`、文件存在性、门禁原始输出），并给行为类 issue 贴 `needs-live-verify`；再由发现者或全新上下文的验证 agent 按 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「合并后：对账与回签」的模板回签，**回签通过才关 issue**（修复者不能给自己回签）。欠账转新 issue（#41 模式）。
 
 与 §0 的边界（issue #83）分工：那里管「水群回路里主 Agent 只水群、重活派后台 subagent」，本节管「仓库改动怎么走 issue/PR」；派活 prompt 模板见 `.agents/skills/water-group/SKILL.md` §五。
@@ -361,7 +361,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 |---|---|---|---|
 | 1 | `static` | `check_publication.py --history` | 发布门禁：凭证、个人路径、私有库 token、图片白名单与未知二进制 fail-closed；--history 另扫 commit 身份与文案 |
 | 2 | `static` | `check_gate_manifest.py` | 元门禁：磁盘 check_*.py、本清单、AGENTS §5.1 生成段与 ci.yml 分片矩阵四者零漂移 |
-| 3 | `static` | `check_gate_change_review.py` | 门禁链改动必须在 PR 正文 `## 门禁改动` 段逐个交代（#62）；无 PR 上下文时 SKIP |
+| 3 | `static` | `check_gate_change_review.py` | 门禁链改动必须在 PR 正文 `## 门禁改动` 段逐个交代（#62；#107 起 `.githooks/` 钩子改动同样触发）；无 PR 上下文时 SKIP |
 | 4 | `static` | `check_path_hygiene.py` | 路径卫生：运行时数据不许从仓库根推导（防 #14 复发） |
 | 5 | `static` | `check_no_console_child.py` | 子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发） |
 | 6 | `static` | `check_listen_passthrough.py` | 唤醒内容不被 listen.py 吞掉（#91） |

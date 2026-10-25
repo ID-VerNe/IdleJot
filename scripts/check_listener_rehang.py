@@ -678,6 +678,7 @@ def 别的树里的监听不算已有监听():
                                 cwd=str(home), stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL)
         raw = []
+        ok = False
         try:
             deadline = time.time() + 30
             while time.time() < deadline:
@@ -686,13 +687,18 @@ def 别的树里的监听不算已有监听():
                 if str(proc.pid) in raw:
                     break
                 time.sleep(1)
+            if str(proc.pid) not in raw:
+                ok = False  # WMI 始终没看见它：用例前提不成立，不能当通过
+            else:
+                # 断言必须在进程**活着**的时候做（独立复核抓出的假绿）：收树
+                # 之后再查，死进程谁也查不到，「不过滤」的坏实现也照样绿。
+                ok = (str(proc.pid) not in up.listener_pids()
+                      and all(str(s.get("pid")) != str(proc.pid)
+                              for s in up.listener_specs()))
         finally:
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
                            capture_output=True)
-    if str(proc.pid) not in raw:
-        return False  # WMI 始终没看见它：用例前提不成立，不能当通过
-    return (str(proc.pid) not in up.listener_pids()
-            and all(str(s.get("pid")) != str(proc.pid) for s in up.listener_specs()))
+    return ok
 
 
 def main():

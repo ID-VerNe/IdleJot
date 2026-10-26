@@ -28,6 +28,7 @@ from wg_paths import state_dir
 IMAGES = state_dir() / "images"
 INDEX = IMAGES / "index.jsonl"
 MAX_BYTES = 6 * 1024 * 1024       # 与 MCP 单张图上限一致
+MIN_IMAGE_BYTES = 16              # 魔数只占前 4~12 字节，比这还小的一定不是图片
 MAX_INDEX_ROWS = 4000             # 索引只保留最近若干条，避免无限增长
 
 MIME_EXT = {"image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
@@ -294,13 +295,18 @@ def read_for_send(path):
 
     三道闸：普通文件、≤ ``MAX_BYTES``、文件头是 PNG/JPEG/GIF/WebP。**判据是魔数
     不是扩展名**——``.jfif`` / 大写 ``.PNG`` / 改了名的文本都会骗过扩展名检查，
-    而 ``ext_for`` 认不出的东西到了 QQ 那边只会是一张裂图。
+    而 ``ext_for`` 认不出的东西到了 QQ 那边只会是一张裂图。魔数之后再要一个最小
+    长度：``ext_for`` 只认前 4 个字节，一个 4 字节的「``\\x89PNG``」也能过，而它
+    在群里就是一张裂图。四种格式的完整签名最长 12 字节（WebP），比这还小的东西
+    不可能是图片。
 
     ``stat`` 与 ``read`` 之间文件可能被换掉（下载器正在写），所以按上限 +1 读回来
-    再核一次长度；只信 stat 会把一个还在写的文件截断发出去。
+    再核长度：变大了撞上限、变小了说明读的是写了一半的内容，两种都不发。
 
     只回显示名（``Path.name``），完整路径不进群也不进日志——它常带用户名。
     """
+    if not str(path).strip():
+        raise ImageError("图片路径是空的")
     target = Path(path).expanduser()
     try:
         info = target.stat()
@@ -321,8 +327,13 @@ def read_for_send(path):
         raise ImageError(f"{target.name} 是空文件")
     if len(raw) > MAX_BYTES:
         raise ImageError(f"{target.name} 超过单张上限 {MAX_BYTES // (1024 * 1024)} MiB")
+    if len(raw) != info.st_size:
+        raise ImageError(f"{target.name} 在读取时被改动（{info.st_size} → {len(raw)} 字节），"
+                         "确认文件写完再发")
     if ext_for(None, raw) == "bin":
         raise ImageError(f"{target.name} 不是 PNG/JPEG/GIF/WebP 图片（按文件头判断）")
+    if len(raw) < MIN_IMAGE_BYTES:
+        raise ImageError(f"{target.name} 只有 {len(raw)} 字节，不像图片")
     return raw, target.name
 
 

@@ -5,18 +5,20 @@
 解释「我发不了图」——多模态群聊退化成纯文本。更坏的是绕路：Agent 若自己
 `requests.post('/send_group_msg')` 手搓，会同时绕过 `record()` 记账与追问窗口。
 
-本门禁钉七件事：
+本门禁钉八件事：
 
   1. `--image <png>` + 文字 → 两次 `send_group_msg`：`[reply, text]` 与 `[image]`，
      且 image 段解出的字节与原文件逐字节相等（base64 段是 NapCat 实机验证过的形状，
      见 `doc/SLASH_COMMANDS.md:323`）；
   2. 纯图（无 text）→ 一次 `send_group_msg`：`[reply, image]`，**没有空文字段**；
   3. 两张图按参数顺序排在文字之后；
-  4. 超 6 MiB / 内容不是图片（哪怕叫 `.png`）/ 路径不存在 → `exit=1`、**零请求**、
-     输出点名原因；
+  4. 超 6 MiB / 内容不是图片（哪怕叫 `.png`）/ 只有 4 字节魔数 / 路径不存在 →
+     `exit=1`、**零请求**、输出点名原因；
   5. 好图 + 坏图混着给 → **一张都不发**（不是「先发好的再报错」）；
-  6. 发图成功后 `wg_replied.jsonl` 有该 event 的记账行——防「图发了但还显示 [待回]」；
-  7. `reply.py --help` 里有 `--image`（issue 第二条复现命令不再 `exit=1`）。
+  6. OneBot 不可用时 **不回退计划通道**：`SEND_FAILED`、零请求、不记账——回退过去
+     图片会被静默吞掉（`send()` 的气泡写死 `kind:"text"`）；
+  7. 发图成功后 `wg_replied.jsonl` 有该 event 的记账行——防「图发了但还显示 [待回]」；
+  8. `reply.py --help` 里有 `--image`（issue 第二条复现命令不再 `exit=1`）。
 
 真跑 `reply.py` 子进程 + loopback OneBot 假服务器 + 隔离数据根，不发任何真实消息：
 
@@ -72,6 +74,8 @@ class OneBot(FixtureHandler):
 
 
 TOKEN = "reply-image-fixture"
+# 假服务器起来后填进来；`OneBot不可用时不回退计划通道` 会临时把配置指到别处再改回来。
+LIVE_URL = ""
 
 
 def write_config(url):
@@ -225,6 +229,37 @@ def 好坏混着给也是零请求():
 
 
 @case
+def 只有魔数的假图也拒():
+    """4 个字节的 `\\x89PNG` 能过 `ext_for`，但在群里就是一张裂图。"""
+    CALLS.clear()
+    proc = run("8", "四个字节", "--image", str(HOME / "magic4.png"),
+               "--no-wait", "--no-followup")
+    ok = (proc.returncode == 1 and CALLS == []
+          and "IMAGE_FAILED" in proc.stdout and "不像图片" in proc.stdout)
+    return ok or proc.stdout + proc.stderr
+
+
+@case
+def OneBot不可用时不回退计划通道():
+    """计划通道的气泡写死 kind=text，回退过去图片就没了——那是「悄悄吞图」。
+
+    实现现在是对的，但没有断言钉住：谁把回退分支加回去，上面九条用例全绿。
+    所以这里把 OneBot 指到一个没人听的端口，要求「零请求 + SEND_FAILED + 不记账」。
+    """
+    CALLS.clear()
+    write_config("http://127.0.0.1:1")
+    try:
+        proc = run("9", "发不出去", "--image", str(HOME / "a.png"),
+                   "--no-wait", "--no-followup")
+    finally:
+        write_config(LIVE_URL)
+    ok = (proc.returncode == 1 and CALLS == []
+          and "SEND_FAILED" in proc.stdout and "计划通道" in proc.stdout
+          and 9 not in ledger_ids())
+    return ok or proc.stdout + proc.stderr
+
+
+@case
 def 发图也记账():
     """防「图发了但还显示 [待回]」：图片同样算回了这条。"""
     ids = ledger_ids()
@@ -242,9 +277,10 @@ def build_fixtures():
     (HOME / "a.png").write_bytes(PNG)
     (HOME / "b.png").write_bytes(PNG2)
     (HOME / "fake.png").write_text("这不是图片，只是改了个名字", encoding="utf-8")
+    (HOME / "magic4.png").write_bytes(b"\x89PNG")
     (HOME / "huge.png").write_bytes(PNG + b"\x00" * (MAX_BYTES + 1 - len(PNG)))
     (STATE / "wg_session.txt").write_text("session-fixture", encoding="utf-8")
-    seed_events(7)
+    seed_events(9)
 
 
 def main():
@@ -252,9 +288,11 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8")
     build_fixtures()
     bad = 0
+    global LIVE_URL
     try:
         with fixture_server(OneBot) as server:
-            write_config(f"http://127.0.0.1:{server.server_port}")
+            LIVE_URL = f"http://127.0.0.1:{server.server_port}"
+            write_config(LIVE_URL)
             for fn in CASES:
                 try:
                     ok = fn()

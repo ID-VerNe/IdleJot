@@ -60,6 +60,7 @@ from wg_up_probe import (  # noqa: E402,F401  (分节 PA：进程/端口探测)
     STOP_PORTS,
     _match_pids,
     _process_names,
+    collector_pids,
     commands_pids,
     listener_pids,
     listener_specs,
@@ -148,7 +149,8 @@ def report(exclude_pids=None, resident_pid=None):
         account, nickname = info
 
     napcat = "离线"
-    if all(port_open(p) for p in NAPCAT_PORTS):
+    napcat_online = all(port_open(p) for p in NAPCAT_PORTS)
+    if napcat_online:
         if info:
             napcat = f"在线 ({account} {nickname})"
         else:
@@ -165,16 +167,25 @@ def report(exclude_pids=None, resident_pid=None):
     backend = "在线" if all(port_open(p) for p in BACKEND_PORTS) else "离线"
     if resident_pid:
         guard = f"运行中 pid={resident_pid}（本进程常驻）"
+        guard_alive = True
     else:
         pids = supervisor_pids(exclude=exclude_pids)
         guard = f"运行中 pid={','.join(pids)}" if pids else "未运行"
+        guard_alive = bool(pids)
     age = heartbeat_age()
     beat_at = heartbeat_time()
     at = wg_clock.clock(beat_at) if beat_at else "时刻不可读"
     if age is None:
         beat = "无心跳"
     elif age > 300:
-        beat = f"{age:.0f}s 前（{at}，已卡死，supervisor 应会重启）"
+        # issue #142：这句以前是无条件断言。栈整体退出后没有任何进程会执行重启，
+        # 「supervisor 应会重启」于是成了状态行里最贵的一句假话——值守者据此等待。
+        # 只有真的有一个守护在跑时才允许说它会把栈拉回来。
+        if guard_alive:
+            beat = f"{age:.0f}s 前（{at}，已卡死，supervisor 应会重启）"
+        else:
+            beat = (f"{age:.0f}s 前（{at}，已卡死；没有 supervisor 在跑——不会自愈，"
+                    f"需要重新拉起整栈）")
     else:
         beat = f"{age:.0f}s 前（{at}，wait 周期 170s，正常）"
     # issue #51：配置缺失曾经整条链路静默退化（注入少传账号参数只能弹二维码、
@@ -204,12 +215,25 @@ def report(exclude_pids=None, resident_pid=None):
             pieces.append(f"pid={spec.get('pid')}（{detail}）")
         listener = "已挂 " + "，".join(pieces)
     else:
-        listener = "未挂 —— 消息照收，但没人会叫醒你"
+        listener = "未挂（此刻没有进程值守）"
+        # issue #142：「消息照收」曾经是无条件写死的。NapCat 离线或 collector 不在时
+        # 这句话是假的——消息连本地都到不了，而这正是栈静默死亡时最误导人的一格。
+        # 只有两边都在线才允许说收到；否则点名是哪一环断了。
+        silent = []
+        if not napcat_online:
+            silent.append("NapCat 离线，消息到不了本机")
+        if not collector_pids(exclude=exclude_pids):
+            silent.append("collector 未运行，消息不会被写入本地事件")
+        if silent:
+            listener += "，" + "；".join(silent) + "——收不到任何消息，也没人会叫醒你"
+        else:
+            listener += "，消息照收，但没人会叫醒你"
         # issue #112：这一行以前只有现算的进程结论。空窗期里没人跑 --status 时，
         # 「刚才有人值守过、现在没了」在磁盘上没有任何痕迹；账本把上一轮的起止
         # 时刻带进来，状态行才回答「空窗多长」而不只是「现在没人」。
         # issue #119：账本按 pid 分槽，describe() 汇总所有记录——并行监听时不会
         # 把「还有人在值守」说成「此后 0 秒无人值守」。
+        # issue #142：账本只补历史，历史段自带「仅供参考」，不与上面的现刻结论混写。
         note = wg_listener_state.describe()
         if note:
             listener += f"；账本：{note}"

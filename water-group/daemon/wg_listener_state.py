@@ -329,14 +329,18 @@ def describe(now=None):
         return _watching_note(fresh, moment)
     latest = max(rows, key=_last_moment)
     started = wg_clock.clock(_stamp(latest.get("started_at")))
+    # issue #142：没有新鲜 `watching` 时，这一行说的都是**历史**。以前它与现刻结论
+    # （`up.py` 的「未挂」段）同形，陈旧槽被无限复述成「疑似被硬杀」也看不出是旧账。
+    # 两种历史分支统一带「仅供参考」，与「值守中」分支明确分开。
     if latest.get("state") == "watching":
         beat = _last_beat(latest)
         age = max(0, moment - beat)
         return (f"上一轮监听自 {started} 起失去心跳（最后心跳 "
-                f"{wg_clock.clock(beat)}，{age}s 前），没有退出记录——疑似被硬杀")
+                f"{wg_clock.clock(beat)}，{age}s 前），没有退出记录——疑似被硬杀"
+                f"（此槽已过期，仅供参考）")
     stopped = _stamp(latest.get("stopped_at"))
     if stopped:
         return (f"上一轮监听 {started}–{wg_clock.clock(stopped)} 已退出"
                 f"（{latest.get('reason') or '原因未知'}），"
-                f"此后 {_span(moment - stopped)}无人值守")
-    return f"上一轮监听自 {started} 起，没有退出记录"
+                f"此后 {_span(moment - stopped)}无人值守（账本历史，仅供参考）")
+    return f"上一轮监听自 {started} 起，没有退出记录（此槽已过期，仅供参考）"

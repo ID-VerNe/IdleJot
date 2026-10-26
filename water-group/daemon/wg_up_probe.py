@@ -302,6 +302,17 @@ def listener_specs(exclude=None):
             if _own_checkout(cmdline) and not PROBE_ARG.search(cmdline or "")]
 
 
+def collector_pids(exclude=None):
+    """PIDs of the event collector: without it no message reaches local storage.
+
+    issue #142：`--status` 的监听行曾无条件说「消息照收，但没人会叫醒你」。
+    NapCat 离线或 collector 不在时那句话是假的——消息连本地都到不了，不是
+    「收到了但没人看」。这条探针只回答「此刻有没有进程在把 OneBot 事件写进
+    `wg_events` / `chat_inbox`」，与 `commands_pids()` 同一套脚本指纹匹配。
+    """
+    return _match_pids("daemon[\\\\/]collector\\.py", exclude)
+
+
 def commands_pids(exclude=None):
     """PIDs of the slash-command daemon: # keywords answered without an agent.
 

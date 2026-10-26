@@ -71,6 +71,7 @@
     {"name": "check_followup.py", "shard": "reply", "why": "追问窗口：回复之后还能听见群里说什么"},
     {"name": "check_pending_reply.py", "shard": "reply", "why": "待回时效：超时唤醒不再算待回"},
     {"name": "check_reply_context.py", "shard": "reply", "why": "reply.py --context 回之前看得到群聊上下文"},
+    {"name": "check_bubble_cap.py", "shard": "reply", "why": "单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131）"},
     {"name": "check_reply_quote.py", "shard": "reply", "why": "OneBot mention 与引用预检"},
     {"name": "check_quote_visibility.py", "shard": "reply", "why": "引用原文必须到达 Agent，缺了也要说清原因（#94）"},
     {"name": "check_image_visibility.py", "shard": "reply", "why": "唤醒行图片标记可执行，不许出现裸 [图片]（#35）"},

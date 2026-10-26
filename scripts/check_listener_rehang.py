@@ -124,6 +124,12 @@
     新鲜的 `watching`）不受 `KEEP_RECORDS` 上限约束；其余只留最近 `KEEP_RECORDS`
     条。去掉 `_fresh` 分支的实现会把最老那条值守中记录删掉——红在「值守中那条
     不见了」。
+40. 账本槽的 `pid` 不是标量时按坏槽跳过，不许让只读入口抛（issue #124）：
+    `records()` / `on_watch()` / `describe()` 与 `--status` 的「监听」行在坏槽
+    存在时都照常给结论；坏槽 + 一条新鲜好槽仍报「值守中」（对照组：跳过整个
+    目录的实现红在这条），只有坏槽时 `on_watch()` 为 False、`describe()` 为空串
+    且不加账本注脚（对照组：把坏槽当值守的实现红在这里；只 catch `TypeError`
+    的实现漏掉布尔那一份）。旧账本 `state/wg_listener.json` 同一口径。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -1573,6 +1579,18 @@ def write_ledger(home, record):
     path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
 
 
+def write_raw_slot(home, name, text):
+    """直接落一个原始槽文件（夹具用，issue #124）。
+
+    `write_ledger()` 要拿 `record["pid"]` 拼文件名，写不出坏 pid 的槽——坏槽
+    只能原样落盘。路径取模块当前绑定的 `STATE_DIR`，基线复跑时同样落在 `home`。
+    """
+    base = getattr(wg_listener_state, "STATE_DIR", home / "state" / "wg_listeners")
+    path = Path(base) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
 @case
 def 退出后账本留下可读的无人值守():
     """单轮监听退出后，「现在没有人值守」必须是一个可读事实（issue #112）。
@@ -1996,6 +2014,61 @@ def 收旧槽保留值守中的():
     return (watching_left is not None
             and watching_left.get("state") == "watching"
             and len(remaining) == keep)
+
+
+@case
+def 坏槽不拖垮账本只读入口():
+    """pid 不是标量的槽按坏槽跳过，只读入口一律不抛（issue #124）。
+
+    `_read_path()` 只校验顶层是 dict：`pid` 是列表 / 对象时 `seen.add()` 抛
+    `TypeError`，`records()` / `on_watch()` / `describe()` 一起失效；布尔能哈希，
+    却会被当成 pid 1 造出一条「疑似被硬杀」的假事实。`up.py` 的「未挂」分支在
+    `print()` 之前调 `describe()` 且没有 try/except，坏槽因此让整条 `--status`
+    输出消失——这是 issue 的后果，也是本用例最后一段要钉的。
+
+    三段断言，各自有对照组：
+
+    1. 只有坏槽（列表 / 对象 / 布尔三份同时落盘）→ 空记录、False、空串、状态行
+       仍是「未挂」且不加账本注脚。把坏槽当值守的实现红在这里；只 catch
+       `TypeError` 的实现漏掉 `true` 那一份，同样红在这里。
+    2. 坏槽 + 一条新鲜好槽 → 「值守中」，行里的 pid 归一成 int。把整个目录跳过
+       的实现红在这里。
+    3. 坏旧账本（`state/wg_listener.json` 的 pid 是对象）→ 结论同第 2 段。只修
+       新槽、旧账本仍直接 `not in seen` 的实现红在这里。
+    """
+    bads = (
+        '{"pid": [], "started_at": 1, "state": "watching"}',
+        '{"pid": {"x": 1}, "started_at": 1, "state": "watching"}',
+        '{"pid": true, "started_at": 1, "state": "watching"}',
+    )
+    with temp_dir(prefix="wg-badslot-") as home:
+        fixture_home(home)
+        restore = ledger_at(home)
+        try:
+            for index, text in enumerate(bads):
+                write_raw_slot(home, f"bad{index}.json", text)
+            only_bad_rows = wg_listener_state.records()
+            only_bad_watch = wg_listener_state.on_watch()
+            only_bad_note = wg_listener_state.describe()
+            only_bad_line = status_listener_line([])
+            wg_listener_state.start(timeout=wg_budget.WAIT_BUDGET)
+            mixed_rows = wg_listener_state.records()
+            mixed_watch = wg_listener_state.on_watch()
+            mixed_note = wg_listener_state.describe()
+            (home / "state" / "wg_listener.json").write_text(
+                '{"pid": {"x": 1}, "started_at": 1, "state": "watching"}',
+                encoding="utf-8")
+            legacy_rows = wg_listener_state.records()
+            legacy_note = wg_listener_state.describe()
+        finally:
+            restore()
+    return (only_bad_rows == []
+            and not only_bad_watch
+            and only_bad_note == ""
+            and "未挂" in only_bad_line and "账本" not in only_bad_line
+            and len(mixed_rows) == 1 and isinstance(mixed_rows[0].get("pid"), int)
+            and mixed_watch and "值守中" in mixed_note
+            and len(legacy_rows) == 1 and "值守中" in legacy_note)
 
 
 def main():

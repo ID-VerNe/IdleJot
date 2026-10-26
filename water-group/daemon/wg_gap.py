@@ -1,0 +1,331 @@
+"""停机窗口缺口账本：后端不在的那段时间漏了什么，事后说得出来（issue #114）。
+
+issue #112 修了「监听退不退」——存亡账本回答「上一轮几点到几点、现在为什么没人」。
+但监听在不在与「这段时间消息有没有漏收」是两件事：后端（server_wg.py + NapCat）
+停机跨过一段时间再拉起，窗口内的群消息不进任何本地存储——`chat_inbox` 由服务端
+`chatlocal/mcp_chat.py` 在收到 OneBot 事件时写（NapCat 没收到就不写），`wg_events.jsonl`
+由 `collector.capture_events` 写（`mention_only=True`，只投递 @，且停机时根本没投递）。
+于是 daemon 侧所有入口（`up.py --status` / `reply.py --list` / `listen.py NO_WORK`）
+都报告「一切正常」，「没人叫我」与「有人叫过但机器不在」无法区分——2026-10-26 那条
+08:04 的 @ 就是这样丢的，直到人肉翻 `get_group_msg_history` 才发现。
+
+本模块把那件事写成文件里的事实：`collector` 启动时算一次「本地 `chat_inbox` 最后一条
+→ 拉起时刻」与 `get_group_msg_history` 的差，落 `state/wg_gap.json`。任何只读入口
+（`--status` / `--list` / `listen NO_WORK`）随时 `describe()` / `at_me_lines()` 报出
+「窗口内漏 N 条、@ 本机 M 条」，不再需要谁恰好想起来跑那段 diff 脚本。
+
+分工（与 #112 同口径）：本账本只回答「这段时间漏了什么」，**不参与**续挂判断、
+**不补录**进 `wg_events`（补录是 issue #114 候选 3，明确不做——会让 `watch.py` 游标
+消费一条新数据流，风险与最小可用相悖）。漏掉的 @ 已过几小时，回复价值存疑；Agent
+真要回凭 `--list` 里的 `msg_id` 手动 OneBot 发送。
+
+`get_group_msg_history` 单次最多 200 条。取回的最老一条仍新于本地最后一条时，说明
+窗口比 200 条更长，`describe()` 必须说「只能核对最近 200 条，更早的无法核对」——
+不能静默只报最近 200 条（候选 4）。本模块不分页：分页是独立增强，超出 issue 的
+「只要求说出来」范围。
+
+已知边界：`collector` 单次运行内的二次短暂停机不重算（`wait failed` 有多种非停机
+成因，统一触发会噪声化）；NapCat 未响应时该群标 `unreachable`，`describe()` 说
+「无法核对」——说不出缺口比说一句假数字好。
+"""
+import json
+import os
+import sqlite3
+import time
+from pathlib import Path
+
+import wg_clock  # noqa: E402  (漏掉的 @ 的时间戳按同一份渲染口径)
+import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #4 PA0)
+from wg_paths import data_dir, state_dir  # noqa: E402
+
+STATE = state_dir() / "wg_gap.json"
+# `chat_inbox` 在 `~/.water-group/data/mcp-access.sqlite3`（schema 见
+# `chatlocal/mcp_chat.py:105-109`）。`IDLEJOT_WG_DB` / `TULPA_WG_DB` 可钉单个库给测试用，
+# 与 `reply.py:63` 同款解析。
+DB = Path(os.environ.get("IDLEJOT_WG_DB") or os.environ.get("TULPA_WG_DB",
+            data_dir() / "mcp-access.sqlite3"))
+
+# `get_group_msg_history` 单次上限（OneBot 11）。超过时窗口会被截断，`truncated` 标记
+# 由此产生；`describe()` 必须把截断说出来（候选 4）。
+HISTORY_COUNT = 200
+# 漏掉的 @ 正文片段长度，与 `wg_text.STATUS_BODY_CHARS` 同量级——一行报得下。
+AT_ME_BODY_CHARS = 40
+
+
+def _now():
+    return int(time.time())
+
+
+def _db():
+    """只读连接 chat_inbox；库不存在或读坏时返回 None。
+
+    URI 形式用 `Path.as_uri()`（与 `reply.py:572` 同款）：Windows 反斜杠路径直接
+    拼接 `?mode=ro` 会被 sqlite 当成文件名的一部分，`unable to open database file`。
+    """
+    if not DB.exists():
+        return None
+    try:
+        return sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+    except (sqlite3.Error, OSError):
+        return None
+
+
+def _local_state(group_id):
+    """该群在 chat_inbox 里已有的 onebot_message_id 集合 + 最新一条 epoch 秒。
+
+    与 issue #114 现象段那条复现命令同款 diff：`conversation_id` 形如 `1:group:123`，
+    按 `endswith(':' + group_id)` 认群。`at` 是 chat_inbox 的 REAL 列（epoch 秒），
+    不从 payload 解析——`max(at)` 就是窗口左边界。
+    """
+    ids = set()
+    last_time = None
+    con = _db()
+    if con is None:
+        return ids, last_time
+    suffix = ":" + str(group_id)
+    try:
+        for at, payload in con.execute("SELECT at, payload FROM chat_inbox ORDER BY at"):
+            try:
+                pl = json.loads(payload)
+            except (ValueError, TypeError):
+                continue
+            cid = str(pl.get("conversation_id") or "")
+            if not cid.endswith(suffix):
+                continue
+            if pl.get("onebot_message_id"):
+                ids.add(str(pl["onebot_message_id"]))
+            if at:
+                last_time = int(at)
+    except sqlite3.Error:
+        pass
+    finally:
+        con.close()
+    return ids, last_time
+
+
+def _launch_epoch():
+    """栈拉起时刻（`napcat_launch.json:started_epoch`，issue #114 窗口右边界）。
+
+    `bootstrap._record_launch` 在每次 spawn 时写；读不到时回落 None，调用方按
+    `computed_at` 兜底——缺口右边界取「现在」比取 0 安全。
+    """
+    try:
+        rec = json.loads((state_dir() / "napcat_launch.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(rec, dict):
+        return None
+    try:
+        return int(rec.get("started_epoch"))
+    except (TypeError, ValueError):
+        return None
+
+
+def enabled_group_ids():
+    """config.json 里 `enabled` 的群号列表（与 commands.settings_from 同口径）。"""
+    cfg = wg_config.config()
+    return [str(g) for g, gc in (cfg.get("groups") or {}).items()
+            if (gc or {}).get("enabled")]
+
+
+def _is_at_me(msg, account):
+    """OneBot 原始消息里有没有 @ 本机（issue #114 复现命令同款判定）。
+
+    `get_group_msg_history` 返回的段是 OneBot 原始格式 `{"type":"at","data":{"qq":...}}`，
+    不是 chatlocal 拍平后的 `{"type":"at","qq":...}`——两套格式，`data` 层不能漏。
+    """
+    if not account:
+        return False
+    for seg in msg.get("message") or []:
+        if not isinstance(seg, dict):
+            continue
+        if seg.get("type") == "at" and str((seg.get("data") or {}).get("qq")) == account:
+            return True
+    return False
+
+
+def _extract_text(msg):
+    """OneBot 原始 text 段拼接（`{"type":"text","data":{"text":...}}`）。"""
+    parts = []
+    for seg in msg.get("message") or []:
+        if not isinstance(seg, dict) or seg.get("type") != "text":
+            continue
+        text = str((seg.get("data") or {}).get("text") or "")
+        if text.strip():
+            parts.append(" ".join(text.split()))
+    return " ".join(parts)
+
+
+def _at_me_line(msg):
+    """一条漏掉的 @ 的可读行原料（时间戳由调用方按 wg_clock 渲染）。"""
+    sender = msg.get("sender")
+    if isinstance(sender, dict):
+        sender = sender.get("nickname") or sender.get("user_id") or ""
+    return {
+        "msg_id": str(msg.get("message_id") or ""),
+        "time": msg.get("time") or 0,
+        "sender": str(sender or ""),
+        "body": _extract_text(msg)[:AT_ME_BODY_CHARS],
+    }
+
+
+def _empty(window_start, window_end, unreachable=False):
+    return {"missing": 0, "at_me": 0, "window_start": window_start,
+            "window_end": window_end, "truncated": False,
+            "unreachable": bool(unreachable), "at_me_lines": []}
+
+
+def _compute_one(group_id, fetcher, launch_epoch, now):
+    """单群缺口：本地 chat_inbox vs get_group_msg_history 的 diff，限定在停机窗口内。"""
+    local_ids, window_start = _local_state(group_id)
+    if window_start is None:
+        # 本地一条都没有：首次部署 / 换群 / 新群，不是停机缺口。报 0 不报缺口，
+        # 与「停机漏收」区分——否则新部署会把群里全部历史都算成「漏的」。
+        return _empty(None, launch_epoch)
+    window_end = launch_epoch or now
+    account = str(wg_config.config().get("self_account") or "")
+    try:
+        history = fetcher(group_id) or []
+    except Exception:  # noqa: BLE001  NapCat 未响应不该让 collector 崩
+        return _empty(window_start, window_end, unreachable=True)
+    missed = [m for m in history
+              if str(m.get("message_id")) and str(m.get("message_id")) not in local_ids]
+    if not missed:
+        return _empty(window_start, window_end)
+    # 只算窗口内 (window_start, window_end] 的：时间缺失（0）的不算，宁可少报也不假报。
+    in_window = [m for m in missed
+                 if (m.get("time") or 0) and window_start < (m.get("time") or 0) <= window_end]
+    # 200 上限：history 最老一条仍新于 window_start → 可能有窗口内的消息被截掉。
+    # history 非空（missed 是它的子集），oldest=0 只在某条 time 缺失且全是 0 时出现，
+    # 那种数据异常不报截断（不造假事实）。
+    oldest = min((m.get("time") or 0) for m in history) if history else 0
+    truncated = bool(oldest and oldest > window_start)
+    at_me_msgs = [m for m in in_window if _is_at_me(m, account)]
+    return {
+        "missing": len(in_window), "at_me": len(at_me_msgs),
+        "window_start": window_start, "window_end": window_end,
+        "truncated": truncated, "unreachable": False,
+        "at_me_lines": [_at_me_line(m) for m in at_me_msgs],
+    }
+
+
+def compute(group_ids=None, fetch=None, now=None):
+    """算缺口，返回可落盘的 dict（不写文件）。
+
+    `group_ids` 默认从 config.json 的 enabled groups 取；`fetch(group_id)` 默认
+    `wg_up_wake.group_msg_history`（延迟 import 避免模块级拉起 wg_up_wake）；`now`
+    只给测试钉时刻用。
+    """
+    moment = _now() if now is None else int(now)
+    if group_ids is None:
+        group_ids = enabled_group_ids()
+    launch_epoch = _launch_epoch()
+    record = {"computed_at": moment, "groups": {}}
+    for gid in group_ids:
+        record["groups"][str(gid)] = _compute_one(str(gid), fetch, launch_epoch, moment)
+    return record
+
+
+def record(entry):
+    """落盘缺口记录（原子写：tmp + os.replace）。写不进不崩——账本不该让 collector 挂。"""
+    try:
+        STATE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STATE.with_name(STATE.name + ".tmp")
+        tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, STATE)
+    except OSError:
+        pass
+
+
+def read():
+    """当前记录（dict）；文件不存在或读坏时 None。"""
+    try:
+        data = json.loads(STATE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def clear():
+    """删掉记录（测试用；生产路径只写不删）。"""
+    try:
+        STATE.unlink()
+    except OSError:
+        pass
+
+
+def describe():
+    """一行人话给 `up.py --status`。无缺口 / 无记录 / 全 unreachable 时返回空串。
+
+    空串=不造假事实：与 #112 `wg_listener_state.describe()` 同口径，恒加注脚的实现
+    红在「无缺口时也加字」上（排除型对照）。
+    """
+    rec = read()
+    if not rec:
+        return ""
+    groups = rec.get("groups") or {}
+    if not groups:
+        return ""
+    total_missing = 0
+    total_at_me = 0
+    unreachable = []
+    truncated = False
+    for _gid, e in groups.items():
+        if not isinstance(e, dict):
+            continue
+        if e.get("unreachable"):
+            unreachable.append(str(_gid))
+            continue
+        total_missing += e.get("missing") or 0
+        total_at_me += e.get("at_me") or 0
+        if e.get("truncated"):
+            truncated = True
+    if total_missing == 0 and not unreachable:
+        return ""
+    parts = []
+    if total_missing:
+        parts.append(f"停机窗口漏 {total_missing} 条（@ 本机 {total_at_me} 条）"
+                     "，见 reply.py --list")
+    if truncated:
+        parts.append("只能核对最近 200 条，更早的无法核对")
+    if unreachable:
+        parts.append(f"群 {','.join(unreachable)} 无法核对（NapCat 未响应）")
+    return "缺口：" + "；".join(parts)
+
+
+def at_me_lines():
+    """漏掉的 @ 本机消息，多行给 `reply.py --list` / `listen.py` 提示。
+
+    行首 `id=-`（占位，明确不可 `reply.py <id>`）+ `msg_id=`（OneBot 原始 id，Agent
+    真要回手动 OneBot 发送用），区别于真唤醒行的 `id=<正数>`。
+    """
+    rec = read()
+    if not rec:
+        return []
+    lines = []
+    for _gid, e in (rec.get("groups") or {}).items():
+        if not isinstance(e, dict) or e.get("unreachable"):
+            continue
+        for m in e.get("at_me_lines") or []:
+            stamp = wg_clock.clock(m.get("time"))
+            lines.append(f"id=- msg_id={m.get('msg_id')} {stamp} [漏] "
+                         f"{m.get('sender')}: {m.get('body')}")
+    return lines
+
+
+def print_hint():
+    """`listen.py` NO_WORK 路径插一行：让「没人叫我」与「有人叫过但机器不在」可区分。
+
+    只在缺口非空时出声——WAKE 路径不需要它（Agent 已被叫醒），NO_WORK 才是 issue
+    点名的症状（Agent 据 NO_WORK 误判「没人叫我」）。
+    """
+    line = describe()
+    if line:
+        print(f"⚠ {line}")
+
+
+def compute_and_record(group_ids=None, fetch=None, now=None):
+    """`collector` 启动时调一次：算缺口并落盘。返回记录供调用方记日志。"""
+    entry = compute(group_ids=group_ids, fetch=fetch, now=now)
+    record(entry)
+    return entry

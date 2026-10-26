@@ -34,6 +34,10 @@ pid 写进环境变量 `WG_LISTENER_PID`，子进程据此定位；裸跑 `watch
 
 窗口只在 `_stale_window()` 一处取值（issue #118）：`on_watch()` 与 `describe()`
 都调它，改 `STALE_AFTER` 不会只改到一半。
+
+槽里的字段按「读不出来就当坏槽跳过」处理（issue #124）：时间戳走 `_stamp()`，
+pid 走 `_pid()`——一个坏槽不许让 `read()` / `on_watch()` / `describe()` 抛，
+也不许被当成一条真记录（`true` 不是 pid）。
 """
 import json
 import os
@@ -86,12 +90,14 @@ def _read_path(path):
 
 
 def _write(record):
-    pid = record.get("pid")
+    pid = _pid(record)
     if pid is None:
         return
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        _slot(pid).write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        # 槽名与槽里的 pid 同源：归一后的 int 两边都写，坏 pid 不落盘（issue #124）。
+        _slot(pid).write_text(json.dumps(dict(record, pid=pid), ensure_ascii=False),
+                              encoding="utf-8")
     except OSError:
         # 账本写不进去不该让值守本身失败：监听的价值是叫醒人，不是记账。
         pass
@@ -100,7 +106,8 @@ def _write(record):
 def records():
     """所有监听记录（含 #112 的单行旧账本），按起点升序。
 
-    同 pid 以新槽为准：旧账本只在没有对应槽时参与汇总。
+    同 pid 以新槽为准：旧账本只在没有对应槽时参与汇总。pid 或起点读不出来的
+    槽按坏槽跳过——与 `_stamp()` 同口径，不让一个坏槽拖垮只读入口（issue #124）。
     """
     rows = []
     seen = set()
@@ -110,17 +117,18 @@ def records():
         paths = []
     for path in paths:
         record = _read_path(path)
-        if not record or record.get("pid") is None:
+        if not record:
             continue
-        if not _stamp(record.get("started_at")):
+        pid = _pid(record)
+        if pid is None or not _stamp(record.get("started_at")):
             continue
-        rows.append(record)
-        seen.add(record.get("pid"))
+        rows.append(dict(record, pid=pid))
+        seen.add(pid)
     legacy = _read_path(LEGACY_STATE)
-    if (legacy and legacy.get("pid") is not None
-            and _stamp(legacy.get("started_at"))
-            and legacy.get("pid") not in seen):
-        rows.append(legacy)
+    legacy_pid = _pid(legacy) if legacy else None
+    if (legacy_pid is not None and _stamp(legacy.get("started_at"))
+            and legacy_pid not in seen):
+        rows.append(dict(legacy, pid=legacy_pid))
     rows.sort(key=lambda r: (_stamp(r.get("started_at")), str(r.get("pid"))))
     return rows
 
@@ -150,6 +158,24 @@ def _owner():
         except ValueError:
             pass
     return os.getpid()
+
+
+def _pid(record):
+    """pid 按正整数读；坏值返回 `None`，调用方当坏槽跳过（issue #124）。
+
+    `_read_path()` 只校验顶层是 dict，槽里的 `pid` 可能是列表 / 对象 / 布尔：
+    `seen.add()` 对前两者抛 `TypeError`，三个只读入口一起失效；布尔能哈希，
+    却会被当成 pid 1 造出一条「疑似被硬杀」的假事实。布尔是 `int` 的子类，
+    所以必须先于整数分支排除。数字字符串归一为 int（`_stamp()` 同样容忍字符串）。
+    """
+    value = record.get("pid")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
 
 
 def _stamp(value):

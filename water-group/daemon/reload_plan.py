@@ -90,6 +90,7 @@ NO_RESTART = {
     "water-group/daemon/wg_text.py": "shared body renderer for guard/CLI, no daemon imports it",
     "water-group/daemon/wg_aliases.py": "shared alias renderer for CLI (watch/reply), no daemon imports it",
     "water-group/daemon/wg_budget.py": "shared wait-budget constants for CLI (reply/listen), no daemon imports it",
+    "water-group/daemon/wg_bubbles.py": "shared bubble-cap/split helper for CLI (reply), no daemon imports it",
     "water-group/daemon/listen.py": "one-shot CLI",
     "water-group/daemon/look.py": "one-shot CLI",
     "water-group/daemon/reply.py": "one-shot CLI",

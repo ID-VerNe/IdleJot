@@ -67,6 +67,21 @@ class StopResult:
     def ok(self):
         return not self.ports_left
 
+    @property
+    def untouched(self):
+        """这次停止什么都没找到：栈本来就没在跑，不是「停得很干净」（issue #142）。
+
+        `guard` / `orphans` / `port_owners` / `refused` / `ports_left` 全空、
+        `instances == 0`、没有死锁可清，才算「无事可做」。`instances is None`
+        （bootstrap 导不进来、没数过）**不算**——「不知道」不是「没有」。
+
+        退出码仍保持 0：`start-bot.pyw` 的幂等前停与 `stop.ps1` 都靠它继续走，
+        空栈时给非零会把「先停再起」误判成失败；所以这里只多一句显式说明。
+        """
+        return (not self.guard and not self.orphans and not self.port_owners
+                and not self.refused and not self.ports_left
+                and self.instances == 0 and self.stale_lock is None)
+
     def summary(self):
         def pids(values):
             return ",".join(values) if values else "无"
@@ -74,6 +89,10 @@ class StopResult:
         instances = "未统计" if self.instances is None else f"{self.instances} 个"
         line = (f"[停止] 守护/看护 pid={pids(self.guard)}；树外残留 pid={pids(self.orphans)}；"
                 f"注入实例 {instances}")
+        # issue #142：空栈的「停止」以前与真正停掉一次长得一模一样。把「无事可做」
+        # 说出来，值守者才不会以为刚才停掉过什么。
+        if self.untouched:
+            line += "——栈本来就没在跑：无事可做"
         if self.stale_lock:
             line += f"；清掉死锁 pid={self.stale_lock}"
         if self.port_owners:

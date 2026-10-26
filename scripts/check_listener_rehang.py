@@ -130,6 +130,16 @@
     目录的实现红在这条），只有坏槽时 `on_watch()` 为 False、`describe()` 为空串
     且不加账本注脚（对照组：把坏槽当值守的实现红在这里；只 catch `TypeError`
     的实现漏掉布尔那一份）。旧账本 `state/wg_listener.json` 同一口径。
+41. 栈全下线（NapCat 离线 / collector 不在）时，`--status` 的监听行**不得**说
+    「消息照收」——修复前它是无条件写死的，整栈静默死亡时与同一屏的
+    「NapCat: 离线」自相矛盾（issue #142）。缺哪环就点名哪环；两环都在线时仍要
+    说「消息照收」（对照组，防止把整句删掉、从此什么都不说）。
+42. 心跳过期且**没有守护在跑**时，守护行不得断言「supervisor 应会重启」——
+    没有任何进程会执行那次重启，这句假话让值守者一直等一个不会来的自愈
+    （issue #142）。真有守护在跑时仍要说「应会重启」（对照组）。
+43. 账本的历史分支（心跳过期没退出记录 / 已退出）必须自带「仅供参考」：监听行
+    前半句是现刻事实、后半句是上一轮历史，两者同形时一个陈旧的槽会被读成刚刚
+    发生（issue #142）。仍在值守的账本不得带这个标记（对照组）。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -281,29 +291,42 @@ def index_of(out, prefix):
     return -1
 
 
-def status_listener_line(specs):
-    """`up.py --status` 的「监听」行（进程探针被换成给定的 specs）。
+def status_report_line(prefix, specs, **overrides):
+    """`up.py --status` 中某一行（进程探针被换成给定的 specs 与 overrides）。
 
     `report()` 是总览屏：每一层的答案都汇到那几行里。这里只换掉会碰到真机器
-    的那几处（进程探针、端口探测、账号探测、配置体检），其余照常跑，断言只看
-    「监听」那一行——它必须说得出每个监听实际用的 `--timeout`（issue #86）。
+    的那几处（进程探针、端口探测、账号探测、配置体检、collector 探针、心跳），
+    其余照常跑，断言只看以 `prefix` 开头的那一行。
 
-    `listener_pids` 也一起打桩：issue #86 之前只有它，于是「新门禁 × 旧代码」
-    红在**行为**上（行里只有 pid、没有秒数），而不是 AttributeError。
+    `overrides` 按 `up.<name>` 覆盖下面的默认桩：issue #142 的三条用例分别要
+    「栈全下线」「守护为空 + 心跳过期」「陈旧账本槽」，都不是同一组默认桩拼得出
+    的组合。默认桩必须把机器层整个挡住——漏掉 `collector_pids`，实机正在跑的
+    collector 就会顶掉用例给定的「不在」，断言测的就不再是栈已死那一格。
     """
     names = ("listener_specs", "listener_pids", "supervisor_pids", "commands_pids",
-             "login_info", "port_open", "config_problems")
+             "login_info", "port_open", "config_problems", "collector_pids",
+             "heartbeat_age", "heartbeat_time")
     saved = {name: getattr(up, name, None) for name in names}
     pids = [str(s.get("pid")) for s in specs]
-    up.listener_specs = lambda *args, **kwargs: [dict(s) for s in specs]
-    up.listener_pids = lambda *args, **kwargs: list(pids)
-    up.supervisor_pids = lambda *args, **kwargs: []
-    up.commands_pids = lambda *args, **kwargs: []
-    up.login_info = lambda *args, **kwargs: None
-    up.port_open = lambda *args, **kwargs: False
-    # 配置体检清空：不带 self_account 的告警会往监听行里塞一个 ⚠，那不是本组
-    # 断言要认的东西（配置那组由 check_config_fail_loud.py 管）。
-    up.config_problems = lambda *args, **kwargs: []
+    stubs = {
+        "listener_specs": lambda *args, **kwargs: [dict(s) for s in specs],
+        "listener_pids": lambda *args, **kwargs: list(pids),
+        "supervisor_pids": lambda *args, **kwargs: [],
+        "commands_pids": lambda *args, **kwargs: [],
+        "login_info": lambda *args, **kwargs: None,
+        "port_open": lambda *args, **kwargs: False,
+        # 配置体检清空：不带 self_account 的告警会往监听行里塞一个 ⚠，那不是本组
+        # 断言要认的东西（配置那组由 check_config_fail_loud.py 管）。
+        "config_problems": lambda *args, **kwargs: [],
+        # issue #142：collector 探针与心跳都换成给定值。漏掉它们时用例的前置
+        # （「栈已经全下线」）会被实机进程表/心跳文件顶掉，测出来的是另一台机器。
+        "collector_pids": lambda *args, **kwargs: [],
+        "heartbeat_age": lambda *args, **kwargs: None,
+        "heartbeat_time": lambda *args, **kwargs: None,
+    }
+    stubs.update(overrides)
+    for name in names:
+        setattr(up, name, stubs[name])
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf):
@@ -315,7 +338,19 @@ def status_listener_line(specs):
                     delattr(up, name)
             else:
                 setattr(up, name, value)
-    return next((ln for ln in buf.getvalue().splitlines() if ln.startswith("监听")), "")
+    return next((ln for ln in buf.getvalue().splitlines() if ln.startswith(prefix)), "")
+
+
+def status_listener_line(specs):
+    """`up.py --status` 的「监听」行（进程探针被换成给定的 specs）。
+
+    断言只看「监听」那一行——它必须说得出每个监听实际用的 `--timeout`
+    （issue #86），以及栈下线时缺的是哪一环（issue #142）。
+
+    `listener_pids` 也一起打桩：issue #86 之前只有它，于是「新门禁 × 旧代码」
+    红在**行为**上（行里只有 pid、没有秒数），而不是 AttributeError。
+    """
+    return status_report_line("监听", specs)
 
 
 def capture_wait(seconds):
@@ -1692,6 +1727,94 @@ def 状态行报出上一轮监听与空窗():
     return ("未挂" in blank and "账本" not in blank
             and "未挂" in line and "账本" in line
             and "无人值守" in line and bool(stopped) and stopped in line)
+
+
+@case
+def 栈全下线不得说消息照收():
+    """NapCat 或 collector 不在时，监听行不许再说「消息照收」（issue #142）。
+
+    这句以前是无条件写死的：整栈静默死亡后，`--status` 一边报 `NapCat: 离线`，
+    一边在同一屏说「消息照收」——自相矛盾，而且是最误导人的那一格。三档各自
+    点名缺的那一环；两环都在线时仍要说「消息照收」（对照组，防止实现把整句
+    删掉、从此什么都不说）。
+    """
+    nobody = status_report_line("监听", [], port_open=lambda *a, **k: False,
+                               collector_pids=lambda *a, **k: [])
+    napcat_missing = status_report_line(
+        "监听", [], port_open=lambda *a, **k: False,
+        collector_pids=lambda *a, **k: ["4321"])
+    collector_missing = status_report_line(
+        "监听", [], port_open=lambda *a, **k: True,
+        collector_pids=lambda *a, **k: [])
+    healthy = status_report_line(
+        "监听", [], port_open=lambda *a, **k: True,
+        collector_pids=lambda *a, **k: ["4321"])
+    return ("消息照收" not in nobody
+            and "NapCat 离线" in nobody and "collector 未运行" in nobody
+            and "消息照收" not in napcat_missing
+            and "collector 未运行" not in napcat_missing
+            and "消息照收" not in collector_missing
+            and "NapCat 离线" not in collector_missing
+            and "消息照收" in healthy
+            and "收不到任何消息" not in healthy)
+
+
+@case
+def 守护为空不得断言会自愈():
+    """没有守护在跑时，心跳过期不得再说「supervisor 应会重启」（issue #142）。
+
+    栈整体静默死亡后没有任何进程会执行那次重启，这句断言让值守者一直等一个
+    不会来的自愈。两档都要：守护为空时只许说「不会自愈、需要重新拉起整栈」；
+    真有守护在跑时仍要说「应会重启」（对照组，防止把这句话整体删掉）。
+    """
+    stale = 39_000
+    beat = time.time() - stale
+    alone = status_report_line("守护", [], supervisor_pids=lambda *a, **k: [],
+                               heartbeat_age=lambda *a, **k: stale,
+                               heartbeat_time=lambda *a, **k: beat)
+    guarded = status_report_line("守护", [], supervisor_pids=lambda *a, **k: ["7777"],
+                                 heartbeat_age=lambda *a, **k: stale,
+                                 heartbeat_time=lambda *a, **k: beat)
+    return ("supervisor 应会重启" not in alone
+            and "不会自愈" in alone and "重新拉起整栈" in alone
+            and "supervisor 应会重启" in guarded)
+
+
+@case
+def 陈旧账本槽必须标明仅供参考():
+    """账本的历史分支必须自带「仅供参考」，不许与现刻结论同形（issue #142）。
+
+    监听行前半句是现刻事实（「未挂」+ 缺哪一环），后半句「账本：…」是上一轮的
+    历史。修复前两段同形，一个早就过期的槽被无限复述成「疑似被硬杀」，读起来
+    像刚刚发生。两档历史分支（心跳过期没退出记录 / 已退出）都要带标记；仍在
+    值守的账本不得带（对照组，防止实现把标记加在每一档上）。
+    """
+    with temp_dir(prefix="wg-stale-note-") as home:
+        fixture_home(home)
+        restore = ledger_at(home)
+        try:
+            now = int(time.time())
+            wg_listener_state.start(pid=111, timeout=wg_budget.WAIT_BUDGET)
+            stale = wg_listener_state.read(111)
+            stale["beat_at"] = now - wg_listener_state.STALE_AFTER - 5
+            write_ledger(home, stale)
+            stale_note = wg_listener_state.describe()
+            write_ledger(home, {"pid": 222, "started_at": now - 500,
+                                "beat_at": now - 400, "stopped_at": now - 100,
+                                "reason": "NO_WORK", "timeout": wg_budget.WAIT_BUDGET,
+                                "probe": False, "state": "exited"})
+            # 只留已退出那条：两条都在时 `_last_moment` 会选心跳过期那条。
+            (wg_listener_state.STATE_DIR / "111.json").unlink()
+            exited_note = wg_listener_state.describe()
+            line = status_listener_line([])
+            wg_listener_state.start(pid=333, timeout=wg_budget.WAIT_BUDGET)
+            live_note = wg_listener_state.describe()
+        finally:
+            restore()
+    return ("失去心跳" in stale_note and "仅供参考" in stale_note
+            and "无人值守" in exited_note and "仅供参考" in exited_note
+            and "账本" in line and "仅供参考" in line
+            and "值守中" in live_note and "仅供参考" not in live_note)
 
 
 @case

@@ -191,6 +191,21 @@ def case_nothing_running_kills_nothing():
     assert result.ok and not result.guard and not result.orphans
 
 
+def case_empty_stop_says_nothing_to_do():
+    """空栈停止必须说「无事可做」，而不是与真停过一次同形（issue #142）。
+
+    退出码仍为 0（`start-bot.pyw` 的幂等前停依赖它继续走），但摘要必须显式说明
+    这一趟什么都没收——否则值守者会以为刚停掉了一个正在运行的栈。反向对照：
+    真的收过东西时不许出现这句。
+    """
+    result = Stubs({"guard": [], "watchdog": [], "stack": []}).stop()
+    assert result.ok, result.ports_left
+    assert "无事可做" in result.summary(), result.summary()
+
+    busy = Stubs({"guard": ["100"], "watchdog": [], "stack": []}, instances=1).stop()
+    assert "无事可做" not in busy.summary(), busy.summary()
+
+
 def case_port_owner_fallback():
     """命令行已认不出的进程仍占着端口时，按 LISTENING owner 兜底并如实上报。"""
     stubs = Stubs({"guard": [], "watchdog": [], "stack": []},
@@ -381,6 +396,7 @@ CASES = [
     ("树外残留被逐个精确杀掉", case_orphans_are_killed),
     ("自己永不被杀", case_self_is_never_killed),
     ("空栈不动刀", case_nothing_running_kills_nothing),
+    ("空栈停止说无事可做", case_empty_stop_says_nothing_to_do),
     ("只读 --status 不被误杀", case_status_probe_survives),
     ("探针不被报成守护", case_probe_not_reported_as_guard),
     ("端口占用者兜底", case_port_owner_fallback),

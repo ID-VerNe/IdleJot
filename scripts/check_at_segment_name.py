@@ -18,8 +18,9 @@
      必须把原始 name 过 `at_name` 归一化、`at_segment` 带第二参、content 拼
      `@<显示名>`——只加函数没人调 = 死协议；
   4. `wg_aliases.body_hits` 防自指：扫描前剥掉 `@<数字>`（指向信息不是正文，
-     与 `wg_text.PLACEHOLDERS` 的 `@\\d{5,}` 同一口径）；纯数字别名（QQ 号）
-     不参与正文命中；`@<显示名>` 命中别名视为真实提及，保留。
+     用本模块自带的 `AT_MENTION_RE`——`wg_text` 自 issue #138 起显示时保留
+     `@<qq>` 原样，两处口径已分开）；纯数字别名（QQ 号）不参与正文命中；
+     `@<显示名>` 命中别名视为真实提及，保留。
 
 未打补丁的 base 上本门禁必须红，且红签名就是 issue 症状（at() 不收 name、
 body_hits 对 `@<qq>` 自指）——不是 import 裸奔。

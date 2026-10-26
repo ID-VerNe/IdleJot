@@ -22,6 +22,11 @@ issue #4 PD2a：追问窗口插件化之后的新契约——``reply_sent`` 三�
 ``legacy_section`` 逐字段等效、``plugins.emit`` 与 commands 注册表派发到同一个
 PLUGIN 对象。
 
+issue #138：**只 @ 了别人、正文空白**的消息不算接话——不唤醒、不扣额度、不续期，
+但游标照常推进；``@我 + 空白`` 照旧唤醒，纯图片照旧唤醒（两组对照）。判据取入库
+的 ``segments``（``followup.mention_info``），没有段清单的老行退化成从 ``content``
+认 ``@<qq>``。同一 issue 的第二半在渲染侧：追问行不许把 ``@<qq>`` 抹成裸 ``@``。
+
     .venv/Scripts/python.exe scripts/check_followup.py
 """
 import json
@@ -50,6 +55,7 @@ sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
 import followup  # noqa: E402
 import up  # noqa: E402  (`#` 指令闸门与 wake_reason 同源，issue #70)
+import wg_text  # noqa: E402  (追问行正文渲染，issue #138)
 import wg_up_wake  # noqa: E402  (issue #37 PC: config 的真实调用点；up.config 只是门面引用)
 
 # 5 是被回复的那条；6/9 是群友接话；7 是机器人自己；8 是系统提示；
@@ -373,19 +379,13 @@ def check_command_gate():
     print("  ok  `#` 指令不占额度、不续期，但推进游标；前缀读配置（issue #70）")
 
 
-def check_watch_budget_wake():
-    """issue #98 的症状级回归：真跑 watch.py，用完那轮不许打「还剩 0 条」。
+def run_watch():
+    """跑一次 `watch.py --timeout 5`，返回 (returncode, 合并后的输出)。
 
-    followup 单测只能证明状态对了，症状在 watch.py 的打印分支上：旧代码只看
-    `woke` 非空就 WAKE，报告行直接读 budget，于是额度 0 也照样喊一次。
+    #51 之后 watch.py 启动就要 self_account；config.json 被 gitignore，CI 干净
+    checkout 没有它——写份最小配置用 IDLEJOT_WG_CONFIG 指过去（只进子进程 env，
+    不动本进程 environ：本文件其他用例对 config 有自己的桩）。
     """
-    anchor = 600
-    append([(601, {"sender": "丙", "content": "最后一句",
-                   "timestamp": 1792500400000}, 1792500400.0)])
-    followup.open(anchor, max_messages=1, idle_seconds=600)
-    # #51 之后 watch.py 启动就要 self_account；config.json 被 gitignore，CI 干净
-    # checkout 没有它——写份最小配置用 IDLEJOT_WG_CONFIG 指过去（只进子进程 env，
-    # 不动本进程 environ：本文件其他用例对 config 有自己的桩）。
     fixture = Path(TMP) / "watch-fixture-config.json"
     fixture.write_text(json.dumps({"self_account": "10001",
                                    "onebot_token": "followup-fixture"},
@@ -404,8 +404,21 @@ def check_watch_budget_wake():
                             cwd=str(ROOT), env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True,
                             encoding="utf-8", errors="replace", timeout=120)
-    out = result.stdout or ""
-    assert result.returncode == 0, f"watch.py 退出码 {result.returncode}：\n{out}"
+    return result.returncode, result.stdout or ""
+
+
+def check_watch_budget_wake():
+    """issue #98 的症状级回归：真跑 watch.py，用完那轮不许打「还剩 0 条」。
+
+    followup 单测只能证明状态对了，症状在 watch.py 的打印分支上：旧代码只看
+    `woke` 非空就 WAKE，报告行直接读 budget，于是额度 0 也照样喊一次。
+    """
+    anchor = 600
+    append([(601, {"sender": "丙", "content": "最后一句",
+                   "timestamp": 1792500400000}, 1792500400.0)])
+    followup.open(anchor, max_messages=1, idle_seconds=600)
+    code, out = run_watch()
+    assert code == 0, f"watch.py 退出码 {code}：\n{out}"
     assert "WAKE" in out, f"用完的那批没唤醒，消息被吞了：\n{out}"
     assert "还剩 0 条" not in out, f"额度用尽仍在报剩余额度（issue #98 复发）：\n{out}"
     assert "本批 1 条" in out and "到此为止" in out, out
@@ -581,6 +594,134 @@ def check_two_dispatch_paths():
     print("  ok  plugins.emit 与注册表 emit 同源，EVENT_LOADERS ⊆ LOADERS")
 
 
+def check_bare_at_others():
+    """issue #138：只 @ 别人、正文空白的消息不是「在聊」，不许唤醒。
+
+    线上现场：追问窗口里收到 `[{"type":"at","qq":"<别人>"},{"type":"text","text":" "}]`，
+    被当成接话唤醒，追问行又渲染成裸 `@ `，于是 Agent 答了一句「你 @ 我……」。
+    两组对照不能少：`@我 + 空白` 是真空唤醒（issue 明说别一起吞），纯图片是
+    #35 要保的形态——把「没有正文」判成「没有内容」就会误杀它们。
+    """
+    real = wg_up_wake.config
+    wg_up_wake.config = lambda: {"self_account": "10001", "self_names": ["小鲸鱼"],
+                                 "slash_commands": {"prefix": "#"}}
+    try:
+        append([
+            # 1) @别人 + 空白（at 段带显示名）
+            (901, {"sender": "甲", "content": "@乙 ",
+                   "segments": [{"type": "at", "qq": "20002", "name": "乙"},
+                                {"type": "text", "text": " "}],
+                   "timestamp": 1792500600000}, 1792500600.0),
+            # 2) @别人 + 空白（at 段无名字，content 就是 @<qq>）
+            (902, {"sender": "甲", "content": "@20003 ",
+                   "segments": [{"type": "at", "qq": "20003"},
+                                {"type": "text", "text": " "}],
+                   "timestamp": 1792500601000}, 1792500601.0),
+            # 3) @我 + 空白：真空唤醒，照旧算接话
+            (903, {"sender": "丙", "content": "@小鲸鱼 ",
+                   "segments": [{"type": "at", "qq": "10001", "name": "小鲸鱼"},
+                                {"type": "text", "text": " "}],
+                   "timestamp": 1792500602000}, 1792500602.0),
+            # 4) 对照组：@别人 + 正文，照旧算接话
+            (904, {"sender": "丁", "content": "@乙 这题你会吗",
+                   "segments": [{"type": "at", "qq": "20002", "name": "乙"},
+                                {"type": "text", "text": " 这题你会吗"}],
+                   "timestamp": 1792500603000}, 1792500603.0),
+            # 5) 对照组：纯图片，没有正文也没有 @（issue #35）
+            (905, {"sender": "戊", "content": "[图片]",
+                   "segments": [{"type": "image", "image_index": 0}],
+                   "timestamp": 1792500604000}, 1792500604.0),
+        ])
+        state = followup.open(900, max_messages=10, idle_seconds=600)
+        until = state["until"]
+        rows = followup.since(900, SID)
+        assert [r["id"] for r in rows] == [901, 902, 903, 904, 905], \
+            [r["id"] for r in rows]
+        woke = followup.consume(state, rows)
+        assert [r["id"] for r in woke] == [903, 904, 905], (
+            "只 @ 别人、没有正文的消息被当成接话（issue #138 复发）："
+            f"{[r['id'] for r in woke]}")
+        assert state["after_id"] == 905, "跳过的消息也必须推游标（跳过 ≠ 卡住）"
+        assert state["budget"] == 7, f"被跳过的两条不该扣额度：{state['budget']}"
+        assert state["wakes"] == 1, state
+        assert state["until"] > until, "有真接话，窗口该续期"
+        assert followup.load()["after_id"] == 905, "游标没落盘，下一轮会重捞"
+
+        # 整批都是「只 @ 别人」：不唤醒、不扣额度、不续期，但游标照常推进
+        append([(906, {"sender": "己", "content": "@乙 ",
+                       "segments": [{"type": "at", "qq": "20002", "name": "乙"},
+                                    {"type": "text", "text": " "}],
+                       "timestamp": 1792500605000}, 1792500605.0)])
+        frozen = (state["budget"], state["wakes"], state["until"])
+        assert followup.consume(state, followup.since(state["after_id"], SID)) == [], \
+            "整批都是「只 @ 别人」，不该唤醒"
+        assert (state["budget"], state["wakes"], state["until"]) == frozen, state
+        assert state["after_id"] == 906, "跳过的消息也必须推游标（跳过 ≠ 卡住）"
+        assert followup.load()["after_id"] == 906, "游标没落盘，下一轮会重捞"
+
+        # 判据本身：@ 指向、可见正文、有没有内容，逐项对得上
+        assert rows[0].get("segments"), "since() 没把 segments 带出来，判不了 @ 指向"
+        assert followup.mention_info("@乙 ", rows[0]["segments"], "10001") == \
+            ("", False, ["乙"], False), "带名字的 @别人 + 空白 没判出来"
+        assert followup.mention_info("@20003 ", rows[1]["segments"], "10001") == \
+            ("", False, ["20003"], False), "无名字的 @别人 + 空白 没判出来"
+        assert followup.mention_info("@小鲸鱼 ", rows[2]["segments"], "10001")[1] is True, \
+            "@我 没认出来"
+        assert followup.mention_info("@乙 这题你会吗", rows[3]["segments"], "10001") == \
+            ("这题你会吗", False, ["乙"], True), "带正文的 @ 不该算空"
+        assert followup.mention_info("[图片]", rows[4]["segments"], "10001") == \
+            ("", False, [], True), "纯图片被当成空消息"
+        # 没有 segments 的老行/超限行：退化成从 content 认 @<qq>
+        assert followup.mention_info("@20002 ", None, "10001") == ("", False, ["20002"], False)
+        assert followup.mention_info("@20002 在吗", None, "10001") == ("在吗", False, ["20002"], True)
+
+        # issue 的复现命令就是手搓行（没有 segments）：照样不许唤醒
+        manual = [{"id": 910, "sender": "甲", "raw": "@20002 ", "text": "@20002 ",
+                   "at": time.time(), "self": False, "synthetic": False}]
+        assert followup.consume(state, manual) == [], \
+            "手搓行（issue 复现命令的形态）仍然被唤醒（issue #138 复发）"
+        assert state["after_id"] == 910, state
+
+        # P1-b：追问行不许把 @ 目标抹成裸 `@`
+        line, _, _ = wg_text.render_body("@20002 ", wg_text.WAKE_BODY_CHARS, 902)
+        assert "20002" in line and line.strip() != "@", \
+            f"@ 指向被渲染成裸 `@`（issue #138 复发）：{line!r}"
+        named, _, _ = wg_text.render_body("@乙 ", wg_text.WAKE_BODY_CHARS, 901)
+        assert named.strip() == "@乙", named
+    finally:
+        wg_up_wake.config = real
+    print("  ok  只 @ 别人、正文空白不唤醒（游标照推）；@我 / 带正文 / 纯图片照旧（issue #138）")
+
+
+def check_bare_at_others_watch():
+    """症状级：issue #138 的现场是 watch.py 打出来的那一行。
+
+    窗口里只放两条：@别人 + 空白、@我 + 空白。前者不许出现在输出里，后者照旧
+    WAKE——只改状态不改打印，Agent 看到的仍然是那一行。
+    """
+    anchor = 950
+    now = time.time()
+    append([
+        (951, {"sender": "甲", "content": "@乙 ",
+               "segments": [{"type": "at", "qq": "20002", "name": "乙"},
+                            {"type": "text", "text": " "}],
+               "timestamp": 1792500700000}, now),
+        (952, {"sender": "丙", "content": "@小鲸鱼 ",
+               "segments": [{"type": "at", "qq": "10001", "name": "小鲸鱼"},
+                            {"type": "text", "text": " "}],
+               "timestamp": 1792500701000}, now),
+    ])
+    followup.open(anchor, max_messages=5, idle_seconds=600)
+    code, out = run_watch()
+    assert code == 0, f"watch.py 退出码 {code}：\n{out}"
+    assert "WAKE" in out, f"@我 的空白消息该唤醒，不能连坐：\n{out}"
+    assert "id=951" not in out, \
+        f"只 @ 别人的空白消息进了追问行（issue #138 复发）：\n{out}"
+    assert "id=952" in out, f"@我 的那条没进追问行：\n{out}"
+    followup.close()
+    print("  ok  watch.py 追问行只放真接话：@别人+空白不出现，@我+空白照旧（issue #138）")
+
+
 def main():
     build()
     print("追问窗口回归：")
@@ -609,6 +750,10 @@ def main():
     check_window_status()
     check_legacy_section()
     check_two_dispatch_paths()
+    # issue #138 专项：追加 id 900+ / 950+ 的新消息，必须排在所有 `since(小 anchor)`
+    # 用例之后——否则会被它们当成接话捞进去。
+    check_bare_at_others()
+    check_bare_at_others_watch()
     print("PASS")
     return 0
 

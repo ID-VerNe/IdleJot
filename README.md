@@ -33,7 +33,7 @@ Agent 常驻一个 QQ 群：被叫到就回，没被叫就潜水看别人聊，�
 - **人格卡热切换**。仓库 `water-group/personas/` 放公开模板，私有卡放 `~/.water-group/personas/`，同名私有优先；换个文件就是换个人。
 - **崩了会自己爬起来**。守护进程探的是 OneBot 的真实应答（`get_login_info`），不是端口——QQ 那种「端口还在但不应答」的假活能被识别，约 8 秒重新上线。
 
-目前只发**文字 + @ + 引用**。表情、图片、戳一戳这些能力在 MCP 工具层有，命令行这条路没接。
+目前能发**文字 + @ + 引用 + 本地图片**。表情库、语音、戳一戳这些能力在 MCP 工具层有，命令行这条路没接。
 
 ## 快速开始
 
@@ -233,6 +233,19 @@ explorer.exe
 
 带 @ 的消息**只能走 OneBot**：`send_chat_reply` 只吃纯文本，会把 at 段静默降级成文字。所以一旦发现 at 段就强制走 OneBot，OneBot 不可用时直接 `SEND_FAILED`，不会退化成一条没有 @ 的消息。
 
+### 发本地图片
+
+```bash
+.venv/Scripts/python.exe water-group/daemon/reply.py 1516 "看这张" --image ~/Downloads/shot.png
+.venv/Scripts/python.exe water-group/daemon/reply.py 1516 --image a.png --image b.png   # 纯图，可重复
+```
+
+每张图独占一条气泡，排在文字之后，首条照旧挂引用。校验走**内容**而不是扩展名：Pillow 把整张图逐帧解开才算数，格式限 PNG/JPEG/GIF/WebP（`.jfif`、大写 `.PNG`、改了名的文本、只有 PNG 魔数的假图、下载到一半解不出来的图都过不去）。只看 `verify()` 是不够的——Pillow 里它只对 PNG 真的校验结构，JPEG/GIF/WebP 上是空操作，半张图会一路过关。反过来，**解得出、只是少了尾部**的图会放行：丢 IEND 的 PNG 画面完整，帧边界处截断的 GIF 只是帧数变少——发进群是一张完整但可能短一点的图，不是裂图。上限三道：单张 6 MiB、合计 80 兆像素、最多 300 帧——压缩率高的图能把几百兆像素塞进几十 KiB，不设限就是拿发图当解压炸弹的入口；一次最多 9 张，气泡之间有 1.2 秒间隔，再多会吃满宿主 120 秒的工具超时。**先校验再动手**：多张里有一张不合格就一张都不发，不会出现「发了一半」。图也算气泡——正文条数加图张数超过气泡上限（默认 20）时，在发之前就拒。
+
+图片段用 `base64://`（`qr_login.py` 的二维码已经实机验证过这条路径，`send_group_msg` 回 `retcode=0`），不发本地路径——路径常带用户名，不该进群。带图的回复强制走 OneBot：计划通道的气泡写死 `kind: "text"`，回退过去等于悄悄吞掉图片。发图同样记账、同样开追问窗口，`--no-quote` 语义不变。
+
+画图（让机器人自己生成图片）仍未接，见 [issue #128](https://github.com/ID-VerNe/IdleJot/issues/128) 的 (b) 部分——那是引入外部服务 + 凭证 + 配额 + 内容边界，不是补一个参数。
+
 **失败要说清是哪一种失败**（issue #132）。`SEND_FAILED` 后面跟的是 OneBot 的原始 `retcode` 与 `message` 首行，不是「带 @ 只能走 OneBot」——后者只是「为什么不降级」，把它当失败原因会让 Agent 去掉 `--at` 重试一次，照样失败。被禁言时还会查一次 `get_group_member_info` 的 `shut_up_timestamp`，给出「禁言至 HH:MM:SS（还剩 N 秒）」并区分全员 / 单人；这个结论留在 `state/wg_send_failure.json`，由 `reply.py --list` 抬头带出。加 `--wait-unmute` 时，解禁在单次调用等待预算内就自动补发一次，超出预算则如实报「需等 N 秒」而不是硬等（硬等会被宿主砍掉整棵进程树）。禁言期间换任何通道都没用：计划通道最终也是 `send_group_msg`。
 
 ### 连发的 @ 不会丢
@@ -358,7 +371,7 @@ tail -20 ~/.water-group/logs/napcat-watchdog.log  # QQ 是否被反复重注入
 ## 已知限制
 
 - **Agent 停止思考，机器人就静音。** 这是设计如此：回复是 Agent 写的，不是本地模型。宿主结束回合、退出、休眠之后，群里 @ 它不会有反应。想真正无人值守，得让 Agent 那边保持执行。
-- **只发文字。** 表情、图片、语音这些能力在 MCP 层，命令行这条路没接。
+- **图片能发，表情与语音不能。** `reply.py --image` 发本地图片（issue #128）；从表情库里挑一张、发语音、画图这三样在命令行这条路上仍没接——表情库要 MCP 的幂等与「已看过」语义，语音与画图各是独立集成。
 - **`mention_only` 下不会主动接话。** 想让它参与闲聊，把 `trigger_mode` 改成 `natural`，噪音会一起上来。
 - **同名歧义在 `find_profile` 层没解决。** `reply.resolve_member` 会报候选，但 MCP 的 `query_member_dossier` 遇到歧义仍会静默选第一个。
 - **Windows only。** 保活、开窗抑制、控制台代码页都依赖 Windows 进程模型（taskkill / WMI / `CREATE_NO_WINDOW`），没有 Linux 版本。

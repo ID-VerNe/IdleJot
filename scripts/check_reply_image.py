@@ -5,7 +5,7 @@
 解释「我发不了图」——多模态群聊退化成纯文本。更坏的是绕路：Agent 若自己
 `requests.post('/send_group_msg')` 手搓，会同时绕过 `record()` 记账与追问窗口。
 
-本门禁钉八件事：
+本门禁钉九件事：
 
   1. `--image <png>` + 文字 → 两次 `send_group_msg`：`[reply, text]` 与 `[image]`，
      且 image 段解出的字节与原文件逐字节相等（base64 段是 NapCat 实机验证过的形状，
@@ -17,8 +17,9 @@
   5. 好图 + 坏图混着给 → **一张都不发**（不是「先发好的再报错」）；
   6. OneBot 不可用时 **不回退计划通道**：`SEND_FAILED`、零请求、不记账——回退过去
      图片会被静默吞掉（`send()` 的气泡写死 `kind:"text"`）；
-  7. 发图成功后 `wg_replied.jsonl` 有该 event 的记账行——防「图发了但还显示 [待回]」；
-  8. `reply.py --help` 里有 `--image`（issue 第二条复现命令不再 `exit=1`）。
+  7. 读到的字节数与 `stat` 不符（下载器还在写）时不发半张图；
+  8. 发图成功后 `wg_replied.jsonl` 有该 event 的记账行——防「图发了但还显示 [待回]」；
+  9. `reply.py --help` 里有 `--image`（issue 第二条复现命令不再 `exit=1`）。
 
 真跑 `reply.py` 子进程 + loopback OneBot 假服务器 + 隔离数据根，不发任何真实消息：
 
@@ -257,6 +258,33 @@ def OneBot不可用时不回退计划通道():
           and "SEND_FAILED" in proc.stdout and "计划通道" in proc.stdout
           and 9 not in ledger_ids())
     return ok or proc.stdout + proc.stderr
+
+
+@case
+def 读到一半的文件不发():
+    """stat 与 read 之间文件被改写（下载器还在写）：长度对不上就拒，不发半张图。
+
+    这条只能进程内测——子进程里没法在 stat 与 read 之间插一脚。所以把 `Path.stat`
+    打桩成「比真实文件大 10 字节」，模拟 stat 之后文件被截短。
+    """
+    sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
+    import wg_images  # noqa: PLC0415
+
+    target = HOME / "a.png"
+    real_stat = Path.stat
+
+    class Shrunk:
+        st_mode = real_stat(target).st_mode
+        st_size = len(PNG) + 10
+
+    Path.stat = lambda self, **kw: Shrunk() if self == target else real_stat(self, **kw)
+    try:
+        wg_images.read_for_send(str(target))
+    except wg_images.ImageError as exc:
+        return "在读取时被改动" in str(exc) or str(exc)
+    finally:
+        Path.stat = real_stat
+    return "长度对不上却没拒"
 
 
 @case

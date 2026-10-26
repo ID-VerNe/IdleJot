@@ -122,9 +122,12 @@ def _all_shut(post, group_id):
     无关」（独立复核抓到的假事实）。
     """
     try:
-        return bool(post("get_group_info", {"group_id": int(group_id)}).get("group_all_shut"))
+        value = post("get_group_info", {"group_id": int(group_id)}).get("group_all_shut")
     except Exception:  # noqa: BLE001  查不到就返回 None，不冒充 False
         return None
+    # 字段缺失（老版本 / 裁剪过的响应）同样是「不知道」，不能当 False——否则
+    # 「未检出禁言」又变成一句假话（复核遗留 1）。
+    return None if value is None else bool(value)
 
 
 def diagnose(group_id, failure, post=None, now=None):
@@ -159,7 +162,8 @@ def diagnose(group_id, failure, post=None, now=None):
         if scope is False:
             return None, [f"  未检出禁言（shut_up_timestamp={until}，group_all_shut=False）："
                           "失败来自 OneBot 的其它原因，见上一行原文"]
-        return None, [f"  禁言状态未知：群信息查询失败，本机 shut_up_timestamp={until}"]
+        return None, [f"  禁言状态未知：读不到 group_all_shut（查询失败或响应缺字段），"
+                      f"本机 shut_up_timestamp={until}"]
     lines = [f"  机器人被禁言至 {wg_clock.clock(until)}（还剩 {seconds} 秒），"
              f"期间任何通道都发不出去"]
     if scope is True:
@@ -181,7 +185,9 @@ def wait_plan(mute, budget=None, elapsed=0.0):
     """
     budget = wg_budget.WAIT_BUDGET if budget is None else int(budget)
     need = int(mute) + UNMUTE_MARGIN
-    allowance = wg_budget.clamp_wait(need, elapsed)
+    # 两个上限都要满足：调用方给的预算（本模块里恒等于 WAIT_BUDGET，但形参不能只进文案）
+    # 与整次调用剩余额度（clamp_wait 按 elapsed 算，#88）。
+    allowance = min(int(budget), wg_budget.clamp_wait(need, elapsed))
     if allowance < need:
         return None, [f"  需等 {need} 秒才解禁，超出单次调用等待预算 {budget}s"
                       f"（已用 {max(0, int(elapsed))}s，剩 {allowance}s）："

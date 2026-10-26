@@ -255,8 +255,18 @@ def 群信息查不到_说未知不说未禁言():
     _reset(time.time(), shut_up=0, group_fails=True)
     FIX["replies"].append(_mute_send())
     code, out = _run(["1", TEXT, "--at", "群友A", "--no-wait"])
-    return (code == 1 and "禁言状态未知：群信息查询失败" in out
+    return (code == 1 and "禁言状态未知：读不到 group_all_shut" in out
             and "未检出禁言" not in out)
+
+
+@case
+def 群信息缺字段_同样算未知():
+    """响应里没有 group_all_shut 时不能当 False（老版本 / 裁剪过的响应）。"""
+    _reset(time.time(), shut_up=0)
+    FIX["group"] = {"group_id": int(GROUP)}
+    FIX["replies"].append(_mute_send())
+    code, out = _run(["1", TEXT, "--at", "群友A", "--no-wait"])
+    return (code == 1 and "禁言状态未知" in out and "未检出禁言" not in out)
 
 
 @case
@@ -287,7 +297,11 @@ def 等待预算_边界与唯一出处():
     allowed, _ = wg_send_failure.wait_plan(wg_budget.WAIT_BUDGET - wg_send_failure.UNMUTE_MARGIN)
     refused, lines = wg_send_failure.wait_plan(
         wg_budget.WAIT_BUDGET - wg_send_failure.UNMUTE_MARGIN + 1)
-    return (allowed == wg_budget.WAIT_BUDGET and refused is None
+    # 形参 budget 必须真的参与判定，不能只进文案（复核遗留 2）；elapsed 同理。
+    tight, _ = wg_send_failure.wait_plan(30, budget=30)   # need=35 > 预算 30
+    spent, _ = wg_send_failure.wait_plan(60, elapsed=30)
+    return (allowed == wg_budget.WAIT_BUDGET and refused is None and tight is None
+            and spent is None
             and any(f"超出单次调用等待预算 {wg_budget.WAIT_BUDGET}s" in ln for ln in lines))
 
 

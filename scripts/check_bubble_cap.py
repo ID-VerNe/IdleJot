@@ -118,6 +118,7 @@ def 回复侧文档写的是自己的上限():
         ("water-group/daemon/reply.py", r"默认最多 (\d+) 条"),
         (".agents/rules/water_group.md", r"默认最多 (\d+) 条"),
         (".agents/skills/water-group/SKILL.md", r"默认最多 (\d+) 条"),
+        ("water-group/config.example.json", r'"max_bubbles":\s*(\d+)'),
     ]
     return all(doc_number(path, pattern) == wg_bubbles.MAX_BUBBLES
                for path, pattern in sites)
@@ -212,9 +213,14 @@ def 成本按间隔算():
 
 
 @case
-def 成本行报出剩余等待预算():
-    note = wg_bubbles.cost_note(5)
-    return "4.8s" in note and "剩余等待预算 85s" in note
+def 成本行按实际等待报剩余():
+    # 三种 callsite 都要说实话：缺省按预算上限、--wait 30 就报 30、--no-wait 不报额度。
+    default = wg_bubbles.cost_note(5)
+    waited = wg_bubbles.cost_note(5, 30)
+    no_wait = wg_bubbles.cost_note(5, 0)
+    return ("4.8s" in default and "还能等 85s" in default
+            and "最多等 30s" in waited and "还能等 25s" in waited
+            and "不占等待预算" in no_wait)
 
 
 @case

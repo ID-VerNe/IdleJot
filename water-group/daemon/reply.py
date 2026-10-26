@@ -912,7 +912,7 @@ def main():
     answered = [target, *[i for i in args.also if i != target]]
     print(f"target={target} group={group_id} session={sid}")
     # 发之前先报账：间隔会吃掉本次调用的等待额度（整次共享的总额，issue #88）。
-    cost = wg_bubbles.cost_note(len(bubbles))
+    cost = wg_bubbles.cost_note(len(bubbles), args.wait)
     if cost:
         print(cost)
 

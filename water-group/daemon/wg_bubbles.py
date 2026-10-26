@@ -100,20 +100,28 @@ def estimate_seconds(count, gap=BUBBLE_GAP):
     return max(0, int(count) - 1) * gap
 
 
-def cost_note(count, gap=BUBBLE_GAP):
-    """发送前报出预计耗时与剩余等待预算；一条气泡时返回空串。
+def cost_note(count, wait=None, gap=BUBBLE_GAP):
+    """发送前报出预计耗时与「这条路径上还能等多久」；一条气泡时返回空串。
 
-    `--wait` 的额度是「整次调用共享的总额」（issue #88），发送占掉的时间会从
-    等唤醒的额度里扣。20 条 ≈ 23s 不是小数目，发之前说出来，别让长回复悄悄把
-    预算吃光（issue #131）。
+    `--wait` 的额度是「整次调用共享的总额」（issue #88），发送占掉的时间会从等唤醒
+    的额度里扣。20 条 ≈ 23s 不是小数目，发之前说出来，别让长回复悄悄把预算吃光
+    （issue #131）。
+
+    `wait` 是调用方这一次实际要等的秒数（`--no-wait` 就是 0），缺省按预算上限算。
+    不传实际值会写出一句假话：`--no-wait` 时说「还能等 85s」、`--wait 30` 时也说
+    85s——输出里的假话比没有输出更坏（#88 的教训）。
     """
     count = int(count)
     if count < 2:
         return ""
     seconds = estimate_seconds(count, gap)
-    left = max(0, wg_budget.WAIT_BUDGET - int(math.ceil(seconds)))
-    return (f"  cost: {count} 条气泡，间隔 {gap}s × {count - 1} ≈ {seconds:.1f}s"
-            f"（发送后剩余等待预算 {left}s / {wg_budget.WAIT_BUDGET}s）")
+    wait = wg_budget.WAIT_BUDGET if wait is None else max(0, int(wait))
+    wait = min(wait, wg_budget.WAIT_BUDGET)
+    if not wait:
+        tail = "本次不续挂监听 --no-wait，不占等待预算"
+    else:
+        tail = f"本次最多等 {wait}s，发送后还能等 {max(0, wait - int(math.ceil(seconds)))}s"
+    return (f"  cost: {count} 条气泡，间隔 {gap}s × {count - 1} ≈ {seconds:.1f}s（{tail}）")
 
 
 def plan_overflow_message(count):

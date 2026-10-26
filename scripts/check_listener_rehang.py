@@ -1,4 +1,4 @@
-"""钉住监听空窗：退出要说下一步、要留下痕迹，过期唤醒不许静默消失（#69/#112）。
+"""钉住监听空窗：退出要说下一步、要留下痕迹，过期唤醒不许静默消失（#69/#112/#119）。
 
 2026-10-24 一晚上 `listen.py` 掉了 3 次。它按设计「有事就退出叫人」，但退出
 之后没有任何东西保证下一次挂上：Agent 回消息、读图、写 issue 的几十秒里，
@@ -104,6 +104,11 @@
     时刻，`on_watch()` 的布尔值与 `describe()` 的文案必须同一结论；把窗口常量
     移到该记录心跳年龄的两侧，两者必须一起翻。`on_watch()` 的默认参数在 def 期
     绑定常量时（改常量只半生效），本契约红在常量那一档。
+36. 并行监听各记各的账（issue #119）：同一数据根下 A、B 先后起、B 先退出时，
+    A 仍在跑——账本不得把「还有人在值守」说成「此后 0 秒无人值守」。
+    `on_watch()` 必须为 True，`describe()` 必须报「值守中」且不含「无人值守」；
+    A 也退出后才转「无人值守」（对照组：恒 True 的实现红在后半条）。只保留
+    一行记录的实现（后起覆盖先起）红在 issue 的原始症状上。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -1504,16 +1509,53 @@ def 非约定路径的注册worktree不算已有监听():
 
 
 def ledger_at(home):
-    """把账本指到 `home`，返回还原函数（issue #112）。
+    """把账本指到 `home`，返回还原函数（issue #112 / #119）。
 
-    `wg_listener_state.STATE` 与别的 daemon 模块同款，在 import 期求值。要让本
-    进程读到**子进程**写的那一份账本，只能临时改写这个模块级绑定——与
+    `wg_listener_state` 的路径绑定与 `STATE` 同款，在 import 期求值。要让本
+    进程读到**子进程**写的那一份账本，只能临时改写这些模块级绑定——与
     `status_listener_line` 打桩同款，只是这次桩在账本模块自己身上。返回还原函数
     而不是用上下文管理器：用例里的 finally 本来就要收树，多一层不划算。
+
+    #119 之后账本是 `wg_listeners/<pid>.json` 一槽一份；`STATE` 只在旧布局上
+    存在（基线复跑要用**新门禁**跑未打补丁的模块），两套路径都指到 `home`，
+    否则旧模块会读写实机账本。`OWNER_ENV` 也一并还原，避免上一个用例的 pid
+    泄漏到下一个。
     """
-    original = wg_listener_state.STATE
-    wg_listener_state.STATE = home / "state" / "wg_listener.json"
-    return lambda: setattr(wg_listener_state, "STATE", original)
+    names = ("STATE", "STATE_DIR", "LEGACY_STATE")
+    saved = {name: getattr(wg_listener_state, name) for name in names
+             if hasattr(wg_listener_state, name)}
+    owner_env = getattr(wg_listener_state, "OWNER_ENV", "WG_LISTENER_PID")
+    owner = os.environ.get(owner_env)
+    if "STATE" in saved:
+        wg_listener_state.STATE = home / "state" / "wg_listener.json"
+    if "STATE_DIR" in saved:
+        wg_listener_state.STATE_DIR = home / "state" / "wg_listeners"
+    if "LEGACY_STATE" in saved:
+        wg_listener_state.LEGACY_STATE = home / "state" / "wg_listener.json"
+
+    def restore():
+        for name, value in saved.items():
+            setattr(wg_listener_state, name, value)
+        if owner is None:
+            os.environ.pop(owner_env, None)
+        else:
+            os.environ[owner_env] = owner
+
+    return restore
+
+
+def write_ledger(home, record):
+    """把一条记录写回账本（夹具用；新旧两种布局都认）。
+
+    过期用例要把心跳推到窗口之外，等于自己改写一条记录——这是 `stop()` 不会
+    走到的「硬杀」形态，只能直接落盘。
+    """
+    if hasattr(wg_listener_state, "STATE_DIR"):
+        path = wg_listener_state.STATE_DIR / f"{record['pid']}.json"
+    else:
+        path = home / "state" / "wg_listener.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
 
 
 @case
@@ -1662,8 +1704,7 @@ def 心跳过期的值守记录不算值守():
             wg_listener_state.start(timeout=wg_budget.WAIT_BUDGET)
             record = wg_listener_state.read()
             record["beat_at"] = record["started_at"] - wg_listener_state.STALE_AFTER - 5
-            (home / "state" / "wg_listener.json").write_text(
-                json.dumps(record, ensure_ascii=False), encoding="utf-8")
+            write_ledger(home, record)
             stale_watch = wg_listener_state.on_watch()
             stale_note = wg_listener_state.describe()
             # 同一份记录、把「现在」拨回窗口内：必须是 True，证明上面的 False
@@ -1700,8 +1741,7 @@ def 过期窗口两入口同一结论():
             record = wg_listener_state.read()
             record["started_at"] = now - 500
             record["beat_at"] = now - age
-            (home / "state" / "wg_listener.json").write_text(
-                json.dumps(record, ensure_ascii=False), encoding="utf-8")
+            write_ledger(home, record)
             for window in (age + 20, age - 20, original):
                 wg_listener_state.STALE_AFTER = window
                 rows.append((window,
@@ -1715,6 +1755,45 @@ def 过期窗口两入口同一结论():
         and ("值守中" in note) == (age <= window)
         and ("失去心跳" in note) == (age > window)
         for window, watching, note in rows)
+
+
+@case
+def 并行监听各记各的账():
+    """并行监听时先起者仍在跑，账本不许说「无人值守」（issue #119）。
+
+    issue 的复现顺序：A 起、B 起、B 先退出、A 仍在跑。修复前两个监听共用一行，
+    B 的 `start()` 覆盖 A，B 的 `stop()` 又把这一行写成退出——`on_watch()` 为
+    False，`describe()` 说「此后 0 秒无人值守」，与进程事实相反。修复后每个监听
+    一槽：B 的退出只落 B 的槽，A 仍是新鲜 `watching`。
+
+    用 `os.getpid` 打桩模拟两个 pid，与 issue 现象段的复现命令同形；不真起进程，
+    避免把这条契约变成进程表测试。A 也退出后必须转「无人值守」——恒 True 的
+    坏实现红在后半条。
+    """
+    with temp_dir(prefix="wg-parallel-") as home:
+        restore = ledger_at(home)
+        original_getpid = os.getpid
+        try:
+            wg_listener_state.start(pid=111, timeout=wg_budget.WAIT_BUDGET)
+            wg_listener_state.start(pid=222, timeout=wg_budget.WAIT_BUDGET)
+            os.getpid = lambda: 222
+            wg_listener_state.stop("NO_WORK")
+            os.getpid = original_getpid
+            after_first_exit = wg_listener_state.on_watch()
+            note_first_exit = wg_listener_state.describe()
+            os.getpid = lambda: 111
+            wg_listener_state.stop("WAKE")
+            after_both = wg_listener_state.on_watch()
+            note_both = wg_listener_state.describe()
+        finally:
+            os.getpid = original_getpid
+            restore()
+    return (after_first_exit
+            and "值守中" in note_first_exit
+            and "无人值守" not in note_first_exit
+            and not after_both
+            and "无人值守" in note_both
+            and "值守中" not in note_both)
 
 
 def main():

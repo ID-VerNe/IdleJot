@@ -82,7 +82,7 @@ SELF = "10001"
 CALLS = []
 # `四种格式都真能发` 要按字节核对，所以留一份原文。
 GOOD = {}
-EXT = {"JPEG": "jpg", "GIF": "gif", "WEBP": "webp"}
+EXT = {"PNG": "png", "JPEG": "jpg", "GIF": "gif", "WEBP": "webp"}
 
 
 class OneBot(FixtureHandler):
@@ -426,12 +426,13 @@ def 四种格式都真能发():
     """
     CALLS.clear()
     proc = run("16", "四种格式",
-               "--image", str(HOME / "good.jpg"), "--image", str(HOME / "good.gif"),
-               "--image", str(HOME / "good.webp"), "--no-wait", "--no-followup")
-    ok = (proc.returncode == 0 and len(CALLS) == 4 and "SENT" in proc.stdout
+               "--image", str(HOME / "good.png"), "--image", str(HOME / "good.jpg"),
+               "--image", str(HOME / "good.gif"), "--image", str(HOME / "good.webp"),
+               "--no-wait", "--no-followup")
+    ok = (proc.returncode == 0 and len(CALLS) == 5 and "SENT" in proc.stdout
           and types_of(CALLS[0]) == ["reply", "text"]
           and [image_bytes(body) for body in CALLS[1:]]
-          == [GOOD["JPEG"], GOOD["GIF"], GOOD["WEBP"]])
+          == [GOOD[fmt] for fmt in ("PNG", "JPEG", "GIF", "WEBP")])
     return ok or proc.stdout + proc.stderr
 
 
@@ -477,13 +478,15 @@ def build_fixtures():
     (HOME / "broken.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
     (HOME / "huge.png").write_bytes(PNG + b"\x00" * (MAX_BYTES + 1 - len(PNG)))
     (HOME / "half.jpg").write_bytes(half_jpeg())
-    # 三种非 PNG 的好图：`四种格式都真能发` 要按字节核对，所以留一份原文。
+    # 四种格式各留一份好图：`四种格式都真能发` 要按字节核对，所以留一份原文。
     src = Image.linear_gradient("L").resize((32, 32)).convert("RGB")
+    GOOD["PNG"] = PNG
     GOOD["JPEG"] = encode(src, "JPEG", quality=90)
     GOOD["GIF"] = encode(src, "GIF")
     GOOD["WEBP"] = encode(src, "WEBP")
     for fmt, raw in GOOD.items():
-        (HOME / f"good.{EXT[fmt]}").write_bytes(raw)    # 9000×9000 的单色 1-bit PNG 只有 10 KiB：6 MiB 的文件上限拦不住它，真解一遍
+        (HOME / f"good.{EXT[fmt]}").write_bytes(raw)
+    # 9000×9000 的单色 1-bit PNG 只有 10 KiB：6 MiB 的文件上限拦不住它，真解一遍
     # 要 400 MiB。像素上限就是为这种图设的。
     (HOME / "bomb.png").write_bytes(encode(Image.new("1", (9000, 9000)), "PNG"))
     # 301 帧的 16×16 GIF 只有 18 KiB、15 兆像素——像素上限拦不住，靠帧数上限。

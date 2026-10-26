@@ -34,6 +34,10 @@ DEFAULT_PENDING_REPLY_TTL = 7200
 FORWARD_WAKE_NODES = 100
 FORWARD_WAKE_CHARS = 4000
 
+# `get_group_msg_history` 单次上限（OneBot 11）。`wg_gap` 据返回的最老一条判
+# `truncated`，`--status` 必须说「只能核对最近 200 条」（issue #114 候选 4）。
+HISTORY_COUNT = 200
+
 
 def read_text(path):
     try:
@@ -72,9 +76,39 @@ def login_info():
     Port open is not enough: the port stays bound while the renderer behind it is
     already wedged, so only an HTTP answer proves the bridge is alive.
     """
-    body = json.dumps({}).encode()
+    return _onebot_call("get_login_info", {})
+
+
+def group_msg_history(group_id, count=HISTORY_COUNT):
+    """最近 N 条群历史（OneBot 11 `get_group_msg_history`），NapCat 不答时返回 []。
+
+    `wait_chat_messages` 是游标式长轮询——后端不在的那段时间，游标停推进，窗口内的
+    消息永久不进 `chat_inbox`（`chatlocal/mcp_chat.py` 只在收到 OneBot 事件时写）。
+    取历史是事后补缺的唯一缺口数据源（issue #114）：`collector` 启动时用它与本地
+    `chat_inbox` diff，算「这段时间漏了什么」。返回 OneBot 原始消息（`message` 段是
+    `{"type":"at","data":{"qq":...}}`，未经 chatlocal 拍平）——`wg_gap._is_at_me` 按
+    这套格式判定 @ 本机。
+
+    单次上限 `HISTORY_COUNT`：超出时 `wg_gap` 据返回的最老一条判 `truncated`，`--status`
+    必须说「只能核对最近 200 条」，不静默截断（候选 4）。
+    """
+    data = _onebot_call("get_group_msg_history",
+                        {"group_id": str(group_id), "count": int(count)})
+    if not data:
+        return []
+    return data.get("messages") or []
+
+
+def _onebot_call(action, params):
+    """OneBot 11 HTTP loopback 调用，返回 `data` 字段或 None（NapCat 不答时）。
+
+    `login_info` 与 `group_msg_history` 共用同一条路：bearer token + `ProxyHandler({})`
+    绕开宿主代理（loopback 上 NapCat 只答 127.0.0.1）。失败一律返回 None——
+    `--status` 与 `collector` 的缺口计算都不能因为 NapCat 没响应而崩。
+    """
+    body = json.dumps(params).encode()
     req = urllib.request.Request(
-        "http://127.0.0.1:43000/get_login_info", data=body,
+        "http://127.0.0.1:43000/" + action, data=body,
         headers={"Authorization": f"Bearer {onebot_token()}",
                  "Content-Type": "application/json"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -85,8 +119,7 @@ def login_info():
         return None
     if data.get("status") != "ok":
         return None
-    info = data.get("data") or {}
-    return info.get("user_id"), info.get("nickname")
+    return data.get("data")
 
 
 def events():

@@ -48,6 +48,7 @@ ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 import winconsole  # noqa: E402
 import wg_budget  # noqa: E402  (等待预算的唯一出口，issue #79/#83)
+import wg_gap  # noqa: E402  (停机窗口缺口账本，issue #114)
 import wg_listener_state  # noqa: E402  (监听存亡账本，issue #112)
 
 # Same family as the window suppression: if a console does attach, retag it as
@@ -118,9 +119,31 @@ def _finish(reason, code):
 
     退出码本身不区分「正常完成」与「刚有人值守完」，账本补上这一半：这一轮是
     WAKE 走的、是额度用尽收手的，还是 watch.py 挂了。
+
+    issue #114 的缺口提示**不**在 `_finish` 里：放这里会让它在 WAKE 路径也出声，
+    而 WAKE 路径 Agent 已被叫醒、不需要它。NO_WORK 路径的提示由 `_no_work()` 在
+    `RESTART:` 之前单独打印——让 `RESTART:` 仍是末行（#69 契约 1）。
     """
     wg_listener_state.stop(reason)
     return code
+
+
+def _no_work(args, message=None):
+    """NO_WORK 路径统一收尾（issue #114）。
+
+    顺序固定：`NO_WORK` →（可选说明）→ 账本 stop → 缺口提示 → `RESTART:` 末行。
+    `listen.py 报 NO_WORK` 正是 #114 点名的症状：Agent 据「没人叫我」误判「这段
+    没人 @」，事实是「有人叫过但机器不在」。缺口提示插在 NO_WORK 与 RESTART: 之间
+    让两者可区分；RESTART: 仍是末行（#69 契约 1）。WAKE 路径不走这里——Agent
+    已被叫醒，不需要缺口提示。
+    """
+    print("NO_WORK")
+    if message:
+        print(message)
+    wg_listener_state.stop("NO_WORK")
+    wg_gap.print_hint()
+    restart_hint(args.timeout)
+    return 0
 
 
 def _rounds(args):
@@ -134,11 +157,8 @@ def _rounds(args):
         if wait <= 0:
             # 额度用尽：自己收手。等宿主来砍的话，进程树会连同 watch.py 一起死，
             # 监听就此静默消失，而 `--status` 在那之前一直报「已挂」（issue #88）。
-            print("NO_WORK")
-            print(f"这一轮等不下去了（每轮要等 {args.timeout}s、等待额度 "
-                  f"{wg_budget.WAIT_BUDGET}s，已跑 {cycles} 轮），本次调用到此为止")
-            restart_hint(args.timeout)
-            return _finish("NO_WORK", 0)
+            return _no_work(args, f"这一轮等不下去了（每轮要等 {args.timeout}s、等待额度 "
+                                   f"{wg_budget.WAIT_BUDGET}s，已跑 {cycles} 轮），本次调用到此为止")
         cycles += 1
         # 账本心跳（issue #112）：整轮等待由 watch.py 的轮询循环续，这里续的是
         # 「两轮之间」——沉淀积压时没有 watch.py 在跑，账本不能因此像死了一样。
@@ -166,9 +186,7 @@ def _rounds(args):
             # digest pass takes tens of seconds on a backlog, which turns
             # "--wait 6" into a minute and makes the timeout meaningless.
             if args.cycles and cycles >= args.cycles:
-                print("NO_WORK")
-                restart_hint(args.timeout)
-                return _finish("NO_WORK", 0)
+                return _no_work(args)
             continue
 
         # Timed out: the group has been quiet. Rule-based digestion is free, so it
@@ -181,9 +199,7 @@ def _rounds(args):
             return _finish("DOSSIER_DUE", 0)
 
         if args.cycles and cycles >= args.cycles:
-            print("NO_WORK")
-            restart_hint(args.timeout)
-            return _finish("NO_WORK", 0)
+            return _no_work(args)
 
 
 def main():

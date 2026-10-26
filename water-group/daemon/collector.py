@@ -29,6 +29,7 @@ from pathlib import Path
 
 import mcp_client
 import session
+import wg_gap  # noqa: E402  (停机窗口缺口账本，issue #114)
 import wg_images
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -110,6 +111,24 @@ def main():
     sid = bootstrap_session()
     log(f"session {sid}")
     beat()
+    # issue #114：collector 随栈重启而重启——夜间关机、断电、换网后早上拉起，停机
+    # 窗口内的群消息永久不进 chat_inbox（NapCat 不重放断线期间事件，游标只前进）。
+    # 这里算一次「本地 chat_inbox 最后一条 → 拉起时刻」与 get_group_msg_history 的
+    # 差，落 state/wg_gap.json：up.py --status / reply.py --list / listen.py NO_WORK
+    # 才能事后报出「这段时间漏了什么」，不再依赖人肉翻历史。fetcher 默认走
+    # wg_up_wake.group_msg_history，延迟 import 避免循环（wg_gap 默认参数里也走它）。
+    try:
+        import wg_up_wake  # noqa: PLC0415  延迟到 session 建好后再拉 OneBot
+        gap = wg_gap.compute_and_record(fetch=wg_up_wake.group_msg_history)
+        total = sum((e.get("missing") or 0)
+                    for e in (gap.get("groups") or {}).values()
+                    if isinstance(e, dict) and not e.get("unreachable"))
+        at_me = sum((e.get("at_me") or 0)
+                    for e in (gap.get("groups") or {}).values()
+                    if isinstance(e, dict) and not e.get("unreachable"))
+        log(f"gap disclosure: missing {total}, at_me {at_me}")
+    except Exception as exc:  # noqa: BLE001  缺口计算挂了不该让 collector 挂
+        log(f"gap disclosure failed: {type(exc).__name__}: {exc}")
 
     while True:
         try:

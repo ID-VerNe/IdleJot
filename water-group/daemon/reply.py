@@ -47,6 +47,7 @@ import mcp_client  # noqa: E402
 import plugins  # noqa: E402  (事件型能力派发口：追问窗口，issue #4 PD2a)
 import wg_aliases  # noqa: E402  (别名指向渲染，issue #30)
 import wg_budget  # noqa: E402  (等待预算的唯一出口，issue #79/#83)
+import wg_gap  # noqa: E402  (停机窗口缺口账本，issue #114)
 import winconsole  # noqa: E402
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_images  # noqa: E402
@@ -525,6 +526,15 @@ def list_wakes():
     # 表头先给「现在」：下面每行只有消息自己的时间戳，没有基准的话，Agent
     # 分不清一条 20:50 的 @ 是刚发的还是十分钟前的（issue #95）。
     print(f"# 唤醒记录 · {wg_clock.now_line()}")
+    # issue #114：停机窗口内漏收的 @ 本机消息（NapCat 不在的那段时间，永久不进
+    # chat_inbox）。这里列出来，让「没人叫我」与「有人叫过但机器不在」可区分——
+    # 列在唤醒块之前：Agent 先看到漏的、再看到当前待回的。行首 `id=-`（占位，
+    # 不可 reply.py <id>），`msg_id=` 是 OneBot 原始 id，Agent 真要回手动发送用。
+    gap_lines = wg_gap.at_me_lines()
+    if gap_lines:
+        print("# 停机窗口漏掉的 @（不在唤醒账本里，不可 reply.py <id>）：")
+        for ln in gap_lines:
+            print(ln)
     shown = 0
     for e in rows:
         reason = up.wake_reason(e)

@@ -25,6 +25,7 @@ from check_mcp_reactions import ReactionBot, Events, eventually, ROOT
 from chatlocal.store import Store
 from chatlocal.mcp_routes import install_mcp_routes
 from chatlocal.mcp_chat_turns import ChatTurns
+import chatlocal.mcp_chat_turns as turns
 from chatlocal.onebot import invalidate_availability
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -502,6 +503,28 @@ def main():
                     assert all(s['type']=='text' for s in ReactionBot.sent[-1]['message'])
                     ReactionBot.intercept=None
                     results.append('semantic bubbles spaced, first-only native quote/at, concurrent/rekey replay no duplicate')
+
+                    # 条数上限真的被执行，而不是「源码里写着常量」（issue #136）。
+                    # 两个边界分开断言：经 MCP 工具进来先被 schema 的 maxItems 拦成
+                    # invalid_arguments；绕过 schema 直接问 submit() 才是 invalid_bubbles
+                    # ——只测前者会把「校验根本没执行」误判成通过。
+                    clear_budget();last=add('条数上限的目标');time.sleep(.18)
+                    p=plan(last);assert p.get('state')=='READY',p
+                    too_many=[dict(kind='text',text='第%d句'%i) for i in range(1,turns.TURN_MAX_BUBBLES+2)]
+                    prior=len(ReactionBot.sent)
+                    refused=send(p,too_many)
+                    assert refused.get('error_code')=='invalid_arguments' and len(ReactionBot.sent)==prior,refused
+                    direct=tools.chat.turns.submit(grant,dict(session_id=sid,plan_id=p['plan_id'],
+                        idempotency_key=key(),bubbles=too_many),threading.Event())
+                    assert direct.get('error_code')=='invalid_bubbles' and len(ReactionBot.sent)==prior,direct
+                    assert 'bubbles' not in direct or all(b['state']=='PENDING' for b in direct.get('bubbles',[]))
+                    # 同一计划再用刚好装满的 12 条：不因条数被拒，且 12 条全发出去。
+                    exact=too_many[:-1]
+                    out=send(p,exact)
+                    assert out.get('state')=='SUCCEEDED' and len(out['bubbles'])==len(exact),out
+                    assert all(b['state']=='SUCCEEDED' for b in out['bubbles'])
+                    assert len(ReactionBot.sent)==prior+len(exact)
+                    results.append('bubble cap enforced at submit(): 13 rejected with nothing sent, 12 dispatched')
 
                     # A new speaker quoting the first bubble must interrupt tail.
                     last=add('新的可见目标');time.sleep(.18)

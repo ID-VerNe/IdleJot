@@ -16,6 +16,7 @@
 """
 import contextlib
 import io
+import math
 import re
 import sys
 from pathlib import Path
@@ -25,6 +26,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
 import wg_bubbles  # noqa: E402
+import wg_budget  # noqa: E402
 import reply  # noqa: E402
 from chatlocal import mcp_chat_turns as turns  # noqa: E402
 
@@ -86,13 +88,24 @@ def schema_与校验都取常量():
 
 @case
 def 校验拒绝上限加一():
-    # 断言真的用常量校验，而不是「schema 改了、校验还卡在 3」这种同形坏实现：
-    # 13 条必须被 invalid_bubbles 拒，12 条不能因为条数被拒（换成 4 就会红）。
-    ok = True
-    source = (ROOT / "chatlocal" / "mcp_chat_turns.py").read_text(encoding="utf-8")
-    ok &= "1<=len(bubbles)<=TURN_MAX_BUBBLES" in source
-    ok &= "maxItems=TURN_MAX_BUBBLES" in source
-    return ok
+    # 断言的是行为而不是写法（issue #136）：13 条必须被 `invalid_bubbles` 拒，12 条
+    # 不能因为条数被拒。过去这里比对源码子串，同形坏实现（常量改了、校验另写一个
+    # 数）照样能过。`submit()` 与门禁共用 `check_bubble_count()`，所以拿它问就是
+    # 问发送路径本身；端到端的 submit() 用例在 check_mcp_chat_turns.py。
+    def code(bubbles):
+        try:
+            turns.check_bubble_count(bubbles)
+        except turns.TurnRejected as exc:
+            return exc.code
+        return None
+
+    many = [dict(kind='text', text='第%d句' % i) for i in range(turns.TURN_MAX_BUBBLES + 1)]
+    exact = many[:-1]
+    return (code(many) == 'invalid_bubbles'
+            and code(exact) is None
+            and code([]) == 'invalid_bubbles'
+            and code('not a list') == 'invalid_bubbles'
+            and bubble_schema()["properties"]["bubbles"]["maxItems"] == turns.TURN_MAX_BUBBLES)
 
 
 @case
@@ -215,12 +228,46 @@ def 成本按间隔算():
 @case
 def 成本行按实际等待报剩余():
     # 三种 callsite 都要说实话：缺省按预算上限、--wait 30 就报 30、--no-wait 不报额度。
+    # 期望值现算（issue #136）：`85s`/`25s` 曾经写死在这里，`wg_budget.WAIT_BUDGET`
+    # 一改就假红——一个专门反对「同一个数写两处」的门禁自己藏了重复数字。
+    spend = math.ceil(wg_bubbles.estimate_seconds(5))
+    budget = wg_budget.WAIT_BUDGET
     default = wg_bubbles.cost_note(5)
     waited = wg_bubbles.cost_note(5, 30)
     no_wait = wg_bubbles.cost_note(5, 0)
-    return ("4.8s" in default and "还能等 85s" in default
-            and "最多等 30s" in waited and "还能等 25s" in waited
+    return (f"{wg_bubbles.estimate_seconds(5):.1f}s" in default
+            and f"还能等 {budget - spend}s" in default
+            and "最多等 30s" in waited and f"还能等 {max(0, 30 - spend)}s" in waited
             and "不占等待预算" in no_wait)
+
+
+@case
+def 计划通道成本按区间报下界():
+    # 计划通道的真实间隔是 bubble_min…max（默认 1.2–4s），只报 BUBBLE_GAP 会把
+    # 预算占用说小；区间形态下用「至少 / 最坏」，剩余额度按最坏扣（issue #136）。
+    # 用 policy={} 走缺省回落，不读实机数据根（门禁不许依赖本机配置）。
+    low, high = wg_bubbles.PLAN_GAP
+    note = wg_bubbles.cost_note_for(5, plan_path=True, policy={})
+    direct = wg_bubbles.cost_note(5, gap=low, gap_max=high)
+    fixed = wg_bubbles.cost_note_for(5, policy={})
+    worst = math.ceil(wg_bubbles.estimate_seconds(5, high))
+    return (f"间隔 {low:g}–{high:g}s" in note and "至少" in note and "最坏" in note
+            and f"还能等 {wg_budget.WAIT_BUDGET - worst}s" in note
+            and "≈" not in note and note == direct
+            and fixed == wg_bubbles.cost_note(5))
+
+
+@case
+def 计划通道间隔缺省回落常量():
+    # policy 文件缺失/非法时回落 PLAN_GAP，而不是崩或报 0——报账不是校验器。
+    low, high = wg_bubbles.PLAN_GAP
+    missing = wg_bubbles.plan_gap_range({})
+    broken = wg_bubbles.plan_gap_range({"bubble_min_seconds": "abc"})
+    inverted = wg_bubbles.plan_gap_range({"bubble_min_seconds": 5, "bubble_max_seconds": 1})
+    custom = wg_bubbles.plan_gap_range({"bubble_min_seconds": .5, "bubble_max_seconds": 2})
+    return (missing == (low, high) and broken == (low, high) and inverted == (low, high)
+            and custom == (.5, 2.) and turns.DEFAULTS['bubble_min_seconds'] == low
+            and turns.DEFAULTS['bubble_max_seconds'] == high)
 
 
 @case

@@ -31,6 +31,9 @@ pid 写进环境变量 `WG_LISTENER_PID`，子进程据此定位；裸跑 `watch
 
 硬杀（宿主截断，issue #88）写不了 `stopped_at`：心跳过期同样给出判定，说明最后
 心跳在几点、此后没有退出记录——「被杀了」与「正常退出」因此不再同形。
+
+窗口只在 `_stale_window()` 一处取值（issue #118）：`on_watch()` 与 `describe()`
+都调它，改 `STALE_AFTER` 不会只改到一半。
 """
 import json
 import os
@@ -54,6 +57,16 @@ STALE_AFTER = 180
 # 旧槽保留条数：每次 `listen.py` 起一轮都是新 pid，不收会堆文件；最近几条足够
 # 回答「上一轮几点到几点」，仍在值守的不受这个上限约束。
 KEEP_RECORDS = 12
+
+
+def _stale_window():
+    """心跳过期窗口的唯一取值点（issue #118）。
+
+    窗口必须在**调用期**现读 `STALE_AFTER`：`on_watch()` 与 `describe()` 是同一个
+    事实的两个入口，窗口若在 def 期被绑定，改常量只会改到一半——`--status`（走
+    `describe()`）说「疑似被硬杀」，按 `on_watch()` 判的调用方说「值守中」。
+    """
+    return STALE_AFTER
 
 
 def _now():
@@ -159,12 +172,12 @@ def _last_moment(record):
 def _fresh(record, moment, stale_after=None):
     """心跳窗口内仍在值守。
 
-    `stale_after=None` 现读模块常量，`on_watch()` 与 `describe()` 因此永远同一
-    窗口——#118 的两处取值来源在这里收敛。
+    `stale_after=None` 现读 `_stale_window()`，`on_watch()` 与 `describe()` 因此
+    永远同一窗口——#118 的两处取值来源在这里收敛。
     """
     if record.get("state") != "watching":
         return False
-    window = STALE_AFTER if stale_after is None else stale_after
+    window = _stale_window() if stale_after is None else stale_after
     return moment - _last_beat(record) <= window
 
 
@@ -239,11 +252,16 @@ def on_watch(stale_after=None, now=None):
     """此刻有没有人值守——纯文件判定，不问进程表，也不需要谁先跑一次命令。
 
     任意一条非探针、心跳新鲜的 `watching` 记录都算（issue #119：先起的监听不能
-    被后起者的退出记录盖掉）。`stale_after` / `now` 只给测试钉窗口语义用，
-    生产路径走默认值；窗口默认值在调用时现读，不在 def 期绑定（#118）。
+    被后起者的退出记录盖掉）。探针记录（`--probe`）不算（issue #94 PB）；心跳
+    过期的 `watching` 也不算——写不了退出记录的进程（宿主截断、被杀）必须与
+    「还在等」区分开。
+
+    `stale_after` / `now` 只给测试钉窗口语义用，生产路径走默认值。默认 `None`
+    表示现读 `_stale_window()`——不在 def 期绑定常量，否则改窗口只改到一半
+    （issue #118）。
     """
     moment = _now() if now is None else now
-    window = STALE_AFTER if stale_after is None else stale_after
+    window = _stale_window() if stale_after is None else stale_after
     return any(not r.get("probe") and _fresh(r, moment, window) for r in records())
 
 

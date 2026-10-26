@@ -20,7 +20,8 @@ gap between "replied" and "listening again" is milliseconds rather than a whole
 agent turn. --no-wait returns right after sending instead.
 
 Usage:
-  reply.py <event_id> "<text>" [--intent "..."] [--no-quote] [--no-followup] [--no-wait]
+  reply.py <event_id> "<text>" [--image 路径 ...] [--intent "..."] [--no-quote] [--no-followup] [--no-wait]
+  reply.py <event_id> --image 路径           纯图，不带文字
   reply.py --list
   reply.py --context 30 [--around <event_id>]
   reply.py --show <event_id>      读这条消息的全文（行内截断后的补救路径）
@@ -28,6 +29,10 @@ Usage:
 <text> 里的换行会拆成多条气泡（最多 3 条，首条挂引用）。想连发几句就分行写，
 不要拿斜杠把几句话串成一行——QQ 里换行会折叠，斜杠会读成文档。shell 双引号里
 写不出真换行，用字面量 \n 也行（反斜杠加 n）；\\n 转义成字面 \n 留在正文里。
+
+--image 把本地图片发进群（可重复），每张独占一条气泡排在文字之后（issue #128）。
+图片按文件头校验 PNG/JPEG/GIF/WebP 且不超过 6 MiB，任何一张不合格就一张都不发。
+发图强制走 OneBot 直发——计划通道只会发文字，回退过去等于悄悄吞掉图片。
 """
 import argparse
 import json
@@ -50,6 +55,7 @@ import wg_budget  # noqa: E402  (等待预算的唯一出口，issue #79/#83)
 import wg_gap  # noqa: E402  (停机窗口缺口账本，issue #114)
 import winconsole  # noqa: E402
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
+import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #128)
 import wg_images  # noqa: E402
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
@@ -109,19 +115,6 @@ def read_events():
     except OSError:
         pass
     return rows
-
-
-def replied_ids():
-    ids = set()
-    try:
-        for line in REPLIED.read_text(encoding="utf-8").splitlines():
-            try:
-                ids.add(json.loads(line)["id"])
-            except (ValueError, KeyError):
-                continue
-    except OSError:
-        pass
-    return ids
 
 
 def record(event_ids, text):
@@ -259,20 +252,13 @@ def send(sid, plan_id, texts, quote):
     return state == "SUCCEEDED"
 
 
-def _config():
-    try:
-        return json.loads((ROOT / "water-group" / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-
-
 def onebot_config():
-    data = _config()
+    data = wg_config.config()
     return str(data.get("onebot_http_url") or "").rstrip("/"), str(data.get("onebot_token") or "")
 
 
 def self_account():
-    return str(_config().get("self_account") or "")
+    return str(wg_config.config().get("self_account") or "")
 
 
 # 只有写在花括号里的名字才算 @：群里正文的「@群友A」是普通文字，真正的 @ 是消息段，
@@ -838,7 +824,10 @@ def wait_for_next(seconds):
 def main():
     parser = argparse.ArgumentParser(description="回一条群消息并记账")
     parser.add_argument("target", nargs="?", help="要回复的消息 id（必填，偷懒省略会直接报错）")
-    parser.add_argument("text", nargs="?", help="回复正文；@ {花名} 会变成真正的 @；换行或字面量 \\n 拆成多条气泡（最多 3 条）")
+    parser.add_argument("text", nargs="?", help="回复正文；@ {花名} 会变成真正的 @；换行或字面量 \\n 拆成多条气泡（最多 3 条）；只发图时可省略")
+    parser.add_argument("--image", action="append", default=[], metavar="路径",
+                        help="把本地图片发进群，可重复；按文件头校验 PNG/JPEG/GIF/WebP 且 ≤6 MiB，"
+                             "每张独占一条气泡排在文字之后")
     parser.add_argument("--intent", default="回复群友", help="简短沟通意图")
     parser.add_argument("--no-quote", action="store_true", help="不带引用")
     parser.add_argument("--at", action="append", default=[], metavar="花名",
@@ -885,8 +874,8 @@ def main():
         qq, label = resolve_member(args.who, args.group or latest_group_id())
         print(f"{args.who} -> {qq or '未解析'}（{label}）")
         return 0 if qq else 1
-    if not args.target or not args.text:
-        parser.error("需要 <event_id> 和 <text>")
+    if not args.target or not (args.text or args.image):
+        parser.error("需要 <event_id> 和 <text>（只发图就加 --image）")
 
     sid = session_id()
     if not sid:
@@ -918,9 +907,16 @@ def main():
     bubbles = split_bubbles(args.text)
     bubble_segments = [build_segments(bubbles[0], group_id, leading=args.at)]
     bubble_segments += [build_segments(one, group_id) for one in bubbles[1:]]
-    has_at = any(seg["type"] == "at" for segs in bubble_segments for seg in segs)
     answered = [target, *[i for i in args.also if i != target]]
     print(f"target={target} group={group_id} session={sid}")
+    # 图片先校验再动手（issue #128）：坏路径在这里就退，一张都不发，也不打印后面
+    # 那行「还有 N 条没回」——那会让 Agent 以为图已经发出去了。
+    try:
+        bubble_segments = wg_images.attach_images(bubble_segments, args.image)
+    except wg_images.ImageError as exc:
+        print(f"IMAGE_FAILED: {exc}")
+        return 1
+    has_at = any(seg["type"] == "at" for segs in bubble_segments for seg in segs)
 
     # The listener is dead between the wake and the re-hang, so @-mentions that
     # land while this reply is being written are only visible in the file. Saying
@@ -942,13 +938,13 @@ def main():
 
     # Quote through OneBot first: it is the only path that can point at a message
     # from an older batch, which is the normal case once the group is chatting.
-    # It is also the only path that can carry an at segment -- plan/send speaks
-    # plain text, so a message with an @ must not be handed to it.
-    if has_at or (not args.no_quote and found):
+    # It is also the only path that can carry an at or image segment -- plan/send
+    # speaks plain text, so a message with either must not be handed to it.
+    if has_at or args.image or (not args.no_quote and found):
         message_id = None if args.no_quote else (found[1] if found else None)
         sent = onebot_send_bubbles(group_id, bubble_segments, message_id)
         if sent == len(bubble_segments):
-            record(answered, args.text)
+            record(answered, args.text or "")
             print("SENT")
             open_followup(target, group_id=group_id,
                           wanted=not args.no_followup, not_before=send_started)
@@ -959,6 +955,10 @@ def main():
             return 1
         if has_at:
             print("SEND_FAILED: 带 @ 的消息只能走 OneBot，计划通道会把它降级成纯文本")
+            return 1
+        if args.image:
+            # 计划通道只发文字（send() 的气泡写死 kind=text），回退过去图片就没了。
+            print("SEND_FAILED: 带图的消息只能走 OneBot，计划通道会把图片整个丢掉")
             return 1
         print("  falling back to the plan path")
     elif not args.no_quote:

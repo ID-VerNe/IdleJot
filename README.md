@@ -233,6 +233,19 @@ explorer.exe
 
 带 @ 的消息**只能走 OneBot**：`send_chat_reply` 只吃纯文本，会把 at 段静默降级成文字。所以一旦发现 at 段就强制走 OneBot，OneBot 不可用时直接 `SEND_FAILED`，不会退化成一条没有 @ 的消息。
 
+### 发本地图片
+
+```bash
+.venv/Scripts/python.exe water-group/daemon/reply.py 1516 "看这张" --image ~/Downloads/shot.png
+.venv/Scripts/python.exe water-group/daemon/reply.py 1516 --image a.png --image b.png   # 纯图，可重复
+```
+
+每张图独占一条气泡，排在文字之后，首条照旧挂引用。校验走**文件头**而不是扩展名（`.jfif`、大写 `.PNG`、改了名的文本都骗不过去），认不出的直接拒；单张上限 6 MiB，与 MCP 侧同口径。**先校验再动手**：多张里有一张不合格就一张都不发，不会出现「发了一半」。
+
+图片段用 `base64://`（`qr_login.py` 的二维码已经实机验证过这条路径，`send_group_msg` 回 `retcode=0`），不发本地路径——路径常带用户名，不该进群。带图的回复强制走 OneBot：计划通道的气泡写死 `kind: "text"`，回退过去等于悄悄吞掉图片。发图同样记账、同样开追问窗口，`--no-quote` 语义不变。
+
+画图（让机器人自己生成图片）仍未接，见 [issue #128](https://github.com/ID-VerNe/IdleJot/issues/128) 的 (b) 部分——那是引入外部服务 + 凭证 + 配额 + 内容边界，不是补一个参数。
+
 ### 连发的 @ 不会丢
 
 群里一分钟内连发三条 @ 是常态，而监听在拿到 `WAKE` 那一刻就退出了。这个窗口里来的 @ 不会丢，但以前会被「已回」误判吞掉。
@@ -356,7 +369,7 @@ tail -20 ~/.water-group/logs/napcat-watchdog.log  # QQ 是否被反复重注入
 ## 已知限制
 
 - **Agent 停止思考，机器人就静音。** 这是设计如此：回复是 Agent 写的，不是本地模型。宿主结束回合、退出、休眠之后，群里 @ 它不会有反应。想真正无人值守，得让 Agent 那边保持执行。
-- **只发文字。** 表情、图片、语音这些能力在 MCP 层，命令行这条路没接。
+- **图片能发，表情与语音不能。** `reply.py --image` 发本地图片（issue #128）；从表情库里挑一张、发语音、画图这三样在命令行这条路上仍没接——表情库要 MCP 的幂等与「已看过」语义，语音与画图各是独立集成。
 - **`mention_only` 下不会主动接话。** 想让它参与闲聊，把 `trigger_mode` 改成 `natural`，噪音会一起上来。
 - **同名歧义在 `find_profile` 层没解决。** `reply.resolve_member` 会报候选，但 MCP 的 `query_member_dossier` 遇到歧义仍会静默选第一个。
 - **Windows only。** 保活、开窗抑制、控制台代码页都依赖 Windows 进程模型（taskkill / WMI / `CREATE_NO_WINDOW`），没有 Linux 版本。

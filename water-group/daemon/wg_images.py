@@ -1,4 +1,4 @@
-"""群聊图片本地索引与落盘——水群侧唯一的图片文件归属。
+"""群聊图片的本地归属——接收侧落盘索引 + 发送侧出段（issue #27 / #128）。
 
 MCP 的图片只在 content 里以 base64 交付，collector 收到后必须自己落盘，
 否则 Agent 只能看到 ``[图片]`` 占位，看不了图（issue #27）。
@@ -10,10 +10,16 @@ MCP 的图片只在 content 里以 base64 交付，collector 收到后必须自�
 
 index.jsonl 每次追加一行，读取时后写覆盖先写；事件与图片下标是主键。
 像素只写一次：同一 sha256 已有文件时直接复用原路径，二次查看不重复下载。
+
+发送侧（issue #128）只有三样：``read_for_send``（校验 + 读字节）、``image_segment``
+（字节 → OneBot 段）、``attach_images``（把图挂到气泡列表上）。放在这里而不是
+``reply.py``，一是 ``MAX_BYTES`` / ``ext_for`` 本来就在这，二是 ``reply.py`` 已经
+贴着 ``check_module_size`` 的 1000 行红线。
 """
 import base64
 import hashlib
 import json
+import stat
 import time
 from pathlib import Path
 
@@ -274,3 +280,84 @@ def render(event, media=None):
         if "[图片]" in body or "[动画表情]" in body:
             parts.append(f"[图片 未登记 look.py --event {event_id} 补读]")
     return "".join(parts)
+
+
+# ---------------------------------------------------------------- 发送侧（issue #128）
+
+
+class ImageError(ValueError):
+    """本地图片不能发：原因已经是可以直接给 Agent 看的一句话。"""
+
+
+def read_for_send(path):
+    """读一张待发图片，返回 (bytes, 显示名)。
+
+    三道闸：普通文件、≤ ``MAX_BYTES``、文件头是 PNG/JPEG/GIF/WebP。**判据是魔数
+    不是扩展名**——``.jfif`` / 大写 ``.PNG`` / 改了名的文本都会骗过扩展名检查，
+    而 ``ext_for`` 认不出的东西到了 QQ 那边只会是一张裂图。
+
+    ``stat`` 与 ``read`` 之间文件可能被换掉（下载器正在写），所以按上限 +1 读回来
+    再核一次长度；只信 stat 会把一个还在写的文件截断发出去。
+
+    只回显示名（``Path.name``），完整路径不进群也不进日志——它常带用户名。
+    """
+    target = Path(path).expanduser()
+    try:
+        info = target.stat()
+    except OSError:
+        raise ImageError(f"读不到 {target.name}：路径不存在或没有权限") from None
+    if not stat.S_ISREG(info.st_mode):
+        raise ImageError(f"{target.name} 不是普通文件")
+    if info.st_size <= 0:
+        raise ImageError(f"{target.name} 是空文件")
+    if info.st_size > MAX_BYTES:
+        raise ImageError(f"{target.name} 超过单张上限 {MAX_BYTES // (1024 * 1024)} MiB")
+    try:
+        with open(target, "rb") as fh:
+            raw = fh.read(MAX_BYTES + 1)
+    except OSError:
+        raise ImageError(f"读不到 {target.name}：路径不存在或没有权限") from None
+    if not raw:
+        raise ImageError(f"{target.name} 是空文件")
+    if len(raw) > MAX_BYTES:
+        raise ImageError(f"{target.name} 超过单张上限 {MAX_BYTES // (1024 * 1024)} MiB")
+    if ext_for(None, raw) == "bin":
+        raise ImageError(f"{target.name} 不是 PNG/JPEG/GIF/WebP 图片（按文件头判断）")
+    return raw, target.name
+
+
+def image_segment(raw):
+    """字节 → OneBot 图片段，与 ``qr_login.qr_image_segment()`` 同形状。
+
+    ``base64://`` 是 NapCat 已经实机验证过的形状（``doc/SLASH_COMMANDS.md:323``，
+    ``send_group_msg`` 回 ``retcode=0``），不需要退 ``file://`` 落盘方案。
+    """
+    return {"type": "image",
+            "data": {"file": "base64://" + base64.b64encode(raw).decode("ascii")}}
+
+
+def attach_images(bubble_segments, paths):
+    """把本地图片挂成额外的气泡，返回新的气泡列表。
+
+    先校验**全部**路径再动手：一条坏路径不该让前面几张图发出去、后面几张不发，
+    那正是「发了一半」的失败模式。多个坏路径合成一条 ``ImageError``，Agent 改一次
+    就能跑通，不用修一个跑一次。
+
+    每张图独占一条气泡，排在文字之后——混在文字气泡里的话，QQ 那边图片会把文字
+    挤成一句半截话。纯图时 ``split_bubbles("")`` 会给出一个空文字气泡，这里丢掉它，
+    否则群里会多一条空消息。
+    """
+    if not paths:
+        return bubble_segments
+    raws, problems = [], []
+    for path in paths:
+        try:
+            raws.append(read_for_send(path))
+        except ImageError as exc:
+            problems.append(str(exc))
+    if problems:
+        raise ImageError("；".join(problems))
+    for raw, name in raws:
+        print(f"  image: {name} {len(raw)} 字节")
+    kept = [segs for segs in bubble_segments if segs]
+    return kept + [[image_segment(raw)] for raw, _ in raws]

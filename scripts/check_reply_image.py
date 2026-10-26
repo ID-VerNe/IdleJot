@@ -1,0 +1,277 @@
+"""issue #128 gate: `reply.py` 能把本地图片发进群（`--image`）。
+
+症状：水群主 Agent 唯一的回复出口是 `reply.py`，而它只发文字与 @。任何「来张图」
+「发个截图」「把这张图发群里」都撞在 `unrecognized arguments: --image` 上，只能嘴上
+解释「我发不了图」——多模态群聊退化成纯文本。更坏的是绕路：Agent 若自己
+`requests.post('/send_group_msg')` 手搓，会同时绕过 `record()` 记账与追问窗口。
+
+本门禁钉七件事：
+
+  1. `--image <png>` + 文字 → 两次 `send_group_msg`：`[reply, text]` 与 `[image]`，
+     且 image 段解出的字节与原文件逐字节相等（base64 段是 NapCat 实机验证过的形状，
+     见 `doc/SLASH_COMMANDS.md:323`）；
+  2. 纯图（无 text）→ 一次 `send_group_msg`：`[reply, image]`，**没有空文字段**；
+  3. 两张图按参数顺序排在文字之后；
+  4. 超 6 MiB / 内容不是图片（哪怕叫 `.png`）/ 路径不存在 → `exit=1`、**零请求**、
+     输出点名原因；
+  5. 好图 + 坏图混着给 → **一张都不发**（不是「先发好的再报错」）；
+  6. 发图成功后 `wg_replied.jsonl` 有该 event 的记账行——防「图发了但还显示 [待回]」；
+  7. `reply.py --help` 里有 `--image`（issue 第二条复现命令不再 `exit=1`）。
+
+真跑 `reply.py` 子进程 + loopback OneBot 假服务器 + 隔离数据根，不发任何真实消息：
+
+    .venv/Scripts/python.exe scripts/check_reply_image.py
+"""
+import base64
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import check_fixture_support  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
+
+from fixture_server import FixtureHandler, fixture_server  # noqa: E402
+
+REPLY = ROOT / "water-group" / "daemon" / "reply.py"
+MAX_BYTES = 6 * 1024 * 1024
+
+# 1x1 透明 PNG：真图片头，用来钉「按魔数判、不按扩展名」。
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4z8DwHwAFAAIB"
+    "4rHkxQAAAABJRU5ErkJggg==")
+# 同长度的第二张，内容不同，用来钉顺序。
+PNG2 = PNG[:-12] + b"trailingtag!"
+
+HOME = Path(tempfile.mkdtemp(prefix="wg_reply_image_"))
+STATE = HOME / "state"
+STATE.mkdir(parents=True)
+(HOME / "data").mkdir()
+CONFIG = HOME / "config.json"
+GROUP = "123"
+SELF = "10001"
+
+CALLS = []
+
+
+class OneBot(FixtureHandler):
+    """只认 `/send_group_msg`：别的路径被调用就是这次回复走错了出口。"""
+
+    def do_POST(self):
+        body = self.read_json()
+        assert self.path == "/send_group_msg", self.path
+        assert self.headers.get("Authorization") == f"Bearer {TOKEN}", "token 没带上"
+        CALLS.append(body)
+        self.send_json({"status": "ok", "retcode": 0,
+                        "data": {"message_id": 4000 + len(CALLS)}})
+
+
+TOKEN = "reply-image-fixture"
+
+
+def write_config(url):
+    CONFIG.write_text(json.dumps({
+        "self_account": SELF,
+        "onebot_token": TOKEN,
+        "onebot_http_url": url,
+        "self_names": ["小鲸鱼"],
+    }, ensure_ascii=False), encoding="utf-8")
+
+
+def child_env():
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    env["WATER_GROUP_HOME"] = str(HOME)
+    env["IDLEJOT_WG_STATE"] = str(STATE)
+    env["TULPA_WG_STATE"] = str(STATE)
+    env["IDLEJOT_WG_DB"] = str(HOME / "data" / "mcp-access.sqlite3")
+    env["IDLEJOT_WG_CONFIG"] = str(CONFIG)
+    # loopback 夹具不该走代理；开发机上设了 HTTPS_PROXY 时 requests 会绕出去。
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                 "http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+        env.pop(name, None)
+    return env
+
+
+def run(*args):
+    proc = subprocess.run([sys.executable, str(REPLY), *args],
+                          cwd=str(ROOT), env=child_env(), capture_output=True,
+                          text=True, encoding="utf-8", errors="replace", timeout=120)
+    return proc
+
+
+def seed_events(count):
+    """每条用例一个 event id，带 onebot_message_id（引用段要用它）。
+
+    时间戳取「此刻」：过期唤醒（`up.wake_expired`）会被 `reply.py` 默认拒绝，
+    固定时间戳的夹具过几小时就会红在「拒绝：id=N 是 500 分钟前的唤醒」上——
+    那是时钟问题，不是本门禁要测的东西。
+    """
+    now = int(time.time() * 1000)
+    rows = [{"id": n, "sender": "群友甲", "content": f"@小鲸鱼 第 {n} 条",
+             "timestamp": now, "is_self": False,
+             "conversation_id": f"{SELF}:group:{GROUP}",
+             "onebot_message_id": str(700000 + n)} for n in range(1, count + 1)]
+    (STATE / "wg_events.jsonl").write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+        encoding="utf-8")
+
+
+def image_bytes(body):
+    """一条 `send_group_msg` 报文里的 image 段解出的字节，没有则 None。"""
+    for segment in body.get("message") or []:
+        if segment.get("type") != "image":
+            continue
+        ref = str((segment.get("data") or {}).get("file") or "")
+        assert ref.startswith("base64://"), ref
+        return base64.b64decode(ref[len("base64://"):])
+    return None
+
+
+def types_of(body):
+    return [segment.get("type") for segment in body.get("message") or []]
+
+
+def ledger_ids():
+    path = STATE / "wg_replied.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line)["id"] for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+
+
+CASES = []
+
+
+def case(fn):
+    CASES.append(fn)
+    return fn
+
+
+@case
+def 文字之后跟一张图():
+    CALLS.clear()
+    proc = run("1", "看这张图", "--image", str(HOME / "a.png"), "--no-wait", "--no-followup")
+    ok = (proc.returncode == 0 and len(CALLS) == 2
+          and types_of(CALLS[0]) == ["reply", "text"]
+          and types_of(CALLS[1]) == ["image"]
+          and image_bytes(CALLS[1]) == PNG)
+    return ok or proc.stdout + proc.stderr
+
+
+@case
+def 纯图不带空文字():
+    CALLS.clear()
+    proc = run("2", "--image", str(HOME / "a.png"), "--no-wait", "--no-followup")
+    ok = (proc.returncode == 0 and len(CALLS) == 1
+          and types_of(CALLS[0]) == ["reply", "image"]
+          and image_bytes(CALLS[0]) == PNG)
+    return ok or proc.stdout + proc.stderr
+
+
+@case
+def 两张图按参数顺序():
+    CALLS.clear()
+    proc = run("3", "两张", "--image", str(HOME / "a.png"),
+               "--image", str(HOME / "b.png"), "--no-wait", "--no-followup")
+    ok = (proc.returncode == 0 and len(CALLS) == 3
+          and types_of(CALLS[0]) == ["reply", "text"]
+          and image_bytes(CALLS[1]) == PNG and image_bytes(CALLS[2]) == PNG2)
+    return ok or proc.stdout + proc.stderr
+
+
+@case
+def 超上限一张都不发():
+    CALLS.clear()
+    proc = run("4", "太大", "--image", str(HOME / "huge.png"), "--no-wait", "--no-followup")
+    ok = (proc.returncode == 1 and CALLS == []
+          and "IMAGE_FAILED" in proc.stdout and "超过单张上限" in proc.stdout)
+    return ok or proc.stdout + proc.stderr
+
+
+@case
+def 内容不是图片按魔数拒():
+    """扩展名是 `.png`，内容是文本——按文件头判，不按扩展名。"""
+    CALLS.clear()
+    proc = run("5", "假图", "--image", str(HOME / "fake.png"), "--no-wait", "--no-followup")
+    ok = (proc.returncode == 1 and CALLS == []
+          and "IMAGE_FAILED" in proc.stdout and "不是 PNG/JPEG/GIF/WebP" in proc.stdout)
+    return ok or proc.stdout + proc.stderr
+
+
+@case
+def 路径不存在一张都不发():
+    CALLS.clear()
+    proc = run("6", "没有这个文件", "--image", str(HOME / "nope.png"),
+               "--no-wait", "--no-followup")
+    ok = (proc.returncode == 1 and CALLS == []
+          and "IMAGE_FAILED" in proc.stdout and "读不到" in proc.stdout)
+    return ok or proc.stdout + proc.stderr
+
+
+@case
+def 好坏混着给也是零请求():
+    """一条坏路径不该让前面的好图发出去——「发了一半」是最难收拾的失败模式。"""
+    CALLS.clear()
+    proc = run("7", "混着来", "--image", str(HOME / "a.png"),
+               "--image", str(HOME / "nope.png"), "--no-wait", "--no-followup")
+    ok = (proc.returncode == 1 and CALLS == [] and "IMAGE_FAILED" in proc.stdout)
+    return ok or proc.stdout + proc.stderr
+
+
+@case
+def 发图也记账():
+    """防「图发了但还显示 [待回]」：图片同样算回了这条。"""
+    ids = ledger_ids()
+    return 1 in ids and 2 in ids
+
+
+@case
+def 帮助里能查到图片入口():
+    """issue 第二条复现命令：`--help | grep -i image` 过去退出码 1。"""
+    proc = run("--help")
+    return proc.returncode == 0 and "--image" in proc.stdout
+
+
+def build_fixtures():
+    (HOME / "a.png").write_bytes(PNG)
+    (HOME / "b.png").write_bytes(PNG2)
+    (HOME / "fake.png").write_text("这不是图片，只是改了个名字", encoding="utf-8")
+    (HOME / "huge.png").write_bytes(PNG + b"\x00" * (MAX_BYTES + 1 - len(PNG)))
+    (STATE / "wg_session.txt").write_text("session-fixture", encoding="utf-8")
+    seed_events(7)
+
+
+def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    build_fixtures()
+    bad = 0
+    try:
+        with fixture_server(OneBot) as server:
+            write_config(f"http://127.0.0.1:{server.server_port}")
+            for fn in CASES:
+                try:
+                    ok = fn()
+                except AssertionError as exc:
+                    ok = f"断言失败：{exc}"
+                except Exception as exc:  # noqa: BLE001
+                    ok = f"{type(exc).__name__}: {exc}"
+                if ok is True:
+                    print(f"✓ {fn.__name__}")
+                else:
+                    print(f"✗ {fn.__name__}: {ok}")
+                    bad += 1
+    finally:
+        shutil.rmtree(HOME, ignore_errors=True)
+    print("全部通过" if not bad else f"{bad} 项失败")
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

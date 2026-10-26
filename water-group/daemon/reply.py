@@ -50,8 +50,10 @@ import wg_budget  # noqa: E402  (等待预算的唯一出口，issue #79/#83)
 import wg_gap  # noqa: E402  (停机窗口缺口账本，issue #114)
 import winconsole  # noqa: E402
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
+import wg_config  # noqa: E402  (config.json 的唯一读取口)
 import wg_images  # noqa: E402
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
+import wg_send_failure  # noqa: E402  (发送失败的原文 / 禁言诊断 / 失败账本，issue #132)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
 
 ROOT = HERE.parents[1]
@@ -259,20 +261,13 @@ def send(sid, plan_id, texts, quote):
     return state == "SUCCEEDED"
 
 
-def _config():
-    try:
-        return json.loads((ROOT / "water-group" / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-
-
 def onebot_config():
-    data = _config()
+    data = wg_config.config()
     return str(data.get("onebot_http_url") or "").rstrip("/"), str(data.get("onebot_token") or "")
 
 
 def self_account():
-    return str(_config().get("self_account") or "")
+    return str(wg_config.config().get("self_account") or "")
 
 
 # 只有写在花括号里的名字才算 @：群里正文的「@群友A」是普通文字，真正的 @ 是消息段，
@@ -467,15 +462,20 @@ def build_segments(text, group_id, leading=()):
     return _tidy(segments)
 
 
-def onebot_send(group_id, segments, message_id=None):
+def onebot_send(group_id, segments, message_id=None, failure=None):
     """Send raw OneBot segments, with a native quote in front when asked.
 
     OneBot takes the reply segment directly, which is what the plan path compiles
     down to anyway, so this lands the quote on the right message no matter how many
     batches have rolled over in between.
+
+    `failure` is an optional dict owned by the caller: on refusal the raw retcode /
+    message / wording (or the transport exception) goes into it. The return value
+    stays a bool -- callers keep their contract (issue #132).
     """
     base, token = onebot_config()
     if not base or not token:
+        wg_send_failure.note(failure, message="onebot_http_url / onebot_token 为空")
         return False
     payload = list(segments)
     if message_id:
@@ -487,14 +487,18 @@ def onebot_send(group_id, segments, message_id=None):
         data = resp.json()
     except (requests.RequestException, ValueError) as exc:
         print(f"  send failed: {type(exc).__name__}: {exc}")
+        wg_send_failure.note(failure, exc=exc)
         return False
     ok = data.get("retcode") == 0
     print(f"  send: retcode={data.get('retcode')} "
           f"message_id={(data.get('data') or {}).get('message_id')}")
+    if not ok:
+        # retcode/message/wording 是失败的唯一原始说明（禁言就在 message 里）。
+        wg_send_failure.note(failure, data=data)
     return ok
 
 
-def onebot_send_bubbles(group_id, bubble_segments, message_id=None):
+def onebot_send_bubbles(group_id, bubble_segments, message_id=None, failure=None):
     """一条一条发，首条挂引用；返回实际发出去的条数。
 
     多气泡只能靠多条消息落地：OneBot 的 send_group_msg 一次发一条，QQ 里
@@ -505,7 +509,7 @@ def onebot_send_bubbles(group_id, bubble_segments, message_id=None):
     否则第 1 条会在群里出现两次。
     """
     for index, segments in enumerate(bubble_segments):
-        if not onebot_send(group_id, segments, message_id if index == 0 else None):
+        if not onebot_send(group_id, segments, message_id if index == 0 else None, failure):
             return index
         if index + 1 < len(bubble_segments):
             time.sleep(BUBBLE_GAP)
@@ -535,6 +539,7 @@ def list_wakes():
         print("# 停机窗口漏掉的 @（不在唤醒账本里，不可 reply.py <id>）：")
         for ln in gap_lines:
             print(ln)
+    wg_send_failure.print_last()
     shown = 0
     for e in rows:
         reason = up.wake_reason(e)
@@ -850,6 +855,8 @@ def main():
                              f"{DEFAULT_WAIT}s，0 等同于 --no-wait）")
     parser.add_argument("--no-wait", action="store_true",
                         help="发完直接返回，不原地等下一次唤醒（关闭默认续挂）")
+    parser.add_argument("--wait-unmute", action="store_true",
+                        help="禁言失败时解禁后自动补发一次（超预算则如实报告）")
     parser.add_argument("--no-followup", action="store_true",
                         help="这次不开追问窗口（默认回复后会继续听群里聊一阵）")
     parser.add_argument("--force", action="store_true",
@@ -946,19 +953,18 @@ def main():
     # plain text, so a message with an @ must not be handed to it.
     if has_at or (not args.no_quote and found):
         message_id = None if args.no_quote else (found[1] if found else None)
-        sent = onebot_send_bubbles(group_id, bubble_segments, message_id)
+        # 发送 + 失败诊断 + 可选解禁补发全在 wg_send_failure（#132）：首条就失败时
+        # 由它说出真实原因，不再是那句「带 @ 只能走 OneBot」。
+        sent = wg_send_failure.send(group_id, bubble_segments, message_id,
+                                    deliver=onebot_send_bubbles, has_at=has_at,
+                                    unmute=args.wait_unmute)
         if sent == len(bubble_segments):
             record(answered, args.text)
             print("SENT")
             open_followup(target, group_id=group_id,
                           wanted=not args.no_followup, not_before=send_started)
             return wait_for_next(args.wait) if args.wait else 0
-        if sent:
-            # 已经有气泡落地，再走计划通道会把首条重复发一遍。
-            print(f"SEND_FAILED: 前 {sent} 条已发出，第 {sent + 1} 条失败，不再重试")
-            return 1
-        if has_at:
-            print("SEND_FAILED: 带 @ 的消息只能走 OneBot，计划通道会把它降级成纯文本")
+        if sent or has_at:
             return 1
         print("  falling back to the plan path")
     elif not args.no_quote:

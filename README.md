@@ -233,6 +233,8 @@ explorer.exe
 
 带 @ 的消息**只能走 OneBot**：`send_chat_reply` 只吃纯文本，会把 at 段静默降级成文字。所以一旦发现 at 段就强制走 OneBot，OneBot 不可用时直接 `SEND_FAILED`，不会退化成一条没有 @ 的消息。
 
+**失败要说清是哪一种失败**（issue #132）。`SEND_FAILED` 后面跟的是 OneBot 的原始 `retcode` 与 `message` 首行，不是「带 @ 只能走 OneBot」——后者只是「为什么不降级」，把它当失败原因会让 Agent 去掉 `--at` 重试一次，照样失败。被禁言时还会查一次 `get_group_member_info` 的 `shut_up_timestamp`，给出「禁言至 HH:MM:SS（还剩 N 秒）」并区分全员 / 单人；这个结论留在 `state/wg_send_failure.json`，由 `reply.py --list` 抬头带出。加 `--wait-unmute` 时，解禁在单次调用等待预算内就自动补发一次，超出预算则如实报「需等 N 秒」而不是硬等（硬等会被宿主砍掉整棵进程树）。禁言期间换任何通道都没用：计划通道最终也是 `send_group_msg`。
+
 ### 连发的 @ 不会丢
 
 群里一分钟内连发三条 @ 是常态，而监听在拿到 `WAKE` 那一刻就退出了。这个窗口里来的 @ 不会丢，但以前会被「已回」误判吞掉。

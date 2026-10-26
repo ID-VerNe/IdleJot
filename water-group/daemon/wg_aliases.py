@@ -31,8 +31,9 @@ if str(ROOT) not in sys.path:
 
 SENDER_ALIAS_CHARS = 2   # 发送者后最多附几个档案外号，多了把唤醒行撑散
 BODY_HITS = 3            # 一条正文最多指出几个外号指向
-# @ 段渲染出的 `@<qq>` 是指向信息不是正文（issue #52）：位数口径与
-# wg_text.PLACEHOLDERS 的 `@\d{5,}` 保持一致。
+# @ 段渲染出的 `@<qq>` 是指向信息不是正文（issue #52）。这条正则自带、不再
+# 借用 `wg_text.PLACEHOLDERS`——那里自 issue #138 起保留 `@<qq>` 原样，两处口径
+# 本来就该分开：一个决定「正文里算什么命中」，一个决定「一行怎么显示」。
 AT_MENTION_RE = re.compile(r"@\d{5,}")
 _CACHE = {}
 
@@ -98,9 +99,9 @@ def body_hits(body, group_id=None, limit=BODY_HITS, sender=""):
     长的名字先匹配（「时之锁」优先于「时之」），同一个人只指一次；发送者自己
     的名字不指——那一行本来就是他说的话。没有命中就没有输出，不猜。
 
-    issue #52 两条防自指：扫描前剥掉 `@<数字>`（@ 段是指向信息不是正文，与
-    `wg_text.PLACEHOLDERS` 的 `@\\d{5,}` 同一口径）；纯数字别名（QQ 号）不
-    参与正文命中。`@<显示名>` 命中别名视为真实提及，保留。
+    issue #52 两条防自指：扫描前剥掉 `@<数字>`（@ 段是指向信息不是正文，用本模块
+    自己的 `AT_MENTION_RE`）；纯数字别名（QQ 号）不参与正文命中。`@<显示名>`
+    命中别名视为真实提及，保留。
     """
     text = AT_MENTION_RE.sub("", str(body or ""))
     if not text:

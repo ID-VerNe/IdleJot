@@ -76,6 +76,16 @@
         "default_city": "",
         "allow": ["简报", "热搜", "天气", "预报", "历史", "摸鱼", "运势", "行情", "豆瓣", "科技", "KFC", "笑话", "答案", "一言"]
       }
+    },
+    "busboss": {
+      "enabled": false,
+      "groups": [],
+      "options": {
+        "timeout": 0,
+        "cache_seconds": 60,
+        "max_classes": 200,
+        "max_lines": 8
+      }
     }
   },
   "groups": {

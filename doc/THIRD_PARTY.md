@@ -28,6 +28,7 @@ removed in Phase 3 and is not redistributed from this branch.
 | pywin32 | [PSF-2.0](https://github.com/mhammond/pywin32/blob/main/Pythonwin/LICENSE.txt); Windows-only, installed but **not imported** — `voice_process.py` / `platform_process.py` use pure `ctypes` for the Job Object, pywin32 is a transitive convenience |
 | qq-bridge 群聊行为与小鲸鱼角色卡 | [MIT](https://github.com/Derpyu520/qq-bridge/blob/9df6a7e7fc5abcb36793337f778483bd442a3d2d/LICENSE); 小鲸鱼角色卡经 Tulpa 维护者按需改编，保留来源及许可。来源提交、原版与当前文本 SHA256、修改说明记录在 `water-group/personas/little_whale.source.json`。行为与工具协议单独适配，仅用于 MCP 持续群聊，未引入其 DSH 会话桥接或后台唤醒系统 |
 | 60s API（`vikiboss/60s`） | [MIT](https://github.com/vikiboss/60s/blob/master/LICENSE); `water-group/daemon/sixty.py` 只消费其 HTTP JSON 接口（不打包代码），实例地址由部署者在 `config.json` 的 `plugins.sixty.options.base_url` 自行配置（不随仓库分发）。接口返回的热榜 / 天气 / 简报内容版权归各原平台（微博、腾讯天气等），本项目只做**标题 + 链接的原文透传**，不存储、不改写、不摘要；端点白名单与禁用法见 `doc/SLASH_COMMANDS.md` §9 |
+| 车盈网（`busboss.cn`，广州市悦到信息科技有限公司） | 无对外 API 契约，也无公开许可声明。`water-group/daemon/busboss.py` 只消费其微信小程序后端的 HTTP 接口（**不打包、不反编译分发任何小程序代码**），凭证由部署者在本机自行取得、只存本机 `~/.water-group/state/`，不随仓库分发。班次 / 票价 / 站点数据的权利归各承运方，本项目只做**查询结果的即时展示**，不落库、不转售、不做二次分发；接入方需自行确认上游条款。该接口属私有客户端接口，稳定性无承诺，见 `doc/SLASH_COMMANDS.md` §10 |
 
 ## Not bundled
 

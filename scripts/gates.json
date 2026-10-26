@@ -81,7 +81,8 @@
     {"name": "check_reply_timing.py", "shard": "reply", "why": "回复时序、密钥排除、轮换与失败透明"},
     {"name": "check_now_clock.py", "shard": "reply", "why": "值守工具链必须带当前时刻（#95）"},
     {"name": "check_miyoushe.py", "shard": "reply", "why": "米游社取数 handler：DS 签名、URL 参数、缓存、错误码"},
-    {"name": "check_sixty.py", "shard": "reply", "why": "60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53）"}
+    {"name": "check_sixty.py", "shard": "reply", "why": "60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53）"},
+    {"name": "check_busboss.py", "shard": "reply", "why": "车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103）"}
   ],
   "manual": [
     {"name": "check_console_window.py", "why": "需要真实桌面会话；--self-test 会故意闪两次黑框做 A/B 对照"},

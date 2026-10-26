@@ -51,11 +51,17 @@ def _load_followup() -> Plugin:
     return module.PLUGIN
 
 
+def _load_busboss() -> Plugin:
+    import plugins.busboss_plugin as module
+    return module.PLUGIN
+
+
 # 名字在这里出现一次，是为了让失败也能报到具体插件上（note_error(name)）。
 LOADERS = (
     ("miyoushe", _load_miyoushe),
     ("sixty", _load_sixty),
     ("followup", _load_followup),
+    ("busboss", _load_busboss),
 )
 
 # 事件型插件（issue #4 PD2a）：没有 ``#`` 指令，宿主在通用流程点派发命名事件。

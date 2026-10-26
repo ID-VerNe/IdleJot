@@ -29,9 +29,18 @@
 .venv/Scripts/python.exe water-group/daemon/look.py --event <id>       # 唤醒行图片标「可补读」时先落盘再读；--pick 看候选、--recent 看最近
 ```
 
-`reply.py` 共 17 个参数，上面是最常用的；`--also`（连发 @ 用一条答复算作回了多条）、
-`--force`（目标唤醒已过待回时效也发）、`--intent`、`--no-quote` 见 `reply.py --help`。
+`reply.py` 共 18 个参数，上面是最常用的；`--also`（连发 @ 用一条答复算作回了多条）、
+`--force`（目标唤醒已过待回时效也发）、`--wait-unmute`（发送因禁言失败时，解禁后在
+等待预算内自动补发一次，超预算如实报告而不是硬等）、`--max-bubbles`（这次最多发几条
+气泡，issue #131）、`--intent`、`--no-quote` 见 `reply.py --help`。
 `look.py --frames all` 把动图补成 3 帧（默认只取 1 帧），遇到动图结论可疑时加上。
+
+**发送失败要说清原因（issue #132）**：`SEND_FAILED` 后面跟的是 OneBot 的原始
+`retcode` + `message` 首行（禁言是 `EventChecker Failed ... result 120`）；判定为禁言时
+还会给出「禁言至 HH:MM:SS（还剩 N 秒）」与全员/单人区分，并把这个结论留在
+`state/wg_send_failure.json`，由 `reply.py --list` 抬头带出。**「未退回计划通道：带 @
+的消息只能走 OneBot」只是「为什么不降级」，不是失败原因**——别再据此去掉 `--at` 重试。
+禁言期间任何通道都发不出去（计划通道最终也是 `send_group_msg`），只能等或如实报告。
 
 唤醒行里的图片标记三种形态：`path=…`（已落盘，直接读）、`可补读 look.py --event <id> --index <i>`
 （deferred，先跑命令再读）、`未登记`（无任何记录，命令照样能补读）。别对着裸 `[图片]` 说
@@ -433,16 +442,17 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 62 | `reply` | `check_reply_context.py` | reply.py --context 回之前看得到群聊上下文 |
 | 63 | `reply` | `check_bubble_cap.py` | 单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131） |
 | 64 | `reply` | `check_reply_quote.py` | OneBot mention 与引用预检 |
-| 65 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
-| 66 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
-| 67 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
-| 68 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
-| 69 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
-| 70 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
-| 71 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
-| 72 | `reply` | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
+| 65 | `reply` | `check_reply_send_failure.py` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132） |
+| 66 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
+| 67 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
+| 68 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
+| 69 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
+| 70 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
+| 71 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
+| 72 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
+| 73 | `reply` | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
 
-共 72 个 CI 门禁，分 5 个分片（`static` 15、`runtime` 15、`mcp` 16、`storage` 9、`reply` 17）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
+共 73 个 CI 门禁，分 5 个分片（`static` 15、`runtime` 15、`mcp` 16、`storage` 9、`reply` 18）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
 <!-- gates:ci:end -->
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

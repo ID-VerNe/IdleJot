@@ -73,6 +73,7 @@
     {"name": "check_reply_context.py", "shard": "reply", "why": "reply.py --context 回之前看得到群聊上下文"},
     {"name": "check_bubble_cap.py", "shard": "reply", "why": "单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131）"},
     {"name": "check_reply_quote.py", "shard": "reply", "why": "OneBot mention 与引用预检"},
+    {"name": "check_reply_send_failure.py", "shard": "reply", "why": "发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）"},
     {"name": "check_quote_visibility.py", "shard": "reply", "why": "引用原文必须到达 Agent，缺了也要说清原因（#94）"},
     {"name": "check_image_visibility.py", "shard": "reply", "why": "唤醒行图片标记可执行，不许出现裸 [图片]（#35）"},
     {"name": "check_alias_visibility.py", "shard": "reply", "why": "正文外号必须能指到人，认不出也不许编（#30）"},

@@ -179,7 +179,7 @@ def 空文本不炸():
 def 多气泡首条带引用其余裸发():
     calls = []
     real = reply.onebot_send
-    reply.onebot_send = lambda group_id, segments, message_id=None: (
+    reply.onebot_send = lambda group_id, segments, message_id=None, failure=None: (
         calls.append((segments, message_id)) or True)
     try:
         sent = reply.onebot_send_bubbles(123, [[{"type": "text", "data": {"text": "a"}}],
@@ -194,7 +194,7 @@ def 多气泡首条带引用其余裸发():
 def 中途失败不回退不重发():
     calls = []
     real = reply.onebot_send
-    reply.onebot_send = lambda group_id, segments, message_id=None: (
+    reply.onebot_send = lambda group_id, segments, message_id=None, failure=None: (
         calls.append(segments) or len(calls) == 1)
     try:
         sent = reply.onebot_send_bubbles(123, [[{"type": "text", "data": {"text": "a"}}],

@@ -443,7 +443,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 65 | `reply` | `check_reply_send_failure.py` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132） |
 | 66 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
 | 67 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
-| 68 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度、不回退计划通道、发图也记账（#128） |
+| 68 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、四种格式都真能发、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度（超了拒、额度内照发）、不回退计划通道、发图也记账（#128） |
 | 69 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
 | 70 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
 | 71 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |

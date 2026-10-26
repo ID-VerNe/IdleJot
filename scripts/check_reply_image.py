@@ -5,7 +5,7 @@
 解释「我发不了图」——多模态群聊退化成纯文本。更坏的是绕路：Agent 若自己
 `requests.post('/send_group_msg')` 手搓，会同时绕过 `record()` 记账与追问窗口。
 
-本门禁钉十四件事：
+本门禁钉十六件事：
 
   1. `--image <png>` + 文字 → 两次 `send_group_msg`：`[reply, text]` 与 `[image]`，
      且 image 段解出的字节与原文件逐字节相等（base64 段是 NapCat 实机验证过的形状，
@@ -26,7 +26,13 @@
      回退行——回退过去图片会被静默吞掉（`send()` 的气泡写死 `kind:"text"`）；
   12. 读到的字节数与 `stat` 不符（下载器还在写）时不发半张图；
   13. 发图成功后 `wg_replied.jsonl` 有该 event 的记账行——防「图发了但还显示 [待回]」；
-  14. `reply.py --help` 里有 `--image`（issue 第二条复现命令不再 `exit=1`）。
+  14. `reply.py --help` 里有 `--image`（issue 第二条复现命令不再 `exit=1`）；
+  15. **四种格式都真能发**：PNG / JPEG / GIF / WebP 各一张 → 全部 `SENT`、字节相等。
+      只钉「截断的 JPEG 被拒」会漏掉反方向的回归——把 JPEG 整个拒掉时上面 14 条全绿，
+      而群友发来的照片一张都发不出去；
+  16. **额度内带图照发**：正文 3 行 + 图 2 张、`--max-bubbles 5` → 5 条气泡全部发出。
+      第 10 条只有反向断言的话，「同时出现 `--image` 与 `--max-bubbles` 就一律拒」
+      这种错误实现也能全绿。
 
 真跑 `reply.py` 子进程 + loopback OneBot 假服务器 + 隔离数据根，不发任何真实消息：
 
@@ -74,6 +80,9 @@ GROUP = "123"
 SELF = "10001"
 
 CALLS = []
+# `四种格式都真能发` 要按字节核对，所以留一份原文。
+GOOD = {}
+EXT = {"JPEG": "jpg", "GIF": "gif", "WEBP": "webp"}
 
 
 class OneBot(FixtureHandler):
@@ -407,6 +416,42 @@ def 帮助里能查到图片入口():
     return proc.returncode == 0 and "--image" in proc.stdout
 
 
+@case
+def 四种格式都真能发():
+    """PNG / JPEG / GIF / WebP 各发一张，字节逐份对得上。
+
+    这是上面那批「拒」用例的反方向：只钉「截断的 JPEG 被拒」的话，一个把 JPEG
+    整个拒掉的回归会让前 14 条全绿，而群友发来的照片一张都发不出去。判据是
+    「整张解得开」，那么解得开的好图就必须真的发得出去。
+    """
+    CALLS.clear()
+    proc = run("16", "四种格式",
+               "--image", str(HOME / "good.jpg"), "--image", str(HOME / "good.gif"),
+               "--image", str(HOME / "good.webp"), "--no-wait", "--no-followup")
+    ok = (proc.returncode == 0 and len(CALLS) == 4 and "SENT" in proc.stdout
+          and types_of(CALLS[0]) == ["reply", "text"]
+          and [image_bytes(body) for body in CALLS[1:]]
+          == [GOOD["JPEG"], GOOD["GIF"], GOOD["WEBP"]])
+    return ok or proc.stdout + proc.stderr
+
+
+@case
+def 额度内带图照发():
+    """正文 3 行 + 图 2 张 = 5 条气泡，`--max-bubbles 5` 正好卡满——必须全部发出。
+
+    第 10 条 `图也算气泡额度` 只有反向断言（超了就拒）。没有这条正向对照，
+    「只要同时出现 `--image` 与 `--max-bubbles` 就一律拒」这种错误实现也能全绿。
+    """
+    CALLS.clear()
+    proc = run("17", "第一行\n第二行\n第三行",
+               "--image", str(HOME / "a.png"), "--image", str(HOME / "b.png"),
+               "--max-bubbles", "5", "--no-wait", "--no-followup")
+    ok = (proc.returncode == 0 and len(CALLS) == 5
+          and [types_of(body) for body in CALLS]
+          == [["reply", "text"], ["text"], ["text"], ["image"], ["image"]])
+    return ok or proc.stdout + proc.stderr
+
+
 def encode(image, fmt, **kw):
     buffer = io.BytesIO()
     image.save(buffer, fmt, **kw)
@@ -432,7 +477,13 @@ def build_fixtures():
     (HOME / "broken.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
     (HOME / "huge.png").write_bytes(PNG + b"\x00" * (MAX_BYTES + 1 - len(PNG)))
     (HOME / "half.jpg").write_bytes(half_jpeg())
-    # 9000×9000 的单色 1-bit PNG 只有 10 KiB：6 MiB 的文件上限拦不住它，真解一遍
+    # 三种非 PNG 的好图：`四种格式都真能发` 要按字节核对，所以留一份原文。
+    src = Image.linear_gradient("L").resize((32, 32)).convert("RGB")
+    GOOD["JPEG"] = encode(src, "JPEG", quality=90)
+    GOOD["GIF"] = encode(src, "GIF")
+    GOOD["WEBP"] = encode(src, "WEBP")
+    for fmt, raw in GOOD.items():
+        (HOME / f"good.{EXT[fmt]}").write_bytes(raw)    # 9000×9000 的单色 1-bit PNG 只有 10 KiB：6 MiB 的文件上限拦不住它，真解一遍
     # 要 400 MiB。像素上限就是为这种图设的。
     (HOME / "bomb.png").write_bytes(encode(Image.new("1", (9000, 9000)), "PNG"))
     # 301 帧的 16×16 GIF 只有 18 KiB、15 兆像素——像素上限拦不住，靠帧数上限。
@@ -441,7 +492,7 @@ def build_fixtures():
     (HOME / "frames.gif").write_bytes(
         encode(frames[0], "GIF", save_all=True, append_images=frames[1:], duration=20))
     (STATE / "wg_session.txt").write_text("session-fixture", encoding="utf-8")
-    seed_events(11)
+    seed_events(17)
 
 
 def main():

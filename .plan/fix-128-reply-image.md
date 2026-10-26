@@ -142,17 +142,23 @@ $ echo $?
 
 计划里写的三处判据在实施/复核后被推翻，代码以本文档末尾为准：
 
-1. **魔数校验 → Pillow 解码校验**。计划说「判据是文件头，魔数骗不了人」，复核指出
-   `ext_for` 只看前 4 个字节：`b"\x89PNG"` 四个字节就能过，到群里是裂图；先加
-   `MIN_IMAGE_BYTES=16` 也不够（16 字节的 `\xff\xd8` + 零、`GIF89a` + 零同样能过）。
-   改成 `Image.open()` + `verify()` 判真实格式（`wg_images.image_format`），
-   `SEND_FORMATS` 白名单。Pillow 早在 `pyproject.toml` 里、MCP 侧
-   `mcp_media_pixels.pixels()` 用它做同一件事，不新增依赖；实测 6 MiB PNG 的
-   verify 5ms。已知残留：截断的 GIF 两种判据都拦不住，由 stat/read 长度比对兜。
-2. **新增张数上限 `MAX_IMAGES=9`**。计划里没有上限，复核指出每条气泡之间睡
+1. **魔数校验 → Pillow 解码校验 → 逐帧整张解码**。计划说「判据是文件头，魔数骗不了
+   人」，复核指出 `ext_for` 只看前 4 个字节：`b"\x89PNG"` 四个字节就能过，到群里是
+   裂图；先加 `MIN_IMAGE_BYTES=16` 也不够（16 字节的 `\xff\xd8` + 零、`GIF89a` + 零
+   同样能过）。改成 `Image.open()` + `verify()` 判真实格式，仍然不够——Pillow 13.0.0
+   的 `ImageFile.verify` 只做 `self.fp = None`，**JPEG/GIF/WebP 全都继承它**，只有
+   PNG 覆写了真校验。端到端复现：400×400 的 JPEG 截掉后半段存成 `half.jpg`，`reply.py`
+   返回 `rc=0`、`SENT`、两次 `send_group_msg`，而发出去的 base64 解出来是
+   `OSError: image file is truncated`——群里收到的是裂图。最终判据是 `image_problem()`：
+   `Image.open()` 之后**逐帧 `load()`**，真解得开才放行。
+2. **新增解码上限 `MAX_TOTAL_PIXELS=80_000_000` / `MAX_FRAMES=300`**。6 MiB 的文件
+   上限拦不住像素：9000×9000 的单色 1-bit PNG 只有 10 KiB，整张解要 400 MiB；
+   60000 帧的 16×16 GIF 只有 3.5 MiB、15 兆像素，逐帧解码要 1.5s。实测 80 MP 解一遍
+   105ms / 峰值 400 MiB，48 MP 手机照片 60ms / 253 MiB，所以上限定在 80 MP。
+3. **新增张数上限 `MAX_IMAGES=9`**。计划里没有上限，复核指出每条气泡之间睡
    `BUBBLE_GAP=1.2s`，25 张就吃满 `wg_budget.SEND_BUDGET`，宿主 120s 超时会把整条
    调用连输出一起砍掉——而那条路径一个字都不打印。
-3. **`read_for_send` 现在要求 `len(raw) == info.st_size`**。计划只防「读的过程中
+4. **`read_for_send` 现在要求 `len(raw) == info.st_size`**。计划只防「读的过程中
    变大」，复核指出变小（下载器还在写）会把半张图发出去。
 
 另外两条复核结论按计划执行、未改：不做目录白名单（理由见「明确不做」），

@@ -74,7 +74,7 @@
     {"name": "check_reply_quote.py", "shard": "reply", "why": "OneBot mention 与引用预检"},
     {"name": "check_quote_visibility.py", "shard": "reply", "why": "引用原文必须到达 Agent，缺了也要说清原因（#94）"},
     {"name": "check_image_visibility.py", "shard": "reply", "why": "唤醒行图片标记可执行，不许出现裸 [图片]（#35）"},
-    {"name": "check_reply_image.py", "shard": "reply", "why": "回复能发本地图片：--image 出 base64 图段、Pillow 判真实格式、坏图零请求、不回退计划通道、发图也记账（#128）"},
+    {"name": "check_reply_image.py", "shard": "reply", "why": "回复能发本地图片：--image 出 base64 图段、整张解码才放行、半截图/超大像素/超帧数零请求、不回退计划通道、发图也记账（#128）"},
     {"name": "check_alias_visibility.py", "shard": "reply", "why": "正文外号必须能指到人，认不出也不许编（#30）"},
     {"name": "check_at_segment_name.py", "shard": "reply", "why": "at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52）"},
     {"name": "check_reply_timing.py", "shard": "reply", "why": "回复时序、密钥排除、轮换与失败透明"},

@@ -5,7 +5,7 @@
 解释「我发不了图」——多模态群聊退化成纯文本。更坏的是绕路：Agent 若自己
 `requests.post('/send_group_msg')` 手搓，会同时绕过 `record()` 记账与追问窗口。
 
-本门禁钉十件事：
+本门禁钉十三件事：
 
   1. `--image <png>` + 文字 → 两次 `send_group_msg`：`[reply, text]` 与 `[image]`，
      且 image 段解出的字节与原文件逐字节相等（base64 段是 NapCat 实机验证过的形状，
@@ -14,19 +14,24 @@
   3. 两张图按参数顺序排在文字之后；
   4. 超 6 MiB / 内容不是图片（哪怕叫 `.png`）/ 只有 4 字节魔数 / 魔数齐全但结构坏 /
      路径不存在 → `exit=1`、**零请求**、输出点名原因；
-  5. 好图 + 坏图混着给 → **一张都不发**（不是「先发好的再报错」）；
-  6. 一次超过 `MAX_IMAGES` 张 → 拒，不发（气泡间隔会吃满宿主工具超时）；
-  7. OneBot 不可用时 **不回退计划通道**：`SEND_FAILED`、零请求、不记账、不出现
+  5. 半截的 JPEG（下载中断）→ 拒。**这条是 `verify()` 换成整张解码的理由**：
+     Pillow 的 `verify()` 在 JPEG/GIF/WebP 上是空操作，半张图能一路过关发进群；
+  6. 压缩率堆出来的超大像素图（9000×9000 的单色 PNG 只有 10 KiB）→ 拒，不解码；
+  7. 帧数超过 `MAX_FRAMES`（301 帧的 16×16 GIF 只有 18 KiB）→ 拒；
+  8. 好图 + 坏图混着给 → **一张都不发**（不是「先发好的再报错」）；
+  9. 一次超过 `MAX_IMAGES` 张 → 拒，不发（气泡间隔会吃满宿主工具超时）；
+  10. OneBot 不可用时 **不回退计划通道**：`SEND_FAILED`、零请求、不记账、不出现
      回退行——回退过去图片会被静默吞掉（`send()` 的气泡写死 `kind:"text"`）；
-  8. 读到的字节数与 `stat` 不符（下载器还在写）时不发半张图；
-  9. 发图成功后 `wg_replied.jsonl` 有该 event 的记账行——防「图发了但还显示 [待回]」；
-  10. `reply.py --help` 里有 `--image`（issue 第二条复现命令不再 `exit=1`）。
+  11. 读到的字节数与 `stat` 不符（下载器还在写）时不发半张图；
+  12. 发图成功后 `wg_replied.jsonl` 有该 event 的记账行——防「图发了但还显示 [待回]」；
+  13. `reply.py --help` 里有 `--image`（issue 第二条复现命令不再 `exit=1`）。
 
 真跑 `reply.py` 子进程 + loopback OneBot 假服务器 + 隔离数据根，不发任何真实消息：
 
     .venv/Scripts/python.exe scripts/check_reply_image.py
 """
 import base64
+import io
 import json
 import os
 import shutil
@@ -36,6 +41,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from PIL import Image
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_fixture_support  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
@@ -44,10 +51,11 @@ from fixture_server import FixtureHandler, fixture_server  # noqa: E402
 
 REPLY = ROOT / "water-group" / "daemon" / "reply.py"
 MAX_BYTES = 6 * 1024 * 1024
+MAX_FRAMES = 300
 
-# 1x1 透明 PNG 两张：等长、内容不同、Pillow 能 verify 通过（真能解码）。
-# 用「能解码」的图而不是随手编的 PNG 头，因为校验已经改成 Image.open + verify——
-# 编出来的假 PNG 会红在门禁自己身上。
+# 1x1 透明 PNG 两张：等长、内容不同、Pillow 能整张解出来。
+# 用真能解码的图而不是随手编的 PNG 头——校验是逐帧解码，编出来的假图会红在门禁
+# 自己身上，看起来像门禁坏了。
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ"
     "/pLvAAAAAElFTkSuQmCC")
@@ -263,6 +271,47 @@ def 魔数对但结构坏也拒():
 
 
 @case
+def 下载中断的半截图不发():
+    """半截 JPEG：`stat` 与 `read` 长度一致、`verify()` 也说没问题，但解不出来。
+
+    这条钉的是「`verify()` 不是判据」。Pillow 13.0.0 的 `ImageFile.verify` 只做
+    `self.fp = None`，JPEG/GIF/WebP 全都继承它——换成整张解码之前，这半张图会
+    一路 `SENT` 出去，群里收到的是裂图。
+    """
+    CALLS.clear()
+    proc = run("12", "半张图", "--image", str(HOME / "half.jpg"),
+               "--no-wait", "--no-followup")
+    ok = (proc.returncode == 1 and CALLS == []
+          and "IMAGE_FAILED" in proc.stdout and "解不开" in proc.stdout)
+    return ok or proc.stdout + proc.stderr
+
+
+@case
+def 压缩出来的超大像素也拒():
+    """9000×9000 的单色 PNG 只有 10 KiB——6 MiB 文件上限对它毫无作用。
+
+    不拦就是拿发图当解压炸弹入口：整张解要 400 MiB。
+    """
+    CALLS.clear()
+    proc = run("13", "炸弹", "--image", str(HOME / "bomb.png"),
+               "--no-wait", "--no-followup")
+    ok = (proc.returncode == 1 and CALLS == []
+          and "IMAGE_FAILED" in proc.stdout and "兆像素上限" in proc.stdout)
+    return ok or proc.stdout + proc.stderr
+
+
+@case
+def 帧数超上限也拒():
+    """301 帧的 16×16 GIF 只有 18 KiB、15 兆像素：像素上限拦不住，靠帧数上限。"""
+    CALLS.clear()
+    proc = run("14", "太多帧", "--image", str(HOME / "frames.gif"),
+               "--no-wait", "--no-followup")
+    ok = (proc.returncode == 1 and CALLS == []
+          and "IMAGE_FAILED" in proc.stdout and "帧上限" in proc.stdout)
+    return ok or proc.stdout + proc.stderr
+
+
+@case
 def 一次超过九张就拒():
     """气泡之间有 1.2s 间隔，张数不封顶会吃满宿主 120s 超时——被砍时一个字都不打印。"""
     CALLS.clear()
@@ -339,6 +388,23 @@ def 帮助里能查到图片入口():
     return proc.returncode == 0 and "--image" in proc.stdout
 
 
+def encode(image, fmt, **kw):
+    buffer = io.BytesIO()
+    image.save(buffer, fmt, **kw)
+    return buffer.getvalue()
+
+
+def half_jpeg():
+    """一张下载中断的 JPEG：文件早就写坏了，不是读的过程中被改。
+
+    `stat` 与 `read` 长度一致，所以长度校验帮不上忙；`verify()` 也帮不上——
+    JPEG 用的是 `ImageFile.verify`，它只关文件句柄。只有整张解码能拦住。
+    """
+    src = Image.linear_gradient("L").resize((64, 64)).convert("RGB")
+    raw = encode(src, "JPEG", quality=90)
+    return raw[: len(raw) * 3 // 5]
+
+
 def build_fixtures():
     (HOME / "a.png").write_bytes(PNG)
     (HOME / "b.png").write_bytes(PNG2)
@@ -346,6 +412,15 @@ def build_fixtures():
     (HOME / "magic4.png").write_bytes(b"\x89PNG")
     (HOME / "broken.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
     (HOME / "huge.png").write_bytes(PNG + b"\x00" * (MAX_BYTES + 1 - len(PNG)))
+    (HOME / "half.jpg").write_bytes(half_jpeg())
+    # 9000×9000 的单色 1-bit PNG 只有 10 KiB：6 MiB 的文件上限拦不住它，真解一遍
+    # 要 400 MiB。像素上限就是为这种图设的。
+    (HOME / "bomb.png").write_bytes(encode(Image.new("1", (9000, 9000)), "PNG"))
+    # 301 帧的 16×16 GIF 只有 18 KiB、15 兆像素——像素上限拦不住，靠帧数上限。
+    frames = [Image.new("RGB", (16, 16), (n % 250, (n * 7) % 250, 90))
+              for n in range(MAX_FRAMES + 1)]
+    (HOME / "frames.gif").write_bytes(
+        encode(frames[0], "GIF", save_all=True, append_images=frames[1:], duration=20))
     (STATE / "wg_session.txt").write_text("session-fixture", encoding="utf-8")
     seed_events(11)
 

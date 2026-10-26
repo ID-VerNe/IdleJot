@@ -32,10 +32,11 @@
 
 `reply.py` 共 17 个参数，上面是最常用的；`--also`（连发 @ 用一条答复算作回了多条）、
 `--force`（目标唤醒已过待回时效也发）、`--intent`、`--no-quote` 见 `reply.py --help`。
-`--image`（issue #128）按**内容**校验 PNG/JPEG/GIF/WebP 且 ≤6 MiB（Pillow 解得出才发，
-扩展名不作数），一次最多 9 张；任何一张不合格就一张都不发（先校验再动手，不会发一半）；
-带图的回复强制走 OneBot 直发，因为计划通道只会发文字、回退过去等于悄悄吞掉图片。
-只发图时正文可省。
+`--image`（issue #128）按**内容**校验：Pillow 把整张图逐帧解开才算数（不是看扩展名、
+也不是看 `verify()`——它只对 PNG 有效），格式限 PNG/JPEG/GIF/WebP，单张 ≤6 MiB、
+合计 ≤80 兆像素、≤300 帧，一次最多 9 张。任何一张不合格就一张都不发（先校验再动手，
+不会发一半）；带图的回复强制走 OneBot 直发，因为计划通道只会发文字、回退过去等于
+悄悄吞掉图片。只发图时正文可省。
 `look.py --frames all` 把动图补成 3 帧（默认只取 1 帧），遇到动图结论可疑时加上。
 
 唤醒行里的图片标记三种形态：`path=…`（已落盘，直接读）、`可补读 look.py --event <id> --index <i>`
@@ -439,7 +440,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 63 | `reply` | `check_reply_quote.py` | OneBot mention 与引用预检 |
 | 64 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
 | 65 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
-| 66 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、Pillow 判真实格式、坏图零请求、不回退计划通道、发图也记账（#128） |
+| 66 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、整张解码才放行、半截图/超大像素/超帧数零请求、不回退计划通道、发图也记账（#128） |
 | 67 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
 | 68 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
 | 69 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |

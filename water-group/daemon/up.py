@@ -205,6 +205,8 @@ def report(exclude_pids=None, resident_pid=None):
         # issue #112：这一行以前只有现算的进程结论。空窗期里没人跑 --status 时，
         # 「刚才有人值守过、现在没了」在磁盘上没有任何痕迹；账本把上一轮的起止
         # 时刻带进来，状态行才回答「空窗多长」而不只是「现在没人」。
+        # issue #119：账本按 pid 分槽，describe() 汇总所有记录——并行监听时不会
+        # 把「还有人在值守」说成「此后 0 秒无人值守」。
         note = wg_listener_state.describe()
         if note:
             listener += f"；账本：{note}"

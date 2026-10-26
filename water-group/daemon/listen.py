@@ -26,10 +26,10 @@ That line is only half of it (issue #112). On 2026-10-25 a round printed
 ``RESTART:``, the caller read it, and nothing was re-hung for 14 minutes -- while
 the state directory held not a single file saying a listener had ever run. So
 each round now also writes its own life and death into ``wg_listener_state``
-(``state/wg_listener.json``): who, since when, until when, and why it stopped.
-Any reader -- ``up.py --status``, a gate, a future component -- can answer
-"nobody is on watch, the last one exited at 18:02:01" without having to be
-running at the right moment.
+(``state/wg_listeners/<pid>.json``, one slot per listener since issue #119):
+who, since when, until when, and why it stopped. Any reader -- ``up.py --status``,
+a gate, a future component -- can answer "nobody is on watch, the last one
+exited at 18:02:01" without having to be running at the right moment.
 
 Exit codes:
   0  there is work -- a wake was printed, or the dossier is due -- or the

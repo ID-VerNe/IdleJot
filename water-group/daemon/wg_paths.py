@@ -4,7 +4,8 @@
 
     ~/.water-group/
       state/    守护状态（wg_*.json、游标、锁、心跳、mcp token、status.json、
-                监听存亡账本 wg_listener.json，issue #112）
+                监听存亡账本 wg_listeners/<pid>.json，issue #112/#119；
+                旧版单行 wg_listener.json 仍只读兼容）
       logs/     一切日志（supervisor、collector、commands、napcat、launcher…）
       data/     chatlocal SQLite 库与媒体缓存
       tmp/      临时目录（Gradio TEMP、agent patch、voice 抽取、terminal 锁）

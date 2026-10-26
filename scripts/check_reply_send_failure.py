@@ -104,6 +104,17 @@ def _write_config(base):
     }, ensure_ascii=False), encoding="utf-8")
 
 
+def _point(url):
+    """让 `reply.py` 与诊断模块指向同一个夹具地址。
+
+    `reply.py` 的 `onebot_config()` 固定在这里是为了让本门禁只管 #132：未打补丁
+    的 base 读的是仓库配置（干净 checkout 里根本没有），不钉住的话「成功路径」
+    也会红，红的原因就跟 issue 无关了。诊断模块自己读 `IDLEJOT_WG_CONFIG`。
+    """
+    _BASE[0] = url
+    _write_config(url)
+
+
 def _write_state():
     """一条可回的 @ + 会话 id，让 `reply.main()` 走真实的取群号/取 message_id 路径。"""
     state = _SCRATCH / "state"
@@ -125,7 +136,10 @@ def _run(argv):
     sys.argv = ["reply.py"] + argv
     try:
         with contextlib.redirect_stdout(buf):
-            code = reply.main()
+            try:
+                code = reply.main()
+            except SystemExit as exc:   # argparse 拒绝未知参数（如旧版不认 --wait-unmute）
+                code = int(exc.code or 0)
     finally:
         sys.argv = real_argv
     return code, buf.getvalue()
@@ -183,15 +197,16 @@ def 参数错档_与禁言档文案不同():
 @case
 def 连接失败档_原文是异常且不探测禁言():
     _reset(time.time(), shut_up=0)
+    alive = _BASE[0]
     probe = socket.socket()
     probe.bind(("127.0.0.1", 0))
     dead = probe.getsockname()[1]
     probe.close()
-    _write_config(f"http://127.0.0.1:{dead}")
+    _point(f"http://127.0.0.1:{dead}")
     try:
         code, out = _run(["1", TEXT, "--at", "群友A", "--no-wait"])
     finally:
-        _write_config(_BASE[0])
+        _point(alive)
     return (code == 1
             and "SEND_FAILED: OneBot 请求失败" in out
             and "未探测禁言：请求在拿到响应之前就失败了" in out
@@ -349,12 +364,14 @@ def main():
     bad = 0
     with fixture_server(Handler) as server:
         base = f"http://127.0.0.1:{server.server_port}"
-        _BASE[0] = base
-        _write_config(base)
+        _point(base)
+        reply.onebot_config = lambda: (_BASE[0], "fixture-token")
         for fn in CASES:
             try:
                 ok = fn()
-            except Exception as exc:  # noqa: BLE001
+            # argparse 拒绝未知参数时抛 SystemExit：那是「这条用例的输入没被支持」，
+            # 记成这一条红就好，别让整个门禁在第一条卡住、后面 13 条一条都不跑。
+            except (Exception, SystemExit) as exc:  # noqa: BLE001
                 print(f"✗ {fn.__name__}: {type(exc).__name__}: {exc}")
                 bad += 1
                 continue

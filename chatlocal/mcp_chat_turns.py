@@ -15,6 +15,13 @@ from .mcp_actions import dump
 from .mcp_schemas import SESSION_ID_DESCRIPTION, TURN_KEY_DESCRIPTION, event_id, idempotency_key, session_id
 
 TOOLS = {'plan_chat_reply', 'send_chat_reply'}
+# 一次 send_chat_reply 能交几个语义气泡（issue #131）。过去写死 3，是历史默认值：
+# 底层发送循环本来就是按队列逐条发的，没有 3 这个上限。取 12 而不是跟着 reply.py
+# 的 20，是因为这条路径每个气泡之间要 check()，而 plan_ttl_seconds 默认 90s、
+# bubble_max_seconds 默认 4s——20 条最坏 ≈ 80s 会顶到 TTL、尾部被 plan_expired
+# 取消，12 条（最坏 ≈ 48s）留足余量。schema 的 maxItems 与下面的校验都取这个值，
+# scripts/check_bubble_cap.py 门禁钉住两侧数字一致。
+TURN_MAX_BUBBLES = 12
 DEFAULTS = dict(quiet_seconds=2., max_collect_seconds=8., reply_cooldown_seconds=3.,
                 batch_ttl_seconds=120., plan_ttl_seconds=90., bubble_min_seconds=1.2,
                 bubble_max_seconds=4., bubble_seconds_per_char=.035, quote_threshold=3,
@@ -47,14 +54,14 @@ def schema(tool):
              wait_seconds=dict(type='number',minimum=0,maximum=30)),
         ['session_id','batch_id','action','intent']),
         tool('send_chat_reply',
-        'Replyer 阶段：按 READY 计划一次提交 1–3 个语义气泡，不按标点机械拆句。'
+        'Replyer 阶段：按 READY 计划一次提交 1–12 个语义气泡，不按标点机械拆句。'
         '有学习候选时同时提交 expression_ids（0–5 个候选 ID；[] 明确不用）和 bubbles，无需先调用 select_chat_expressions。兼容此前已单独完成的选择；缺少明确选择仍拒绝发送。'
         '程序串行发送、气泡间留间隔并重新检查相关新消息/停止/授权。STALE 附 updated_chat 时直接重规划，has_more 先分页；否则沿 recovery 补读。已发不撤回，旧尾部不续发；UNKNOWN 禁止重试。'
         '纯 reaction、图片、语音、视频、文件均可结束本轮，不必配文。voice/video/file 气泡使用 import_qq_media 的 asset_id；ai_voice 使用 character_id 和 text；qq_action 使用 tool、action、params。',
         dict(session_id=sid,plan_id=sid,idempotency_key=key,
              expression_ids=dict(type='array',maxItems=5,uniqueItems=True,items=sid,
                                  description='从本计划 learned_language.candidates 选 0–5 个 ID；[] 明确不用。与 bubbles 一起提交，重试保持相同选择。'),
-             bubbles=dict(type='array',minItems=1,maxItems=3,items=dict(type='object',additionalProperties=False,
+             bubbles=dict(type='array',minItems=1,maxItems=TURN_MAX_BUBBLES,items=dict(type='object',additionalProperties=False,
                 properties=dict(kind=dict(type='string',enum=['text','sticker','reaction','voice','video','file','ai_voice','qq_action']),
                     text=dict(type='string',minLength=1,maxLength=4000),sticker_id=sid,
                     asset_id=sid,folder_id=dict(type='string',minLength=1,maxLength=512),
@@ -440,7 +447,8 @@ class ChatTurns:
                 if p['queue_signature']!=signature:raise TurnRejected('idempotency_conflict','该计划已经提交了另一组表达，不能替换或重发。')
                 return self.public(p)
             if p['state']!='READY':raise TurnRejected('plan_not_ready','该计划不可发送，请读取结果或补读重规划。')
-            if not isinstance(bubbles,list) or not 1<=len(bubbles)<=3:raise TurnRejected('invalid_bubbles','一次提交 1–3 个语义气泡。')
+            if not isinstance(bubbles,list) or not 1<=len(bubbles)<=TURN_MAX_BUBBLES:
+                raise TurnRejected('invalid_bubbles',f'一次提交 1–{TURN_MAX_BUBBLES} 个语义气泡。')
             for i,b in enumerate(bubbles):
                 kind=b['kind'];allowed={'text':{'kind','text','quote','mention_user_ids'},'sticker':{'kind','sticker_id'},'reaction':{'kind','event_id','reaction_id','operation'},
                     'voice':{'kind','asset_id'},'video':{'kind','asset_id'},'file':{'kind','asset_id','folder_id'},

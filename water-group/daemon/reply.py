@@ -25,7 +25,8 @@ Usage:
   reply.py --context 30 [--around <event_id>]
   reply.py --show <event_id>      读这条消息的全文（行内截断后的补救路径）
 
-<text> 里的换行会拆成多条气泡（最多 3 条，首条挂引用）。想连发几句就分行写，
+<text> 里的换行会拆成多条气泡（默认最多 20 条，首条挂引用；`--max-bubbles`
+或 config.json 的 `reply.max_bubbles` 可以调小，issue #131）。想连发几句就分行写，
 不要拿斜杠把几句话串成一行——QQ 里换行会折叠，斜杠会读成文档。shell 双引号里
 写不出真换行，用字面量 \n 也行（反斜杠加 n）；\\n 转义成字面 \n 留在正文里。
 """
@@ -46,6 +47,7 @@ sys.path.insert(0, str(HERE))
 import mcp_client  # noqa: E402
 import plugins  # noqa: E402  (事件型能力派发口：追问窗口，issue #4 PD2a)
 import wg_aliases  # noqa: E402  (别名指向渲染，issue #30)
+import wg_bubbles  # noqa: E402  (气泡上限与拆句的唯一出口，issue #131)
 import wg_budget  # noqa: E402  (等待预算的唯一出口，issue #79/#83)
 import wg_gap  # noqa: E402  (停机窗口缺口账本，issue #114)
 import winconsole  # noqa: E402
@@ -78,9 +80,10 @@ SEND_BUDGET = wg_budget.SEND_BUDGET
 # 自己返回并打印 NO_WORK，否则「消除几十秒空窗」会以「无限长空窗」收场——
 # 被截断时子监听和父进程一起死，而这条路径上不会留下任何提示。
 DEFAULT_WAIT = wg_budget.WAIT_BUDGET
-# 多条气泡之间的间隔。计划通道按 bubble_min_seconds 算（默认 1.2s 起，随上一条
-# 长度增加）；OneBot 直发这条路径不经过那套策略，用同一个下限保持手感一致。
-BUBBLE_GAP = 1.2
+# 多条气泡之间的间隔、单次能发几条，都收在 wg_bubbles 里（issue #131）。这两个
+# 名字在这里重新导出：调用点与既有门禁照旧读 reply.BUBBLE_GAP / reply.MAX_BUBBLES。
+BUBBLE_GAP = wg_bubbles.BUBBLE_GAP
+MAX_BUBBLES = wg_bubbles.MAX_BUBBLES
 
 
 def session_id():
@@ -212,38 +215,15 @@ def plan(sid, batch, target, intent, quote):
     return None, target
 
 
-def normalize_newlines(text):
-    """把命令行里常见的字面量 \n 归一成真换行。
-
-    reply.py 的正文是命令行参数，`"第一句\n第二句"` 在 shell 双引号里不会变成
-    换行——进来的是反斜杠加 n 两个字符。splitlines() 只认真换行，于是整串被
-    当成一行发成一条气泡，literal \n 明晃晃挂在群里（issue #80）。
-
-    双反斜杠是逃生门：`\\n` 转义成字面 `\n` 留在正文里，不当分隔符——真要发
-    一个反斜杠加 n 时用这个写法。tab 不特殊处理：行首行尾的缩进由
-    split_bubbles 每行的 strip 去掉，行中的 tab 原样保留。
-    """
-    text = (text or "").replace("\\\\", "\x00")
-    text = text.replace("\\r\\n", "\n").replace("\\r", "\r").replace("\\n", "\n")
-    return text.replace("\x00", "\\")
+# 拆句与上限的唯一实现在 wg_bubbles 里（issue #131）。这里保留同名入口，是因为
+# 门禁与调用点读的一直是 reply.split_bubbles / reply.normalize_newlines；limit
+# 必须由调用方按 config.json 的 reply.max_bubbles 解析后传进来，默认值只是硬顶。
+normalize_newlines = wg_bubbles.normalize_newlines
 
 
-def split_bubbles(text):
-    """按换行拆成多条气泡；字面量 \n / \r\n 也当换行（normalize_newlines）。
-
-    QQ 会把单条消息里的换行折叠成一个空格，所以「一行一句」只能靠多条气泡落地。
-    人设卡要求「想补充就发下一条」，而 reply.py 过去只发一个气泡——于是想表达
-    多层意思时只能拿斜杠硬连成一行，读起来像文档不像群聊。
-
-    空行忽略；首尾空白去掉。send_chat_reply 最多接 3 条，超出的在这里明确
-    提示并截掉，不悄悄吞掉内容——被截的句子通常是补刀，写的人得知道它没发出去。
-    """
-    text = normalize_newlines(text)
-    parts = [line.strip() for line in text.splitlines()]
-    parts = [line for line in parts if line]
-    if len(parts) > 3:
-        print(f"  NOTE 只发前 3 条气泡，丢掉了 {len(parts) - 3} 行：{parts[3:]}")
-    return parts[:3] or [""]
+def split_bubbles(text, limit=MAX_BUBBLES):
+    """按换行拆成多条气泡（实现在 wg_bubbles.split，issue #131）。"""
+    return wg_bubbles.split(text, limit)
 
 
 def send(sid, plan_id, texts, quote):
@@ -843,7 +823,11 @@ def wait_for_next(seconds):
 def main():
     parser = argparse.ArgumentParser(description="回一条群消息并记账")
     parser.add_argument("target", nargs="?", help="要回复的消息 id（必填，偷懒省略会直接报错）")
-    parser.add_argument("text", nargs="?", help="回复正文；@ {花名} 会变成真正的 @；换行或字面量 \\n 拆成多条气泡（最多 3 条）")
+    parser.add_argument("text", nargs="?", help="回复正文；@ {花名} 会变成真正的 @；换行或字面量 \\n 拆成多条气泡"
+                                                f"（默认最多 {MAX_BUBBLES} 条，--max-bubbles 可调）")
+    parser.add_argument("--max-bubbles", type=int, metavar="N",
+                        help=f"这次最多发几条气泡（1–{MAX_BUBBLES}；默认取 config.json 的 "
+                             f"reply.max_bubbles，缺省 {MAX_BUBBLES}。超出的行截断并打印丢弃清单，issue #131）")
     parser.add_argument("--intent", default="回复群友", help="简短沟通意图")
     parser.add_argument("--no-quote", action="store_true", help="不带引用")
     parser.add_argument("--at", action="append", default=[], metavar="花名",
@@ -871,6 +855,9 @@ def main():
     parser.add_argument("--show", type=int, metavar="ID",
                         help="按 id 读这条消息的全文（唤醒行/上下文行截断后的补救，issue #32）")
     args = parser.parse_args()
+    # 上限是硬顶（issue #131 明确不做无限条）：显式取值越界就别猜，直接报错。
+    if args.max_bubbles is not None and not 1 <= args.max_bubbles <= MAX_BUBBLES:
+        parser.error(f"--max-bubbles 取值 1–{MAX_BUBBLES}，收到 {args.max_bubbles}")
     # 显式关闭优先于任何 --wait 取值：`--no-wait` 是「我马上还要做别的事」的
     # 出口，被一个默认值盖过去就等于没有出口（issue #69）。
     if args.no_wait:
@@ -922,12 +909,19 @@ def main():
         print("不知道该发到哪个群：事件里没有 group 信息")
         return 1
 
-    bubbles = split_bubbles(args.text)
+    # 正文只拆一次：两个分支各拆一次会让超限提示打两遍（issue #131）。
+    limit = (args.max_bubbles if args.max_bubbles is not None
+             else wg_bubbles.config_limit(wg_config.config()))
+    bubbles = split_bubbles(args.text, limit)
     bubble_segments = [build_segments(bubbles[0], group_id, leading=args.at)]
     bubble_segments += [build_segments(one, group_id) for one in bubbles[1:]]
     has_at = any(seg["type"] == "at" for segs in bubble_segments for seg in segs)
     answered = [target, *[i for i in args.also if i != target]]
     print(f"target={target} group={group_id} session={sid}")
+    # 发之前先报账：间隔会吃掉本次调用的等待额度（整次共享的总额，issue #88）。
+    cost = wg_bubbles.cost_note(len(bubbles), args.wait)
+    if cost:
+        print(cost)
 
     # The listener is dead between the wake and the re-hang, so @-mentions that
     # land while this reply is being written are only visible in the file. Saying
@@ -970,6 +964,12 @@ def main():
     elif not args.no_quote:
         print("  no OneBot id on record for this event; using the plan path")
 
+    # 计划通道条数有限，超过就**在发之前**拒绝，别留下半截回复（issue #131）。
+    overflow = wg_bubbles.plan_overflow_message(len(bubbles))
+    if overflow:
+        print(f"REFUSED: {overflow}")
+        return 1
+
     batch = batch_id()
     if not batch:
         print("没有可用批次，等 collector 收下一批")
@@ -979,7 +979,7 @@ def main():
         print("PLAN_FAILED")
         return 1
     quote = (not args.no_quote) and final_target == target
-    if send(sid, plan_id, split_bubbles(args.text), quote):
+    if send(sid, plan_id, bubbles, quote):
         record(answered, args.text)
         if final_target != target:
             print(f"note: batch moved, plan target was {final_target}")

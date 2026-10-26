@@ -15,6 +15,12 @@
 第二道闸门：`up.is_command()` 认出的指令不算接话——不扣额度、不唤醒、不续期，
 但游标照常推进（跳过 ≠ 卡住，issue #70）。
 
+第三道闸门管「@ 的是谁」（issue #138）：**只 @ 了别人、正文空白**的消息不是
+「群里接着聊」——它一句话都没有，唯一的信息是「某人戳了某人一下」。以前它照样
+唤醒，追问行又把 @ 段渲染成裸 `@ `，Agent 只能理解成「他在 @ 我」，于是答出
+「你 @ 我，是想让我……」这种认错人的话。判据用入库的 `segments`（`mention_info`），
+不是 `content` 文本——`content` 里的 @ 已经被人名替换过，看不出指向。
+
 状态文件（TULPA_WG_STATE 下）：
   wg_followup.json  当前窗口；文件不存在就是没开窗
 字段：after_id（从这条之后开始看，通常就是刚回复的那条）、not_before（发送开始
@@ -28,6 +34,7 @@ Usage:
 """
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -159,6 +166,69 @@ def stale(window, now=None):
     return None
 
 
+# 从 `content` 里认 `@<qq>`：只服务没有 `segments` 的老行/超限行。`content` 里的
+# @ 已经被人名替换过（`mcp_chat.receive` 拼 `@<显示名>`，缺名字才是 `@<qq>`），
+# 所以纯文本认不出「@ 的是谁」是常态——但那种形态一定带正文，判据用不上它。
+AT_MENTION = re.compile(r"@(\d{5,})")
+
+
+def mention_info(raw, segments, account):
+    """一条消息的 @ 指向与可见正文：(body, at_self, at_others, has_content)。
+
+    `segments` 是入库时的段清单（`chatlocal/mcp_chat.py` 的 `at_segment`），最权威：
+    `at` 段带 `qq`（有显示名时还带 `name`）。老行、或 payload 超 20KB 被入库清空
+    `segments` 的行没有它，退化成从 `raw` 认 `@<qq>`——那种形态下认不出的
+    `@<显示名>` 一定带着正文，不影响「只 @ 别人、正文空白」这条判据（issue #138）。
+
+    `has_content` 只看正文与非文本段（图片 / 语音 / 转发 / 引用…），**不看 @ 段**：
+    `@<别人> ` 这种「@ + 一个空格」正是要拦的形态，而纯图片消息是 #35 要保的形态，
+    两者混成一个布尔就会误杀一边。`self_account` 取不到时 `at_self` 恒假——一条只有
+    `@<qq>`、没有正文的消息无论如何都不值得唤醒，@ 我的那条由 `[at]` 主链路负责。
+    """
+    account = str(account or "")
+    at_self = False
+    at_others = []
+    parts = []
+    media = False
+    if isinstance(segments, list) and segments:
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            kind = seg.get("type")
+            if kind == "at":
+                target = str(seg.get("qq") or "")
+                if target and target == account:
+                    at_self = True
+                else:
+                    at_others.append(str(seg.get("name") or target or "?"))
+                continue
+            if kind == "text":
+                parts.append(str(seg.get("text") or ""))
+            else:
+                media = True
+    else:
+        text = str(raw or "")
+        for match in AT_MENTION.finditer(text):
+            target = match.group(1)
+            if target == account:
+                at_self = True
+            else:
+                at_others.append(target)
+        parts.append(AT_MENTION.sub("", text))
+    body = " ".join("".join(parts).split())
+    return body, at_self, at_others, bool(body) or media
+
+
+def bare_at_others(row, account):
+    """只 @ 了别人、正文空白 → 不是「在聊」，不唤醒（issue #138）。
+
+    游标照常推进——跳过 ≠ 卡住，与 `#` 指令同一口径。
+    """
+    _body, at_self, _others, has_content = mention_info(
+        row.get("raw") or row.get("text"), row.get("segments"), account)
+    return not has_content and not at_self
+
+
 def since(after_id, session, not_before=None, limit=50):
     """窗口之后的全部消息，含自己说的（调用方按 is_self 过滤要不要唤醒）。
 
@@ -218,6 +288,10 @@ def since(after_id, session, not_before=None, limit=50):
                     "quote": wg_quotes.render_payload(db, session, data),
                     # 追问窗里收到的图也要有路径/补读提示，不能只剩裸 [图片]（issue #35）。
                     "images": wg_images.render(dict(data, id=event_id), media),
+                    # @ 指向只在段里（issue #138）：`content` 已被人名替换过，
+                    # `consume()` 判「只 @ 别人、没有正文」要靠这一列。
+                    "segments": data.get("segments") if isinstance(
+                        data.get("segments"), list) else [],
                 })
             params[1] = rows[-1][0]
             if len(rows) < limit:
@@ -234,7 +308,8 @@ def consume(window, rows):
 
     自己说的话、系统提示和 `#` 指令也推进 after_id——不然每轮都要重新扫过它们
     ——但不占 budget、不唤醒：机器人自言自语不算接话，`#` 指令归 commands.py
-    （issue #70）。
+    （issue #70）。**只 @ 了别人、正文空白**的消息同理（issue #138）：它没有一句话
+    可回，却会被当成「他在 @ 我」，Agent 照着答就是认错人。
 
     pre-reply 的闲聊（`at < not_before`，Agent 处理回复期间群里说的话）**照常
     唤醒**、照常推进游标，但不占 budget——它们是处理期间漏掉的接话，得让 Agent
@@ -254,9 +329,12 @@ def consume(window, rows):
     import up  # noqa: PLC0415
 
     not_before = float(window.get("not_before") or 0)
+    # @ 指向要问配置（谁是「我」）；问不到就恒假，见 mention_info 的说明。
+    account = up.self_account()
     woke = [r for r in rows
             if not r["self"] and not r["synthetic"]
-            and not up.is_command(r.get("raw") or r["text"])]
+            and not up.is_command(r.get("raw") or r["text"])
+            and not bare_at_others(r, account)]
     # 只扣发送开始之后的接话：pre-reply 是处理期间漏掉的，不该再算一次额度
     # （issue #117）；它仍要唤醒，预算只是真正的接话上限。
     chargeable = [r for r in woke if float(r.get("at") or 0) >= not_before]

@@ -919,10 +919,6 @@ def main():
         print(f"IMAGE_FAILED: {exc}")
         return 1
     has_at = any(seg["type"] == "at" for segs in bubble_segments for seg in segs)
-    # 发之前先报账：间隔会吃掉本次调用的等待额度（整次共享的总额，issue #88）。
-    cost = wg_bubbles.cost_note(len(bubble_segments), args.wait)
-    if cost:
-        print(cost)
 
     # The listener is dead between the wake and the re-hang, so @-mentions that
     # land while this reply is being written are only visible in the file. Saying
@@ -947,6 +943,9 @@ def main():
     # It is also the only path that can carry an at or image segment -- plan/send
     # speaks plain text, so a message with either must not be handed to it.
     if has_at or args.image or (not args.no_quote and found):
+        # 发之前先报账：间隔会吃掉本次调用的等待额度（整次共享的总额，issue #88）。
+        # 这条路径按 `BUBBLE_GAP` 固定节奏算；条数取 `bubble_segments`——图片也是气泡（#136）。
+        wg_bubbles.report_cost(len(bubble_segments), args.wait)
         message_id = None if args.no_quote else (found[1] if found else None)
         # 发送 + 失败诊断 + 可选解禁补发全在 wg_send_failure（#132）：首条就失败时
         # 由它说出真实原因，不再是那句「带 @ 只能走 OneBot」。
@@ -974,6 +973,7 @@ def main():
     if overflow:
         print(f"REFUSED: {overflow}")
         return 1
+    wg_bubbles.report_cost(len(bubbles), args.wait, plan_path=True)
 
     batch = batch_id()
     if not batch:

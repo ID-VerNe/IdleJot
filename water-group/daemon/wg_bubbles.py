@@ -19,15 +19,20 @@
 超上限时不再静默：提示必须同时说出「已发几条、丢弃几条、丢的是什么」，因为被截
 的句子通常是补刀，写的人得知道自己少说了什么。
 """
+import json
 import math
 
 import wg_budget  # noqa: E402  (预算的唯一出口，issue #79/#83)
+from wg_paths import data_dir  # noqa: E402  (数据根的唯一出口)
 
 MAX_BUBBLES = 20
 TURN_MAX_BUBBLES = 12
 # 多条气泡之间的间隔。计划通道按 bubble_min_seconds 算（默认 1.2s 起，随上一条
 # 长度增加）；OneBot 直发这条路径不经过那套策略，用同一个下限保持手感一致。
 BUBBLE_GAP = 1.2
+# 计划通道的默认间隔区间，与 `chatlocal/mcp_chat_turns.py` 的 DEFAULTS 同一组数
+# （那边不能 flat import 到 daemon，只能各自持有；真实值以数据根的 policy 文件为准）。
+PLAN_GAP = (1.2, 4.)
 
 
 def normalize_newlines(text):
@@ -100,7 +105,32 @@ def estimate_seconds(count, gap=BUBBLE_GAP):
     return max(0, int(count) - 1) * gap
 
 
-def cost_note(count, wait=None, gap=BUBBLE_GAP):
+def plan_gap_range(policy=None):
+    """计划通道的间隔区间 `(下界, 上界)`，读数据根下的 `mcp-chat-policy.json`。
+
+    **不能 `import chatlocal`**（同 `wg_up_wake.app_plugins_line` 的理由：那是
+    app 侧，daemon 只按文件读），所以这里按同一份文件复述取值。文件缺省或字段
+    非法时回落 `PLAN_GAP`——报账只需要一个量级正确的区间，不是校验器；真正的
+    校验在 `ChatTurns.policy()`（那里非法会 `chat_policy_invalid` 拒绝发送）。
+    """
+    low, high = PLAN_GAP
+    if policy is None:
+        try:
+            raw = json.loads((data_dir() / "mcp-chat-policy.json").read_text("utf-8-sig"))
+        except (OSError, ValueError):
+            raw = None
+        policy = raw if isinstance(raw, dict) else {}
+    try:
+        low = float(policy.get("bubble_min_seconds", low))
+        high = float(policy.get("bubble_max_seconds", high))
+    except (TypeError, ValueError):
+        return PLAN_GAP
+    if not (math.isfinite(low) and math.isfinite(high)) or low < 0 or high < low:
+        return PLAN_GAP
+    return low, high
+
+
+def cost_note(count, wait=None, gap=BUBBLE_GAP, gap_max=None):
     """发送前报出预计耗时与「这条路径上还能等多久」；一条气泡时返回空串。
 
     `--wait` 的额度是「整次调用共享的总额」（issue #88），发送占掉的时间会从等唤醒
@@ -110,18 +140,56 @@ def cost_note(count, wait=None, gap=BUBBLE_GAP):
     `wait` 是调用方这一次实际要等的秒数（`--no-wait` 就是 0），缺省按预算上限算。
     不传实际值会写出一句假话：`--no-wait` 时说「还能等 85s」、`--wait 30` 时也说
     85s——输出里的假话比没有输出更坏（#88 的教训）。
+
+    `gap_max` 给出时按**区间**报（issue #136）：计划通道的真实间隔是
+    `bubble_min_seconds…bubble_max_seconds`（默认 1.2–4s，随上一条长度增加），
+    只报 `BUBBLE_GAP` 会把预算占用说小。区间形态下句子用「至少 Xs（最坏 Ys）」，
+    剩余额度按**最坏**扣——报账宁可保守。
     """
     count = int(count)
     if count < 2:
         return ""
-    seconds = estimate_seconds(count, gap)
     wait = wg_budget.WAIT_BUDGET if wait is None else max(0, int(wait))
     wait = min(wait, wg_budget.WAIT_BUDGET)
+    low = estimate_seconds(count, gap)
+    if gap_max is None:
+        span = f"间隔 {gap:g}s × {count - 1} ≈ {low:.1f}s"
+        spend = low
+    else:
+        high = estimate_seconds(count, gap_max)
+        span = f"间隔 {gap:g}–{gap_max:g}s × {count - 1} 至少 {low:.1f}s（最坏 {high:.1f}s）"
+        spend = high
     if not wait:
         tail = "本次不续挂监听 --no-wait，不占等待预算"
     else:
-        tail = f"本次最多等 {wait}s，发送后还能等 {max(0, wait - int(math.ceil(seconds)))}s"
-    return (f"  cost: {count} 条气泡，间隔 {gap}s × {count - 1} ≈ {seconds:.1f}s（{tail}）")
+        tail = f"本次最多等 {wait}s，发送后还能等 {max(0, wait - int(math.ceil(spend)))}s"
+    return f"  cost: {count} 条气泡，{span}（{tail}）"
+
+
+def cost_note_for(count, wait=None, plan_path=False, policy=None):
+    """按发送路径选间隔形态（issue #136）。
+
+    计划通道的真实间隔是 policy 的 `bubble_min…max` 区间，只报 `BUBBLE_GAP` 会把
+    预算占用说小；OneBot 直发不经过那套策略，用固定节奏就是实话。两条路径分开报，
+    才不会让「cost」在一条路上是账、在另一条路上是猜。
+
+    `policy` 只为门禁可注入：运行时一律读数据根下的 policy 文件。
+    """
+    low, high = plan_gap_range(policy) if plan_path else (BUBBLE_GAP, None)
+    return cost_note(count, wait, gap=low, gap_max=high)
+
+
+def report_cost(count, wait=None, plan_path=False, policy=None):
+    """把 cost 行打到 stdout；没有可报的（单条气泡）就一声不响，返回该行文本。
+
+    报账必须落在**实际走的那条路**里——分支判定之前还不知道走哪条，报出来的间隔
+    有一半是猜的（issue #136）。这条判据连同 `print` 收在这里，`reply.py` 的两个
+    发送分支各一行，不必各自复述一遍「有没有话要说」。
+    """
+    note = cost_note_for(count, wait, plan_path, policy)
+    if note:
+        print(note)
+    return note
 
 
 def plan_overflow_message(count):

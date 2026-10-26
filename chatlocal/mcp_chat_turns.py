@@ -38,6 +38,19 @@ class TurnRejected(ValueError):
         self.code, self.details = code, details
 
 
+def check_bubble_count(bubbles):
+    """一次提交的条数边界：`submit()` 与门禁共用的唯一出口（issue #136）。
+
+    过去这条校验是 `submit()` 里的一行内联判断，门禁只能靠源码子串证明「这里写着
+    这个常量」——同形坏实现（常量改了、校验另写一个数）照样能混过。抽成函数后
+    `scripts/check_bubble_cap.py` 直接拿 13/12 条问它，断言的是行为而不是写法。
+
+    通过时返回 None，不通过抛 `TurnRejected`（错误码与文案与抽出前完全一致）。
+    """
+    if not isinstance(bubbles, list) or not 1 <= len(bubbles) <= TURN_MAX_BUBBLES:
+        raise TurnRejected('invalid_bubbles', f'一次提交 1–{TURN_MAX_BUBBLES} 个语义气泡。')
+
+
 def schema(tool):
     sid=session_id(SESSION_ID_DESCRIPTION)
     key=idempotency_key(TURN_KEY_DESCRIPTION)
@@ -447,8 +460,7 @@ class ChatTurns:
                 if p['queue_signature']!=signature:raise TurnRejected('idempotency_conflict','该计划已经提交了另一组表达，不能替换或重发。')
                 return self.public(p)
             if p['state']!='READY':raise TurnRejected('plan_not_ready','该计划不可发送，请读取结果或补读重规划。')
-            if not isinstance(bubbles,list) or not 1<=len(bubbles)<=TURN_MAX_BUBBLES:
-                raise TurnRejected('invalid_bubbles',f'一次提交 1–{TURN_MAX_BUBBLES} 个语义气泡。')
+            check_bubble_count(bubbles)
             for i,b in enumerate(bubbles):
                 kind=b['kind'];allowed={'text':{'kind','text','quote','mention_user_ids'},'sticker':{'kind','sticker_id'},'reaction':{'kind','event_id','reaction_id','operation'},
                     'voice':{'kind','asset_id'},'video':{'kind','asset_id'},'file':{'kind','asset_id','folder_id'},

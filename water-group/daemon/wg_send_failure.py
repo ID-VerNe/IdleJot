@@ -114,12 +114,25 @@ def _post(action, payload, timeout=10):
     return body.get("data") or {}
 
 
+def _all_shut(post, group_id):
+    """`get_group_info().group_all_shut`：True / False / None（查不到就是 None）。
+
+    全员禁言与个人禁言是两个信号，**不能只看自己那一个字段**：NapCat 在全员禁言时
+    不一定给成员写 `shut_up_timestamp`，只看它会将「全群都发不出去」报成「与禁言
+    无关」（独立复核抓到的假事实）。
+    """
+    try:
+        return bool(post("get_group_info", {"group_id": int(group_id)}).get("group_all_shut"))
+    except Exception:  # noqa: BLE001  查不到就返回 None，不冒充 False
+        return None
+
+
 def diagnose(group_id, failure, post=None, now=None):
     """失败之后的禁言诊断：(剩余秒数 or None, 待打印行)。
 
-    只在失败路径上跑，成功路径零额外延迟。三档结论互不冒充：禁言（求出解禁
-    时刻）、未禁言（探测成功且 `shut_up_timestamp` 已过）、状态未知（探测本身
-    失败）——第三档说「未知」，不说「未禁言」。
+    只在失败路径上跑，成功路径零额外延迟。四档结论互不冒充：单人/全员禁言（求出
+    解禁时刻，全员禁言时解禁时刻可能取不到）、未禁言（成员与群两个探测都成功）、
+    状态未知（探测本身失败）——第三、四档不说「未禁言」。
     """
     post = post or _post
     moment = time.time() if now is None else float(now)
@@ -137,16 +150,18 @@ def diagnose(group_id, failure, post=None, now=None):
         until = int(member.get("shut_up_timestamp") or 0)
     except (TypeError, ValueError):
         until = 0
-    if until <= moment:
-        return None, [f"  未检出禁言（shut_up_timestamp={until}）：失败来自 OneBot 的其它原因，见上一行原文"]
-    seconds = wg_clock.seconds_left(until, moment)
+    seconds = wg_clock.seconds_left(until, moment) if until > moment else None
+    scope = _all_shut(post, group_id)
+    if seconds is None:
+        if scope is True:
+            return None, ["  全员禁言：整个群都发不出去"
+                          f"（本机 shut_up_timestamp={until}，解禁时刻以管理员解禁为准）"]
+        if scope is False:
+            return None, [f"  未检出禁言（shut_up_timestamp={until}，group_all_shut=False）："
+                          "失败来自 OneBot 的其它原因，见上一行原文"]
+        return None, [f"  禁言状态未知：群信息查询失败，本机 shut_up_timestamp={until}"]
     lines = [f"  机器人被禁言至 {wg_clock.clock(until)}（还剩 {seconds} 秒），"
              f"期间任何通道都发不出去"]
-    scope = None
-    try:
-        scope = bool(post("get_group_info", {"group_id": int(group_id)}).get("group_all_shut"))
-    except Exception:  # noqa: BLE001  只少一句「全员 / 单人」，不影响解禁时刻
-        scope = None
     if scope is True:
         lines.append("  全员禁言：整个群都发不出去，等解禁即可")
     elif scope is False:
@@ -156,28 +171,38 @@ def diagnose(group_id, failure, post=None, now=None):
     return seconds, lines
 
 
-def wait_plan(mute, budget=None):
+def wait_plan(mute, budget=None, elapsed=0.0):
     """解禁要等多久、这次调用等不等得起：(等待秒数 or None, 待打印行)。
 
     「等不起」不是失败，是边界事实：宿主在 `AGENT_TOOL_TIMEOUT` 处砍进程树，
-    硬睡到解禁等于把「发不出去」变成「进程静默消失」（#79）。
+    硬睡到解禁等于把「发不出去」变成「进程静默消失」（#79）。`elapsed` 是这次调用
+    已经用掉的秒数（诊断与发送本身就吃掉一部分）——额度是**整次调用共享的总额**，
+    所以走 `wg_budget.clamp_wait()` 而不是自己减预算（#88）。
     """
     budget = wg_budget.WAIT_BUDGET if budget is None else int(budget)
     need = int(mute) + UNMUTE_MARGIN
-    if need > budget:
-        return None, [f"  需等 {need} 秒才解禁，超出单次调用等待预算 {budget}s："
+    allowance = wg_budget.clamp_wait(need, elapsed)
+    if allowance < need:
+        return None, [f"  需等 {need} 秒才解禁，超出单次调用等待预算 {budget}s"
+                      f"（已用 {max(0, int(elapsed))}s，剩 {allowance}s）："
                       f"这次不硬等，请稍后重挂再发（失败已记进 {LEDGER.name}）"]
     return need, [f"  等 {need} 秒解禁后补发（--wait-unmute，等待预算 {budget}s 内）…"]
 
 
-def record(group_id, failure, mute=None, recovered=None, now=None):
-    """落盘上一次发送失败（原子写）。写不进不崩——账本不该让 reply.py 挂。"""
+def record(group_id, failure, mute=None, mute_until=None, recovered=None, now=None):
+    """落盘上一次发送失败（原子写）。写不进不崩——账本不该让 reply.py 挂。
+
+    `mute_until` 是**绝对时刻**，由调用方算一次传进来：账本如果每写一次就拿
+    「现在 + 剩余秒数」重算，睡过一轮后那个时刻会往后漂（独立复核抓到的问题）。
+    """
     moment = int(time.time() if now is None else now)
+    if mute_until is None and mute:
+        mute_until = moment + int(mute)
     entry = {"at": moment, "group_id": str(group_id or ""),
              "kind": (failure or {}).get("kind") or "",
              "retcode": (failure or {}).get("retcode"),
              "reason": describe(failure),
-             "mute_until": (moment + int(mute)) if mute else None,
+             "mute_until": int(mute_until) if mute_until else None,
              "recovered": recovered}
     try:
         LEDGER.parent.mkdir(parents=True, exist_ok=True)
@@ -266,15 +291,19 @@ def handle(sent, attempt, failure, *, group_id, bubbles, has_at, unmute=False):
         record(group_id, failure)
         return sent
     print(f"SEND_FAILED: {describe(failure)}")
+    started = time.time()
     mute, lines = diagnose(group_id, failure)
     for line in lines:
         print(line)
     if has_at:
         print("  未退回计划通道：带 @ 的消息只能走 OneBot（计划通道会降级成纯文本）")
-    record(group_id, failure, mute=mute)
+    # 解禁时刻只算一次（绝对时刻），睡完再记账也不会漂。
+    mute_until = (started + int(mute)) if mute else None
+    record(group_id, failure, mute_until=mute_until)
     if not mute or not unmute:
         return sent
-    wait, plan = wait_plan(mute)
+    # 诊断的两次探测已经吃掉几秒，额度要按**实际已用**算（#88 的总额口径）。
+    wait, plan = wait_plan(mute, elapsed=time.time() - started)
     for line in plan:
         print(line)
     if wait is None:
@@ -285,5 +314,5 @@ def handle(sent, attempt, failure, *, group_id, bubbles, has_at, unmute=False):
     print(f"  补发：{retried}/{bubbles} 条已发出")
     if retried != bubbles:
         print(f"  补发失败原因：{describe(retry_failure)}")
-    record(group_id, failure, mute=mute, recovered=retried == bubbles)
+    record(group_id, failure, mute_until=mute_until, recovered=retried == bubbles)
     return retried

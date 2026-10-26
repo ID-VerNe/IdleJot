@@ -63,7 +63,8 @@ PARAM_MESSAGE = "参数错误：group_id 无效"
 TEXT = "第一句\\n第二句"
 
 # 夹具状态：每个用例自己写，Handler 只读。
-FIX = {"sends": [], "replies": [], "member": {}, "group": {}, "member_fails": False}
+FIX = {"sends": [], "replies": [], "member": {}, "group": {},
+       "member_fails": False, "group_fails": False}
 
 
 def _ok_send():
@@ -88,7 +89,10 @@ class Handler(FixtureHandler):
             else:
                 self.send_json({"status": "ok", "retcode": 0, "data": FIX["member"]})
         elif action == "get_group_info":
-            self.send_json({"status": "ok", "retcode": 0, "data": FIX["group"]})
+            if FIX["group_fails"]:
+                self.send_json({"status": "failed", "retcode": 1200, "message": "查询失败"})
+            else:
+                self.send_json({"status": "ok", "retcode": 0, "data": FIX["group"]})
         elif action == "get_group_member_list":
             self.send_json({"status": "ok", "retcode": 0, "data": [
                 {"user_id": int(SELF), "card": "机器人", "nickname": "bot"},
@@ -145,12 +149,13 @@ def _run(argv):
     return code, buf.getvalue()
 
 
-def _reset(now, shut_up=None, all_shut=False, member_fails=False):
+def _reset(now, shut_up=None, all_shut=False, member_fails=False, group_fails=False):
     _write_state()
     wg_send_failure.clear()
     FIX["sends"].clear()
     FIX["replies"].clear()
     FIX["member_fails"] = member_fails
+    FIX["group_fails"] = group_fails
     FIX["member"] = {"user_id": int(SELF), "card": "机器人", "nickname": "bot",
                      "role": "member", "shut_up_timestamp": shut_up or 0}
     FIX["group"] = {"group_id": int(GROUP), "group_all_shut": all_shut}
@@ -164,6 +169,14 @@ def case(fn):
     return fn
 
 
+def _has(out, *needles):
+    """逐条检查子串，缺哪条就打印哪条——只报 True/False 的断言在 CI 上没法看。"""
+    missing = [needle for needle in needles if needle not in out]
+    if missing:
+        print(f"    缺：{missing}")
+    return not missing
+
+
 @case
 def 禁言档_带原文与解禁时刻():
     now = time.time()
@@ -171,15 +184,18 @@ def 禁言档_带原文与解禁时刻():
     _reset(now, shut_up=until)
     FIX["replies"].append(_mute_send())
     code, out = _run(["1", TEXT, "--at", "群友A", "--no-wait"])
-    reason = out.index("SEND_FAILED: OneBot retcode=200 message=EventChecker Failed")
-    separate = out.index("未退回计划通道：带 @ 的消息只能走 OneBot")
-    return (code == 1
-            and 'EventRet: {"result": 120}' in out
-            and f"机器人被禁言至 {wg_clock.clock(until)}" in out
-            and any(f"还剩 {n} 秒" in out for n in (298, 299, 300))
-            and "单人禁言" in out
-            and reason < separate        # 先原因，后「为什么不降级」
-            and "需等 30" not in out)     # 没传 --wait-unmute 就别说等着补发
+    reason_text = "SEND_FAILED: OneBot retcode=200 message=EventChecker Failed"
+    separate_text = "未退回计划通道：带 @ 的消息只能走 OneBot"
+    ok = (code == 1
+          and _has(out, reason_text, 'EventRet: {"result": 120}',
+                   f"机器人被禁言至 {wg_clock.clock(until)}", "单人禁言", separate_text)
+          and any(f"还剩 {n} 秒" in out for n in (298, 299, 300))
+          and "需等 30" not in out)   # 没传 --wait-unmute 就别说等着补发
+    if ok:
+        ok = out.index(reason_text) < out.index(separate_text)   # 先原因，后「不降级」
+        if not ok:
+            print("    顺序错：原因行不在「未退回计划通道」之前")
+    return ok
 
 
 @case
@@ -218,7 +234,29 @@ def 未禁言档_不编解禁时刻():
     _reset(time.time(), shut_up=0)
     FIX["replies"].append(_mute_send())
     code, out = _run(["1", TEXT, "--at", "群友A", "--no-wait"])
-    return code == 1 and "未检出禁言（shut_up_timestamp=0）" in out and "禁言至" not in out
+    return (code == 1
+            and "未检出禁言（shut_up_timestamp=0，group_all_shut=False）" in out
+            and "禁言至" not in out)
+
+
+@case
+def 全员禁言_个体时间戳为0也不算没禁言():
+    """NapCat 在全员禁言时可能不给成员写 shut_up_timestamp（独立复核抓到的假事实）。"""
+    _reset(time.time(), shut_up=0, all_shut=True)
+    FIX["replies"].append(_mute_send())
+    code, out = _run(["1", TEXT, "--at", "群友A", "--no-wait"])
+    return (code == 1 and "全员禁言：整个群都发不出去" in out
+            and "未检出禁言" not in out and "禁言状态未知" not in out)
+
+
+@case
+def 群信息查不到_说未知不说未禁言():
+    """成员未禁言 + 群信息查询失败：只能说「状态未知」，不许判「与禁言无关」。"""
+    _reset(time.time(), shut_up=0, group_fails=True)
+    FIX["replies"].append(_mute_send())
+    code, out = _run(["1", TEXT, "--at", "群友A", "--no-wait"])
+    return (code == 1 and "禁言状态未知：群信息查询失败" in out
+            and "未检出禁言" not in out)
 
 
 @case
@@ -273,7 +311,8 @@ def 补发_超预算不硬等():
 @case
 def 补发_预算内睡到解禁并发出():
     now = time.time()
-    _reset(now, shut_up=int(now) + 20)
+    shut_up = int(now) + 20
+    _reset(now, shut_up=shut_up)
     FIX["replies"].extend([_mute_send(), _ok_send(), _ok_send()])
     sleeps = []
     real = wg_send_failure.SLEEP
@@ -289,7 +328,10 @@ def 补发_预算内睡到解禁并发出():
             and "补发：2/2 条已发出" in out and "SENT" in out
             # 账本记的是原始原因，不是补发那一轮的空 dict
             and ledger.get("recovered") is True
-            and (ledger.get("reason") or "").startswith("OneBot retcode=200"))
+            and (ledger.get("reason") or "").startswith("OneBot retcode=200")
+            # 解禁时刻是绝对时刻：睡完再记账也不许往后漂（复核提的第二处）
+            and ledger.get("mute_until") is not None
+            and abs(int(ledger["mute_until"]) - shut_up) <= 2)
 
 
 @case

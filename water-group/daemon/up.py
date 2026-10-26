@@ -43,6 +43,7 @@ HERE = Path(__file__).resolve().parent
 import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收口)
 import wg_budget  # noqa: E402  (等待预算：重挂提示不推荐撑不住的取值，issue #83)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
+import wg_gap  # noqa: E402  (停机窗口缺口账本：漏了什么事后说得出来，issue #114)
 import wg_images  # noqa: E402  (图片标记渲染，与 reply/look 同一份实现)
 import wg_listener_state  # noqa: E402  (监听存亡账本：「无人值守」的可读事实，issue #112)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
@@ -76,6 +77,7 @@ from wg_up_wake import (  # noqa: E402,F401  (分节 PC：配置/账号/唤醒�
     DEFAULT_PENDING_REPLY_TTL,
     FORWARD_WAKE_CHARS,
     FORWARD_WAKE_NODES,
+    HISTORY_COUNT,
     _forward_at,
     _forward_word,
     app_plugins_line,
@@ -83,6 +85,7 @@ from wg_up_wake import (  # noqa: E402,F401  (分节 PC：配置/账号/唤醒�
     config,
     config_problems,
     events,
+    group_msg_history,
     heartbeat_age,
     heartbeat_time,
     is_command,
@@ -227,6 +230,15 @@ def report(exclude_pids=None, resident_pid=None):
     print(f"后端      : {backend}  (47860 / 48777)")
     print(f"守护      : {guard}  心跳 {beat}")
     print(f"监听      : {listener}")
+    # issue #114：监听在不在与「这段时间消息有没有漏收」是两件事。后端停机跨过
+    # 一段时间再拉起，窗口内的群消息不进任何本地存储，只读入口（--status / --list /
+    # listen NO_WORK）此前一律报「一切正常」。「缺口」行读 `state/wg_gap.json`——
+    # `collector` 启动时算一次「本地 chat_inbox 最后一条 → 拉起时刻」与
+    # `get_group_msg_history` 的差。无记录或缺口为空时不加字（排除型对照，与 #112
+    # 监听行同口径）——只读 `wg_gap.json`，不联网、不写，保住 --status「只看不动」。
+    gap = wg_gap.describe()
+    if gap:
+        print(f"缺口      : {gap}")
     print(f"#指令     : {command}")
     try:
         import commands as wg_commands  # noqa: PLC0415  只读：拿插件状态与设置

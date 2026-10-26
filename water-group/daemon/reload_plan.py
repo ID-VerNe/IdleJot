@@ -90,6 +90,10 @@ NO_RESTART = {
     "water-group/daemon/wg_text.py": "shared body renderer for guard/CLI, no daemon imports it",
     "water-group/daemon/wg_aliases.py": "shared alias renderer for CLI (watch/reply), no daemon imports it",
     "water-group/daemon/wg_budget.py": "shared wait-budget constants for CLI (reply/listen), no daemon imports it",
+    "water-group/daemon/wg_bubbles.py": "shared bubble-cap/split helper for CLI (reply), no daemon imports it",
+    # issue #132：发送失败的诊断 / 禁言探测 / 失败账本，只被 reply.py（一次性 CLI）
+    # import；守护进程里没有副本，改了下次调用自然生效。
+    "water-group/daemon/wg_send_failure.py": "shared send-failure diagnostics for CLI (reply), no daemon imports it",
     "water-group/daemon/listen.py": "one-shot CLI",
     "water-group/daemon/look.py": "one-shot CLI",
     "water-group/daemon/reply.py": "one-shot CLI",

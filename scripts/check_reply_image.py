@@ -5,7 +5,7 @@
 解释「我发不了图」——多模态群聊退化成纯文本。更坏的是绕路：Agent 若自己
 `requests.post('/send_group_msg')` 手搓，会同时绕过 `record()` 记账与追问窗口。
 
-本门禁钉十三件事：
+本门禁钉十四件事：
 
   1. `--image <png>` + 文字 → 两次 `send_group_msg`：`[reply, text]` 与 `[image]`，
      且 image 段解出的字节与原文件逐字节相等（base64 段是 NapCat 实机验证过的形状，
@@ -20,11 +20,13 @@
   7. 帧数超过 `MAX_FRAMES`（301 帧的 16×16 GIF 只有 18 KiB）→ 拒；
   8. 好图 + 坏图混着给 → **一张都不发**（不是「先发好的再报错」）；
   9. 一次超过 `MAX_IMAGES` 张 → 拒，不发（气泡间隔会吃满宿主工具超时）；
-  10. OneBot 不可用时 **不回退计划通道**：`SEND_FAILED`、零请求、不记账、不出现
+  10. **图也算气泡**：正文 3 行 + 图 2 张、`--max-bubbles 4` → 拒（`IMAGE_FAILED`、
+      零请求）。图不是附赠品，它和正文一起占气泡额度（issue #128 × #131）；
+  11. OneBot 不可用时 **不回退计划通道**：`SEND_FAILED`、零请求、不记账、不出现
      回退行——回退过去图片会被静默吞掉（`send()` 的气泡写死 `kind:"text"`）；
-  11. 读到的字节数与 `stat` 不符（下载器还在写）时不发半张图；
-  12. 发图成功后 `wg_replied.jsonl` 有该 event 的记账行——防「图发了但还显示 [待回]」；
-  13. `reply.py --help` 里有 `--image`（issue 第二条复现命令不再 `exit=1`）。
+  12. 读到的字节数与 `stat` 不符（下载器还在写）时不发半张图；
+  13. 发图成功后 `wg_replied.jsonl` 有该 event 的记账行——防「图发了但还显示 [待回]」；
+  14. `reply.py --help` 里有 `--image`（issue 第二条复现命令不再 `exit=1`）。
 
 真跑 `reply.py` 子进程 + loopback OneBot 假服务器 + 隔离数据根，不发任何真实消息：
 
@@ -321,6 +323,23 @@ def 一次超过九张就拒():
     proc = run("11", "太多", *paths, "--no-wait", "--no-followup")
     ok = (proc.returncode == 1 and CALLS == []
           and "IMAGE_FAILED" in proc.stdout and "一次最多发" in proc.stdout)
+    return ok or proc.stdout + proc.stderr
+
+
+@case
+def 图也算气泡额度():
+    """图不是附赠品：正文 3 行 + 2 张图 = 5 条气泡，`--max-bubbles 4` 时该拒。
+
+    `--max-bubbles` 说的是「这次发几条气泡」（issue #131），图也是气泡。超了必须
+    在发之前拒——不是把图悄悄截掉，也不是只打一行 WARN：气泡之间的 1.2s 间隔会
+    吃掉发送预算，而预算被宿主超时砍掉时这条路径一个字都不打印。
+    """
+    CALLS.clear()
+    proc = run("15", "第一行\n第二行\n第三行",
+               "--image", str(HOME / "a.png"), "--image", str(HOME / "b.png"),
+               "--max-bubbles", "4", "--no-wait", "--no-followup")
+    ok = (proc.returncode == 1 and CALLS == []
+          and "IMAGE_FAILED" in proc.stdout and "气泡上限" in proc.stdout)
     return ok or proc.stdout + proc.stderr
 
 

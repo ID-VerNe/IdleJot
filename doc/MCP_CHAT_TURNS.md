@@ -9,7 +9,7 @@
 3. 停止原群聊会话，用新开始编号 `start_chat_session(persona_preset="little_whale_v2", ...)`。返回的 `session.persona_preset` 和 `chat_prompt.persona` 应为新卡；重复使用旧开始编号仍返回旧快照，不能用它切人格。
 4. `get_chat_session` / `wait_chat_messages` 返回 `input_batch`，包含批次 ID、水位、收集原因及同人短连发的 ID 分组。单条时间、来源和消息 ID 不丢失。
 5. Planner 调用 `plan_chat_reply`，传批次、`wait / silence / reply`、简短沟通意图；参与时选目标、相关话题消息及表达类型。除了 `text / sticker / reaction`，独立授权后还可用 `voice / video / file / ai_voice / qq_action`，具体字段与示例以连接的 `tools/list` 为准。可附少量主题词。这里只记决定，不发送推理或规划文本。
-6. `READY` 后遵循 `next_call`：同一轮选择表达并组织内容，调用 `send_chat_reply` 一次提交 `expression_ids` 和 1–3 个完整语义气泡。有候选时选 0–5 条参考，或用 `expression_ids=[]` 明确不用；漏选返回 `expression_selection_required`，不会派发。没有候选、学习关闭和纯媒体计划自动跳过选择。程序先检查，再依次发送，后续气泡有间隔。一个长解释可以仍是一条；不按标点切句。`select_chat_expressions` 保留为旧宿主兼容入口，正常流程不再单独调用。
+6. `READY` 后遵循 `next_call`：同一轮选择表达并组织内容，调用 `send_chat_reply` 一次提交 `expression_ids` 和 1–12 个完整语义气泡。有候选时选 0–5 条参考，或用 `expression_ids=[]` 明确不用；漏选返回 `expression_selection_required`，不会派发。没有候选、学习关闭和纯媒体计划自动跳过选择。程序先检查，再依次发送，后续气泡有间隔。一个长解释可以仍是一条；不按标点切句。`select_chat_expressions` 保留为旧宿主兼容入口，正常流程不再单独调用。
 7. 看回执，确认已处理消息水位后继续等待。沉默、只用图或小回应同样是完整参与；程序不补发说明文字。
 
 ```json

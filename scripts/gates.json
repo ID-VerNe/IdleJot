@@ -71,16 +71,19 @@
     {"name": "check_followup.py", "shard": "reply", "why": "追问窗口：回复之后还能听见群里说什么"},
     {"name": "check_pending_reply.py", "shard": "reply", "why": "待回时效：超时唤醒不再算待回"},
     {"name": "check_reply_context.py", "shard": "reply", "why": "reply.py --context 回之前看得到群聊上下文"},
+    {"name": "check_bubble_cap.py", "shard": "reply", "why": "单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131）"},
     {"name": "check_reply_quote.py", "shard": "reply", "why": "OneBot mention 与引用预检"},
+    {"name": "check_reply_send_failure.py", "shard": "reply", "why": "发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）"},
     {"name": "check_quote_visibility.py", "shard": "reply", "why": "引用原文必须到达 Agent，缺了也要说清原因（#94）"},
     {"name": "check_image_visibility.py", "shard": "reply", "why": "唤醒行图片标记可执行，不许出现裸 [图片]（#35）"},
-    {"name": "check_reply_image.py", "shard": "reply", "why": "回复能发本地图片：--image 出 base64 图段、整张解码才放行、半截图/超大像素/超帧数零请求、不回退计划通道、发图也记账（#128）"},
+    {"name": "check_reply_image.py", "shard": "reply", "why": "回复能发本地图片：--image 出 base64 图段、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度、不回退计划通道、发图也记账（#128）"},
     {"name": "check_alias_visibility.py", "shard": "reply", "why": "正文外号必须能指到人，认不出也不许编（#30）"},
     {"name": "check_at_segment_name.py", "shard": "reply", "why": "at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52）"},
     {"name": "check_reply_timing.py", "shard": "reply", "why": "回复时序、密钥排除、轮换与失败透明"},
     {"name": "check_now_clock.py", "shard": "reply", "why": "值守工具链必须带当前时刻（#95）"},
     {"name": "check_miyoushe.py", "shard": "reply", "why": "米游社取数 handler：DS 签名、URL 参数、缓存、错误码"},
-    {"name": "check_sixty.py", "shard": "reply", "why": "60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53）"}
+    {"name": "check_sixty.py", "shard": "reply", "why": "60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53）"},
+    {"name": "check_busboss.py", "shard": "reply", "why": "车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103）"}
   ],
   "manual": [
     {"name": "check_console_window.py", "why": "需要真实桌面会话；--self-test 会故意闪两次黑框做 A/B 对照"},

@@ -415,7 +415,7 @@ def image_segment(raw):
             "data": {"file": "base64://" + base64.b64encode(raw).decode("ascii")}}
 
 
-def attach_images(bubble_segments, paths):
+def attach_images(bubble_segments, paths, cap=None):
     """把本地图片挂成额外的气泡，返回新的气泡列表。
 
     先校验**全部**路径再动手：一条坏路径不该让前面几张图发出去、后面几张不发，
@@ -428,6 +428,10 @@ def attach_images(bubble_segments, paths):
 
     张数上限 ``MAX_IMAGES``：气泡之间要睡 ``BUBBLE_GAP``，图越多越接近宿主的工具
     超时，而超时被砍时这条路径上一个字都不打印。
+
+    ``cap`` 是「这次一共几条气泡」的上限（调用方传 ``reply --max-bubbles`` 的实际
+    取值）：图也是气泡，正文 20 行 + 9 张图 = 29 条 = 33.6s 间隔，已经越过
+    ``wg_budget.SEND_BUDGET=30``。所以超了要在发之前拒——不是把图悄悄截掉。
     """
     if not paths:
         return bubble_segments
@@ -442,7 +446,11 @@ def attach_images(bubble_segments, paths):
             problems.append(str(exc))
     if problems:
         raise ImageError("；".join(problems))
+    kept = [segs for segs in bubble_segments if segs]
+    if cap is not None and len(kept) + len(raws) > int(cap):
+        raise ImageError(f"正文 {len(kept)} 条气泡 + {len(raws)} 张图 = "
+                         f"{len(kept) + len(raws)} 条，超过这次的气泡上限 {int(cap)} 条"
+                         "（气泡间隔 1.2s 会吃掉发送预算）；减少正文行数或图再发")
     for raw, name in raws:
         print(f"  image: {name} {len(raw)} 字节")
-    kept = [segs for segs in bubble_segments if segs]
     return kept + [[image_segment(raw)] for raw, _ in raws]

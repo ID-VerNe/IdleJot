@@ -31,8 +31,9 @@ Usage:
 写不出真换行，用字面量 \n 也行（反斜杠加 n）；\\n 转义成字面 \n 留在正文里。
 
 --image 把本地图片发进群（可重复），每张独占一条气泡排在文字之后（issue #128）。
-图片按文件头校验 PNG/JPEG/GIF/WebP 且不超过 6 MiB，任何一张不合格就一张都不发。
-发图强制走 OneBot 直发——计划通道只会发文字，回退过去等于悄悄吞掉图片。
+图片按内容校验（Pillow 解得开、格式是 PNG/JPEG/GIF/WebP）且不超过 6 MiB、一次最多
+9 张，任何一张不合格就一张都不发。发图强制走 OneBot 直发——计划通道只会发文字，
+回退过去等于悄悄吞掉图片。
 """
 import argparse
 import json
@@ -826,8 +827,8 @@ def main():
     parser.add_argument("target", nargs="?", help="要回复的消息 id（必填，偷懒省略会直接报错）")
     parser.add_argument("text", nargs="?", help="回复正文；@ {花名} 会变成真正的 @；换行或字面量 \\n 拆成多条气泡（最多 3 条）；只发图时可省略")
     parser.add_argument("--image", action="append", default=[], metavar="路径",
-                        help="把本地图片发进群，可重复；按文件头校验 PNG/JPEG/GIF/WebP 且 ≤6 MiB，"
-                             "每张独占一条气泡排在文字之后")
+                        help="把本地图片发进群，可重复；按内容校验 PNG/JPEG/GIF/WebP 且 ≤6 MiB，"
+                             "一次最多 9 张，每张独占一条气泡排在文字之后")
     parser.add_argument("--intent", default="回复群友", help="简短沟通意图")
     parser.add_argument("--no-quote", action="store_true", help="不带引用")
     parser.add_argument("--at", action="append", default=[], metavar="花名",

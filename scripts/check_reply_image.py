@@ -5,21 +5,22 @@
 解释「我发不了图」——多模态群聊退化成纯文本。更坏的是绕路：Agent 若自己
 `requests.post('/send_group_msg')` 手搓，会同时绕过 `record()` 记账与追问窗口。
 
-本门禁钉九件事：
+本门禁钉十件事：
 
   1. `--image <png>` + 文字 → 两次 `send_group_msg`：`[reply, text]` 与 `[image]`，
      且 image 段解出的字节与原文件逐字节相等（base64 段是 NapCat 实机验证过的形状，
      见 `doc/SLASH_COMMANDS.md:323`）；
   2. 纯图（无 text）→ 一次 `send_group_msg`：`[reply, image]`，**没有空文字段**；
   3. 两张图按参数顺序排在文字之后；
-  4. 超 6 MiB / 内容不是图片（哪怕叫 `.png`）/ 只有 4 字节魔数 / 路径不存在 →
-     `exit=1`、**零请求**、输出点名原因；
+  4. 超 6 MiB / 内容不是图片（哪怕叫 `.png`）/ 只有 4 字节魔数 / 魔数齐全但结构坏 /
+     路径不存在 → `exit=1`、**零请求**、输出点名原因；
   5. 好图 + 坏图混着给 → **一张都不发**（不是「先发好的再报错」）；
-  6. OneBot 不可用时 **不回退计划通道**：`SEND_FAILED`、零请求、不记账——回退过去
-     图片会被静默吞掉（`send()` 的气泡写死 `kind:"text"`）；
-  7. 读到的字节数与 `stat` 不符（下载器还在写）时不发半张图；
-  8. 发图成功后 `wg_replied.jsonl` 有该 event 的记账行——防「图发了但还显示 [待回]」；
-  9. `reply.py --help` 里有 `--image`（issue 第二条复现命令不再 `exit=1`）。
+  6. 一次超过 `MAX_IMAGES` 张 → 拒，不发（气泡间隔会吃满宿主工具超时）；
+  7. OneBot 不可用时 **不回退计划通道**：`SEND_FAILED`、零请求、不记账、不出现
+     回退行——回退过去图片会被静默吞掉（`send()` 的气泡写死 `kind:"text"`）；
+  8. 读到的字节数与 `stat` 不符（下载器还在写）时不发半张图；
+  9. 发图成功后 `wg_replied.jsonl` 有该 event 的记账行——防「图发了但还显示 [待回]」；
+  10. `reply.py --help` 里有 `--image`（issue 第二条复现命令不再 `exit=1`）。
 
 真跑 `reply.py` 子进程 + loopback OneBot 假服务器 + 隔离数据根，不发任何真实消息：
 
@@ -44,12 +45,15 @@ from fixture_server import FixtureHandler, fixture_server  # noqa: E402
 REPLY = ROOT / "water-group" / "daemon" / "reply.py"
 MAX_BYTES = 6 * 1024 * 1024
 
-# 1x1 透明 PNG：真图片头，用来钉「按魔数判、不按扩展名」。
+# 1x1 透明 PNG 两张：等长、内容不同、Pillow 能 verify 通过（真能解码）。
+# 用「能解码」的图而不是随手编的 PNG 头，因为校验已经改成 Image.open + verify——
+# 编出来的假 PNG 会红在门禁自己身上。
 PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4z8DwHwAFAAIB"
-    "4rHkxQAAAABJRU5ErkJggg==")
-# 同长度的第二张，内容不同，用来钉顺序。
-PNG2 = PNG[:-12] + b"trailingtag!"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ"
+    "/pLvAAAAAElFTkSuQmCC")
+PNG2 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYPgPAAEDAQAI"
+    "icLsAAAAAElFTkSuQmCC")
 
 HOME = Path(tempfile.mkdtemp(prefix="wg_reply_image_"))
 STATE = HOME / "state"
@@ -200,12 +204,12 @@ def 超上限一张都不发():
 
 
 @case
-def 内容不是图片按魔数拒():
-    """扩展名是 `.png`，内容是文本——按文件头判，不按扩展名。"""
+def 内容不是图片按内容拒():
+    """扩展名是 `.png`，内容是文本——按内容判，不按扩展名。"""
     CALLS.clear()
     proc = run("5", "假图", "--image", str(HOME / "fake.png"), "--no-wait", "--no-followup")
     ok = (proc.returncode == 1 and CALLS == []
-          and "IMAGE_FAILED" in proc.stdout and "不是 PNG/JPEG/GIF/WebP" in proc.stdout)
+          and "IMAGE_FAILED" in proc.stdout and "不是能解码的" in proc.stdout)
     return ok or proc.stdout + proc.stderr
 
 
@@ -231,12 +235,43 @@ def 好坏混着给也是零请求():
 
 @case
 def 只有魔数的假图也拒():
-    """4 个字节的 `\\x89PNG` 能过 `ext_for`，但在群里就是一张裂图。"""
+    """4 个字节的 `\\x89PNG` 能过魔数检查，但在群里就是一张裂图。
+
+    这条钉的是「魔数不是判据」：`ext_for` 只看前 4 字节，改回它这条就红。
+    """
     CALLS.clear()
     proc = run("8", "四个字节", "--image", str(HOME / "magic4.png"),
                "--no-wait", "--no-followup")
     ok = (proc.returncode == 1 and CALLS == []
-          and "IMAGE_FAILED" in proc.stdout and "不像图片" in proc.stdout)
+          and "IMAGE_FAILED" in proc.stdout and "不是能解码的" in proc.stdout)
+    return ok or proc.stdout + proc.stderr
+
+
+@case
+def 魔数对但结构坏也拒():
+    """PNG 签名齐全、后面全是零：魔数认得出，Pillow 解不出——必须拒。
+
+    这是 `Image.open()` 取代 `ext_for` 的直接理由：16 字节的假 PNG 头在
+    `ext_for` 那里是「合法 PNG」，发出去就是裂图。
+    """
+    CALLS.clear()
+    proc = run("10", "坏结构", "--image", str(HOME / "broken.png"),
+               "--no-wait", "--no-followup")
+    ok = (proc.returncode == 1 and CALLS == []
+          and "IMAGE_FAILED" in proc.stdout and "不是能解码的" in proc.stdout)
+    return ok or proc.stdout + proc.stderr
+
+
+@case
+def 一次超过九张就拒():
+    """气泡之间有 1.2s 间隔，张数不封顶会吃满宿主 120s 超时——被砍时一个字都不打印。"""
+    CALLS.clear()
+    paths = []
+    for index in range(10):
+        paths += ["--image", str(HOME / "a.png")]
+    proc = run("11", "太多", *paths, "--no-wait", "--no-followup")
+    ok = (proc.returncode == 1 and CALLS == []
+          and "IMAGE_FAILED" in proc.stdout and "一次最多发" in proc.stdout)
     return ok or proc.stdout + proc.stderr
 
 
@@ -244,8 +279,10 @@ def 只有魔数的假图也拒():
 def OneBot不可用时不回退计划通道():
     """计划通道的气泡写死 kind=text，回退过去图片就没了——那是「悄悄吞图」。
 
-    实现现在是对的，但没有断言钉住：谁把回退分支加回去，上面九条用例全绿。
-    所以这里把 OneBot 指到一个没人听的端口，要求「零请求 + SEND_FAILED + 不记账」。
+    把 OneBot 指到一个没人听的端口，要求「零请求 + SEND_FAILED + 不记账 + 不出现
+    回退行」。最后那条不能省：只断言文案与退出码的话，把 `return 1` 改成 `pass`、
+    让它继续往下走计划通道的变异仍能全绿（夹具没有可用批次，落下去也只是打印
+    「没有可用批次」然后返回 1）。
     """
     CALLS.clear()
     write_config("http://127.0.0.1:1")
@@ -256,6 +293,7 @@ def OneBot不可用时不回退计划通道():
         write_config(LIVE_URL)
     ok = (proc.returncode == 1 and CALLS == []
           and "SEND_FAILED" in proc.stdout and "计划通道" in proc.stdout
+          and "falling back" not in proc.stdout
           and 9 not in ledger_ids())
     return ok or proc.stdout + proc.stderr
 
@@ -306,9 +344,10 @@ def build_fixtures():
     (HOME / "b.png").write_bytes(PNG2)
     (HOME / "fake.png").write_text("这不是图片，只是改了个名字", encoding="utf-8")
     (HOME / "magic4.png").write_bytes(b"\x89PNG")
+    (HOME / "broken.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
     (HOME / "huge.png").write_bytes(PNG + b"\x00" * (MAX_BYTES + 1 - len(PNG)))
     (STATE / "wg_session.txt").write_text("session-fixture", encoding="utf-8")
-    seed_events(9)
+    seed_events(11)
 
 
 def main():

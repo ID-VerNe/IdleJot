@@ -11,13 +11,14 @@ MCP 的图片只在 content 里以 base64 交付，collector 收到后必须自�
 index.jsonl 每次追加一行，读取时后写覆盖先写；事件与图片下标是主键。
 像素只写一次：同一 sha256 已有文件时直接复用原路径，二次查看不重复下载。
 
-发送侧（issue #128）只有三样：``read_for_send``（校验 + 读字节）、``image_segment``
-（字节 → OneBot 段）、``attach_images``（把图挂到气泡列表上）。放在这里而不是
-``reply.py``，一是 ``MAX_BYTES`` / ``ext_for`` 本来就在这，二是 ``reply.py`` 已经
-贴着 ``check_module_size`` 的 1000 行红线。
+发送侧（issue #128）：``read_for_send``（校验 + 读字节）、``image_format``（Pillow
+判真实格式）、``image_segment``（字节 → OneBot 段）、``attach_images``（把图挂到
+气泡列表上）。放在这里而不是 ``reply.py``，一是 ``MAX_BYTES`` 本来就在这，二是
+``reply.py`` 已经贴着 ``check_module_size`` 的 1000 行红线。
 """
 import base64
 import hashlib
+import io
 import json
 import stat
 import time
@@ -28,8 +29,12 @@ from wg_paths import state_dir
 IMAGES = state_dir() / "images"
 INDEX = IMAGES / "index.jsonl"
 MAX_BYTES = 6 * 1024 * 1024       # 与 MCP 单张图上限一致
-MIN_IMAGE_BYTES = 16              # 魔数只占前 4~12 字节，比这还小的一定不是图片
+# 一次回复最多几张图：每条气泡之间 `reply.BUBBLE_GAP` 睡 1.2s，25 张就吃满
+# `wg_budget.SEND_BUDGET`，宿主 120s 超时会把整条调用连同输出一起砍掉——那种
+# 失败一个字都不打印。9 张 = 10.8s 间隔，仍在预算内。
+MAX_IMAGES = 9
 MAX_INDEX_ROWS = 4000             # 索引只保留最近若干条，避免无限增长
+SEND_FORMATS = ("PNG", "JPEG", "GIF", "WEBP")
 
 MIME_EXT = {"image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
             "image/gif": "gif", "image/webp": "webp"}
@@ -293,12 +298,18 @@ class ImageError(ValueError):
 def read_for_send(path):
     """读一张待发图片，返回 (bytes, 显示名)。
 
-    三道闸：普通文件、≤ ``MAX_BYTES``、文件头是 PNG/JPEG/GIF/WebP。**判据是魔数
-    不是扩展名**——``.jfif`` / 大写 ``.PNG`` / 改了名的文本都会骗过扩展名检查，
-    而 ``ext_for`` 认不出的东西到了 QQ 那边只会是一张裂图。魔数之后再要一个最小
-    长度：``ext_for`` 只认前 4 个字节，一个 4 字节的「``\\x89PNG``」也能过，而它
-    在群里就是一张裂图。四种格式的完整签名最长 12 字节（WebP），比这还小的东西
-    不可能是图片。
+    闸门按顺序：路径非空 → 存在且是普通文件 → ≤ ``MAX_BYTES`` → 读回来的字节数
+    与 ``stat`` 一致（防下载器写到一半）→ **Pillow 真的解得开**。
+
+    最后一道是判据本身：``ext_for`` 的魔数只看前 4 个字节，一个 4 字节的
+    ``\\x89PNG`` 也能过，而它在群里就是一张裂图。``Image.open()`` + ``verify()``
+    会读格式头、建解码器、走一遍结构校验（PNG 的 CRC、JPEG 的段链），魔数对但
+    内容坏的都在这里落马。扩展名从头到尾不参与判断——``.jfif`` / 大写 ``.PNG``
+    / 改了名的文本都骗不过去。
+
+    依赖方向仍是「只用已有依赖」：Pillow 早在 ``pyproject.toml`` 里，MCP 侧的
+    ``mcp_media_pixels.pixels()`` 用它做同一件事，这里不另写解码器。实测 6 MiB
+    的 PNG 整个 verify 只要 5ms，够不上瓶颈。
 
     ``stat`` 与 ``read`` 之间文件可能被换掉（下载器正在写），所以按上限 +1 读回来
     再核长度：变大了撞上限、变小了说明读的是写了一半的内容，两种都不发。
@@ -330,11 +341,25 @@ def read_for_send(path):
     if len(raw) != info.st_size:
         raise ImageError(f"{target.name} 在读取时被改动（{info.st_size} → {len(raw)} 字节），"
                          "确认文件写完再发")
-    if ext_for(None, raw) == "bin":
-        raise ImageError(f"{target.name} 不是 PNG/JPEG/GIF/WebP 图片（按文件头判断）")
-    if len(raw) < MIN_IMAGE_BYTES:
-        raise ImageError(f"{target.name} 只有 {len(raw)} 字节，不像图片")
+    fmt = image_format(raw)
+    if fmt not in SEND_FORMATS:
+        raise ImageError(f"{target.name} 不是能解码的 PNG/JPEG/GIF/WebP 图片"
+                         + (f"（识别为 {fmt}）" if fmt else "（内容不像图片）"))
     return raw, target.name
+
+
+def image_format(raw):
+    """这段字节的真实图片格式（Pillow 的判定），解不出或已损坏返回 None。"""
+    from PIL import Image, UnidentifiedImageError  # 延迟导入：接收侧不碰图片解码
+
+    try:
+        with Image.open(io.BytesIO(raw)) as im:
+            fmt = (im.format or "").upper()
+            im.verify()
+        return fmt or None
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError,
+            Image.DecompressionBombError, EOFError):
+        return None
 
 
 def image_segment(raw):
@@ -357,9 +382,15 @@ def attach_images(bubble_segments, paths):
     每张图独占一条气泡，排在文字之后——混在文字气泡里的话，QQ 那边图片会把文字
     挤成一句半截话。纯图时 ``split_bubbles("")`` 会给出一个空文字气泡，这里丢掉它，
     否则群里会多一条空消息。
+
+    张数上限 ``MAX_IMAGES``：气泡之间要睡 ``BUBBLE_GAP``，图越多越接近宿主的工具
+    超时，而超时被砍时这条路径上一个字都不打印。
     """
     if not paths:
         return bubble_segments
+    if len(paths) > MAX_IMAGES:
+        raise ImageError(f"一次最多发 {MAX_IMAGES} 张图（这次给了 {len(paths)} 张），"
+                         "分几次发")
     raws, problems = [], []
     for path in paths:
         try:

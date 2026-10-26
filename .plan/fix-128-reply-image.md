@@ -137,3 +137,23 @@ $ echo $?
 3. 写 `check_reply_image.py`，登记 `gates.json`，`check_gate_manifest.py --write`。
 4. 基线红 → 补丁绿；跑 reply 分片 + parity。
 5. PR（`Refs #128`，带 `## 门禁改动` + 独立上下文复核结论）→ CI 绿且无冲突则合并。
+
+## 实施后修正（独立复核驱动）
+
+计划里写的三处判据在实施/复核后被推翻，代码以本文档末尾为准：
+
+1. **魔数校验 → Pillow 解码校验**。计划说「判据是文件头，魔数骗不了人」，复核指出
+   `ext_for` 只看前 4 个字节：`b"\x89PNG"` 四个字节就能过，到群里是裂图；先加
+   `MIN_IMAGE_BYTES=16` 也不够（16 字节的 `\xff\xd8` + 零、`GIF89a` + 零同样能过）。
+   改成 `Image.open()` + `verify()` 判真实格式（`wg_images.image_format`），
+   `SEND_FORMATS` 白名单。Pillow 早在 `pyproject.toml` 里、MCP 侧
+   `mcp_media_pixels.pixels()` 用它做同一件事，不新增依赖；实测 6 MiB PNG 的
+   verify 5ms。已知残留：截断的 GIF 两种判据都拦不住，由 stat/read 长度比对兜。
+2. **新增张数上限 `MAX_IMAGES=9`**。计划里没有上限，复核指出每条气泡之间睡
+   `BUBBLE_GAP=1.2s`，25 张就吃满 `wg_budget.SEND_BUDGET`，宿主 120s 超时会把整条
+   调用连输出一起砍掉——而那条路径一个字都不打印。
+3. **`read_for_send` 现在要求 `len(raw) == info.st_size`**。计划只防「读的过程中
+   变大」，复核指出变小（下载器还在写）会把半张图发出去。
+
+另外两条复核结论按计划执行、未改：不做目录白名单（理由见「明确不做」），
+删除 `replied_ids()` 与 `_config()` 收口到 `wg_config.config()` 均确认无副作用。

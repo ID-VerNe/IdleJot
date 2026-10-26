@@ -440,8 +440,9 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 69 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
 | 70 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
 | 71 | `reply` | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
+| 72 | `reply` | `check_busboss.py` | 车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103） |
 
-共 71 个 CI 门禁，分 5 个分片（`static` 15、`runtime` 15、`mcp` 16、`storage` 9、`reply` 16）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
+共 72 个 CI 门禁，分 5 个分片（`static` 15、`runtime` 15、`mcp` 16、`storage` 9、`reply` 17）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
 <!-- gates:ci:end -->
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

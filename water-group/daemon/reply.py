@@ -20,7 +20,8 @@ gap between "replied" and "listening again" is milliseconds rather than a whole
 agent turn. --no-wait returns right after sending instead.
 
 Usage:
-  reply.py <event_id> "<text>" [--intent "..."] [--no-quote] [--no-followup] [--no-wait]
+  reply.py <event_id> "<text>" [--image 路径 ...] [--intent "..."] [--no-quote] [--no-followup] [--no-wait]
+  reply.py <event_id> --image 路径           纯图，不带文字
   reply.py --list
   reply.py --context 30 [--around <event_id>]
   reply.py --show <event_id>      读这条消息的全文（行内截断后的补救路径）
@@ -29,6 +30,9 @@ Usage:
 或 config.json 的 `reply.max_bubbles` 可以调小，issue #131）。想连发几句就分行写，
 不要拿斜杠把几句话串成一行——QQ 里换行会折叠，斜杠会读成文档。shell 双引号里
 写不出真换行，用字面量 \n 也行（反斜杠加 n）；\\n 转义成字面 \n 留在正文里。
+
+--image 把本地图片发进群（可重复），每张独占一条气泡排在文字之后（issue #128）。判据是
+Pillow 整张解得开，上限与格式见 `--help`；带图的回复强制走 OneBot，不回退计划通道。
 """
 import argparse
 import json
@@ -52,7 +56,7 @@ import wg_budget  # noqa: E402  (等待预算的唯一出口，issue #79/#83)
 import wg_gap  # noqa: E402  (停机窗口缺口账本，issue #114)
 import winconsole  # noqa: E402
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
-import wg_config  # noqa: E402  (config.json 的唯一读取口)
+import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #128)
 import wg_images  # noqa: E402
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_send_failure  # noqa: E402  (发送失败的原文 / 禁言诊断 / 失败账本，issue #132)
@@ -114,19 +118,6 @@ def read_events():
     except OSError:
         pass
     return rows
-
-
-def replied_ids():
-    ids = set()
-    try:
-        for line in REPLIED.read_text(encoding="utf-8").splitlines():
-            try:
-                ids.add(json.loads(line)["id"])
-            except (ValueError, KeyError):
-                continue
-    except OSError:
-        pass
-    return ids
 
 
 def record(event_ids, text):
@@ -215,14 +206,13 @@ def plan(sid, batch, target, intent, quote):
     return None, target
 
 
-# 拆句与上限的唯一实现在 wg_bubbles 里（issue #131）。这里保留同名入口，是因为
-# 门禁与调用点读的一直是 reply.split_bubbles / reply.normalize_newlines；limit
-# 必须由调用方按 config.json 的 reply.max_bubbles 解析后传进来，默认值只是硬顶。
+# 拆句与上限的唯一实现在 wg_bubbles（issue #131）。这里保留同名入口，是因为门禁与
+# 调用点读的一直是 reply.split_bubbles / reply.normalize_newlines。
 normalize_newlines = wg_bubbles.normalize_newlines
 
 
 def split_bubbles(text, limit=MAX_BUBBLES):
-    """按换行拆成多条气泡（实现在 wg_bubbles.split，issue #131）。"""
+    """按换行拆成多条气泡；limit 由调用方按 config 的 reply.max_bubbles 解析后传入。"""
     return wg_bubbles.split(text, limit)
 
 
@@ -824,7 +814,10 @@ def main():
     parser = argparse.ArgumentParser(description="回一条群消息并记账")
     parser.add_argument("target", nargs="?", help="要回复的消息 id（必填，偷懒省略会直接报错）")
     parser.add_argument("text", nargs="?", help="回复正文；@ {花名} 会变成真正的 @；换行或字面量 \\n 拆成多条气泡"
-                                                f"（默认最多 {MAX_BUBBLES} 条，--max-bubbles 可调）")
+                                                f"（默认最多 {MAX_BUBBLES} 条，--max-bubbles 可调）；只发图时可省略")
+    parser.add_argument("--image", action="append", default=[], metavar="路径",
+                        help="把本地图片发进群，可重复；整张解码通过才算数（PNG/JPEG/GIF/WebP、"
+                             "≤6 MiB、≤80 兆像素、≤300 帧），一次最多 9 张，每张独占一条气泡")
     parser.add_argument("--max-bubbles", type=int, metavar="N",
                         help=f"这次最多发几条气泡（1–{MAX_BUBBLES}；默认取 config.json 的 "
                              f"reply.max_bubbles，缺省 {MAX_BUBBLES}。超出的行截断并打印丢弃清单，issue #131）")
@@ -879,8 +872,8 @@ def main():
         qq, label = resolve_member(args.who, args.group or latest_group_id())
         print(f"{args.who} -> {qq or '未解析'}（{label}）")
         return 0 if qq else 1
-    if not args.target or not args.text:
-        parser.error("需要 <event_id> 和 <text>")
+    if not args.target or not (args.text or args.image):
+        parser.error("需要 <event_id> 和 <text>（只发图就加 --image）")
 
     sid = session_id()
     if not sid:
@@ -915,9 +908,17 @@ def main():
     bubbles = split_bubbles(args.text, limit)
     bubble_segments = [build_segments(bubbles[0], group_id, leading=args.at)]
     bubble_segments += [build_segments(one, group_id) for one in bubbles[1:]]
-    has_at = any(seg["type"] == "at" for segs in bubble_segments for seg in segs)
     answered = [target, *[i for i in args.also if i != target]]
     print(f"target={target} group={group_id} session={sid}")
+    # 图片先校验再动手（issue #128）：坏路径在这里就退，一张都不发，也不打印后面
+    # 那行「还有 N 条没回」——那会让 Agent 以为图已经发出去了。`limit` 一起传进去：
+    # 图也是气泡，正文 + 图超过上限就在发之前拒（间隔 1.2s 会吃掉发送预算，#131）。
+    try:
+        bubble_segments = wg_images.attach_images(bubble_segments, args.image, cap=limit)
+    except wg_images.ImageError as exc:
+        print(f"IMAGE_FAILED: {exc}")
+        return 1
+    has_at = any(seg["type"] == "at" for segs in bubble_segments for seg in segs)
 
     # The listener is dead between the wake and the re-hang, so @-mentions that
     # land while this reply is being written are only visible in the file. Saying
@@ -939,13 +940,12 @@ def main():
 
     # Quote through OneBot first: it is the only path that can point at a message
     # from an older batch, which is the normal case once the group is chatting.
-    # It is also the only path that can carry an at segment -- plan/send speaks
-    # plain text, so a message with an @ must not be handed to it.
-    if has_at or (not args.no_quote and found):
+    # It is also the only path that can carry an at or image segment -- plan/send
+    # speaks plain text, so a message with either must not be handed to it.
+    if has_at or args.image or (not args.no_quote and found):
         # 发之前先报账：间隔会吃掉本次调用的等待额度（整次共享的总额，issue #88）。
-        cost = wg_bubbles.cost_note_for(len(bubbles), args.wait)
-        if cost:
-            print(cost)
+        # 这条路径按 `BUBBLE_GAP` 固定节奏算；条数取 `bubble_segments`——图片也是气泡（#136）。
+        wg_bubbles.report_cost(len(bubble_segments), args.wait)
         message_id = None if args.no_quote else (found[1] if found else None)
         # 发送 + 失败诊断 + 可选解禁补发全在 wg_send_failure（#132）：首条就失败时
         # 由它说出真实原因，不再是那句「带 @ 只能走 OneBot」。
@@ -953,12 +953,16 @@ def main():
                                     deliver=onebot_send_bubbles, has_at=has_at,
                                     unmute=args.wait_unmute)
         if sent == len(bubble_segments):
-            record(answered, args.text)
+            record(answered, args.text or "")
             print("SENT")
             open_followup(target, group_id=group_id,
                           wanted=not args.no_followup, not_before=send_started)
             return wait_for_next(args.wait) if args.wait else 0
         if sent or has_at:
+            return 1
+        if args.image:
+            # 计划通道只发文字（send() 的气泡写死 kind=text），回退过去图片就没了。
+            print("SEND_FAILED: 带图的消息只能走 OneBot，计划通道会把图片整个丢掉")
             return 1
         print("  falling back to the plan path")
     elif not args.no_quote:
@@ -969,9 +973,7 @@ def main():
     if overflow:
         print(f"REFUSED: {overflow}")
         return 1
-    cost = wg_bubbles.cost_note_for(len(bubbles), args.wait, plan_path=True)
-    if cost:
-        print(cost)
+    wg_bubbles.report_cost(len(bubbles), args.wait, plan_path=True)
 
     batch = batch_id()
     if not batch:

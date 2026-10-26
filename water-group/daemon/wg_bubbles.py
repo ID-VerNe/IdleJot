@@ -179,6 +179,19 @@ def cost_note_for(count, wait=None, plan_path=False, policy=None):
     return cost_note(count, wait, gap=low, gap_max=high)
 
 
+def report_cost(count, wait=None, plan_path=False, policy=None):
+    """把 cost 行打到 stdout；没有可报的（单条气泡）就一声不响，返回该行文本。
+
+    报账必须落在**实际走的那条路**里——分支判定之前还不知道走哪条，报出来的间隔
+    有一半是猜的（issue #136）。这条判据连同 `print` 收在这里，`reply.py` 的两个
+    发送分支各一行，不必各自复述一遍「有没有话要说」。
+    """
+    note = cost_note_for(count, wait, plan_path, policy)
+    if note:
+        print(note)
+    return note
+
+
 def plan_overflow_message(count):
     """计划通道装不下的条数：返回该说的话，装得下返回 None。
 

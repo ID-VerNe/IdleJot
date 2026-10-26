@@ -22,6 +22,9 @@ issue #69 修了「退出时说不说下一步」：每种退出都以 `RESTART:
 硬杀（宿主截断，issue #88）写不了 `stopped_at`：心跳过期同样给出判定，说明最后
 心跳在几点、此后没有退出记录——「被杀了」与「正常退出」因此不再同形。
 
+窗口只在 `_stale_window()` 一处取值（issue #118）：`on_watch()` 与 `describe()`
+都调它，改 `STALE_AFTER` 不会只改到一半。
+
 已知边界：同一数据根下并行挂多个监听会共用这一行记录（后写的覆盖先写的）；
 `stop()` 只认自己的 pid，不会把别人的记录写成自己的退出。「有几个在跑」继续问
 进程探针。
@@ -39,6 +42,16 @@ STATE = state_dir() / "wg_listener.json"
 # 秒），又要短到能及时暴露「被硬杀后没人续挂」。正常退出由 `stopped_at` 兜底，
 # 这个窗口只负责那条写不了退出记录的路径。
 STALE_AFTER = 180
+
+
+def _stale_window():
+    """心跳过期窗口的唯一取值点（issue #118）。
+
+    窗口必须在**调用期**现读 `STALE_AFTER`：`on_watch()` 与 `describe()` 是同一个
+    事实的两个入口，窗口若在 def 期被绑定，改常量只会改到一半——`--status`（走
+    `describe()`）说「疑似被硬杀」，按 `on_watch()` 判的调用方说「值守中」。
+    """
+    return STALE_AFTER
 
 
 def _now():
@@ -103,13 +116,15 @@ def _last_beat(record):
     return record.get("beat_at") or record.get("started_at") or 0
 
 
-def on_watch(stale_after=STALE_AFTER, now=None):
+def on_watch(stale_after=None, now=None):
     """此刻有没有人值守——纯文件判定，不问进程表，也不需要谁先跑一次命令。
 
     探针记录（`--probe`）不算（issue #94 PB）。心跳过期的 `watching` 记录也不算：
     写不了退出记录的进程（宿主截断、被杀）必须与「还在等」区分开。
 
-    `stale_after` / `now` 只给测试钉窗口语义用，生产路径走默认值。
+    `stale_after` / `now` 只给测试钉窗口语义用，生产路径走默认值。默认 `None`
+    表示现读 `_stale_window()`——不在 def 期绑定常量，否则改窗口只改到一半
+    （issue #118）。
     """
     record = read()
     if not record or record.get("probe"):
@@ -117,7 +132,8 @@ def on_watch(stale_after=STALE_AFTER, now=None):
     if record.get("state") != "watching":
         return False
     moment = _now() if now is None else now
-    return moment - _last_beat(record) <= stale_after
+    window = _stale_window() if stale_after is None else stale_after
+    return moment - _last_beat(record) <= window
 
 
 def _span(seconds):
@@ -151,7 +167,7 @@ def describe(now=None):
             return ""
         beat = _last_beat(record)
         age = max(0, moment - beat)
-        if age <= STALE_AFTER:
+        if age <= _stale_window():
             return (f"值守中 pid={record.get('pid')}（自 {started} 起，"
                     f"心跳 {age}s 前）")
         return (f"上一轮监听自 {started} 起失去心跳（最后心跳 "

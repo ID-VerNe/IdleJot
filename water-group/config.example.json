@@ -18,6 +18,9 @@
   "pending_reply": {
     "max_age_seconds": 7200
   },
+  "reply": {
+    "max_bubbles": 20
+  },
   "reload": {
     "watch": false,
     "interval": 2.0,

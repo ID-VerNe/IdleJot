@@ -160,11 +160,14 @@ def 单行不拆():
 
 
 @case
-def 超过三条截断并提示():
+def 超过上限截断并提示():
+    # 上限的取值与提示全文归 scripts/check_bubble_cap.py（issue #131）；这里只钉
+    # 「拆句会照那条上限截断，并且说出来」，用的是同一个常量而不是第二个数字。
+    cap = reply.MAX_BUBBLES
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        got = reply.split_bubbles("a\nb\nc\nd")
-    return got == ["a", "b", "c"] and "丢掉了 1 行" in buf.getvalue()
+        got = reply.split_bubbles("\n".join(f"第{i}句" for i in range(1, cap + 2)))
+    return len(got) == cap and f"已发 {cap} 条、丢弃 1 条" in buf.getvalue()
 
 
 @case

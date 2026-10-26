@@ -100,6 +100,10 @@
     死掉的监听在账本里是「值守中」——与 #88 的静默同形。窗口内必须算值守
     （对照组：恒 False 的实现不许蒙混过关），窗口外不算，且 `describe()` 要说出
     「失去心跳、没有退出记录」，而不是编一个退出时刻。
+35. 心跳过期窗口只有一个取值点（issue #118）：同一条 `watching` 记录、同一个
+    时刻，`on_watch()` 的布尔值与 `describe()` 的文案必须同一结论；把窗口常量
+    移到该记录心跳年龄的两侧，两者必须一起翻。`on_watch()` 的默认参数在 def 期
+    绑定常量时（改常量只半生效），本契约红在常量那一档。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -1669,6 +1673,48 @@ def 心跳过期的值守记录不算值守():
             restore()
     return (not stale_watch and inside_watch
             and "失去心跳" in stale_note and "没有退出记录" in stale_note)
+
+
+@case
+def 过期窗口两入口同一结论():
+    """同一条记录、同一时刻，`on_watch()` 与 `describe()` 必须同一答案（issue #118）。
+
+    窗口曾经有两处取值来源：`on_watch()` 的默认参数在 def 期就把 180 绑死，
+    `describe()` 每次现读模块常量。两处同值时看不出问题，只改常量一处就同一条
+    账本记录两个答案——`--status`（走 `describe()`）说「疑似被硬杀」，按
+    `on_watch()` 判的调用方说「值守中」。
+
+    这里只钉行为：同一条 `watching` 记录、同一个 `now`（心跳固定 100s 前），把
+    窗口常量分别设到 100s 两侧，布尔值与文案都必须跟着一起翻。恒真、恒假、单个
+    入口绑死常量这三种坏实现各红在其中一档；常量 `try/finally` 还原，`now` 显式
+    传入避免秒级漂移。
+    """
+    age = 100
+    with temp_dir(prefix="wg-stale-window-") as home:
+        restore = ledger_at(home)
+        original = wg_listener_state.STALE_AFTER
+        rows = []
+        try:
+            now = int(time.time())
+            wg_listener_state.start(timeout=wg_budget.WAIT_BUDGET)
+            record = wg_listener_state.read()
+            record["started_at"] = now - 500
+            record["beat_at"] = now - age
+            (home / "state" / "wg_listener.json").write_text(
+                json.dumps(record, ensure_ascii=False), encoding="utf-8")
+            for window in (age + 20, age - 20, original):
+                wg_listener_state.STALE_AFTER = window
+                rows.append((window,
+                             wg_listener_state.on_watch(now=now),
+                             wg_listener_state.describe(now=now)))
+        finally:
+            wg_listener_state.STALE_AFTER = original
+            restore()
+    return all(
+        watching == (age <= window)
+        and ("值守中" in note) == (age <= window)
+        and ("失去心跳" in note) == (age > window)
+        for window, watching, note in rows)
 
 
 def main():

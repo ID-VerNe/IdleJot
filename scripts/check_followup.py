@@ -210,7 +210,13 @@ def check_lookup():
 
 
 def check_backlog():
-    """issue #29：回复发出前的积压不算接话，也不能把预算清零、开窗即收窗。"""
+    """issue #29/#117：回复发出前的积压照常返回、照常唤醒，但不占预算。
+
+    #29 的核心不变量——积压不清零预算、不开窗即收窗——保留。翻面的是「可见
+    性」：以前 since() 在 SQL 层用 `at>=?` 把 pre-reply 行整个滤掉（issue #117
+    的根因——它们既不唤醒也不推进游标，下一轮仍在 SQL 层挡掉，永久丢）；现在
+    照常返回、照常唤醒，预算只扣真正的接话。
+    """
     anchor = 11
     sent_at = time.time()
     # 积压的 id 都大于被回复的那条，但 at 早于开始发送的时刻。
@@ -218,20 +224,64 @@ def check_backlog():
                  "timestamp": int((sent_at - 30) * 1000)}, sent_at - 30 + i * 0.1)
             for i in range(20, 36)])
     state = followup.open(anchor, max_messages=10, idle_seconds=600, not_before=sent_at)
+    # pre-reply 积压必须照常返回——不能再在 SQL 层过滤（issue #117）
     rows = followup.since(anchor, SID, state["not_before"])
-    assert rows == [], f"发送前的积压混进了窗口：{[r['id'] for r in rows]}"
-    assert followup.consume(state, rows) == [], "积压不该唤醒"
-    assert state["budget"] == 10, state
-    assert state["after_id"] == anchor, state
+    assert [r["id"] for r in rows] == list(range(20, 36)), \
+        f"pre-reply 积压被过滤掉了（issue #117 复发）：{[r['id'] for r in rows]}"
+    woke = followup.consume(state, rows)
+    assert [r["id"] for r in woke] == list(range(20, 36)), "积压该唤醒，不能吞"
+    assert state["budget"] == 10, "pre-reply 不占预算（issue #29 不变量）"
+    assert state["after_id"] == 35, "游标要越过积压，不能卡在锚点"
+    assert state["wakes"] == 1, state
     assert followup.stale(state) is None, followup.stale(state)
-    # 开窗之后真有人接话，才该唤醒、才该扣额度
+    # 开窗之后真有人接话，才该扣额度
     append([(40, {"sender": "群友", "content": "回复之后说的",
                   "timestamp": int(sent_at * 1000)}, sent_at + 5)])
     woke = followup.consume(state, followup.since(state["after_id"], SID,
                                                   state["not_before"]))
     assert [r["id"] for r in woke] == [40], woke
-    assert state["budget"] == 9, state
-    print("  ok  回复前的积压不算接话、不清零预算（issue #29）")
+    assert state["budget"] == 9, "post-reply 才占预算"
+    print("  ok  回复前的积压照常唤醒但不占预算（#29 不变量 + #117 可见性）")
+
+
+def check_pre_reply_visible():
+    """issue #117 专项：Agent 处理回复期间群友发的消息，追问窗口必须看得见。
+
+    复现 issue 的时间线：开窗的 not_before 落在「发送开始」，但更早的若干条已经
+    在库里（at < not_before）——正是 Agent 从拿到唤醒到把回复发出去那段积压。
+    旧 since() 在 SQL 层用 `at>=?` 过滤，它们从查询结果里消失，consume() 的游标
+    也不推进——永久丢。新语义：照常返回、照常唤醒、不占预算（pre-reply 是处理
+    期间漏掉的，不该再算一次额度）。
+    """
+    anchor = 800
+    sent_at = time.time()
+    # 处理期间群友连发 3 条：id 在锚点之后、at 在发送开始之前
+    append([(i, {"sender": "群友", "content": f"处理期间 {i}",
+                 "timestamp": int((sent_at - 10) * 1000)}, sent_at - 10 + (i - 801) * 0.1)
+            for i in range(801, 804)])
+    state = followup.open(anchor, max_messages=5, idle_seconds=600, not_before=sent_at)
+    # since() 必须把 pre-reply 行返回——不再在 SQL 层过滤
+    rows = followup.since(anchor, SID, state["not_before"])
+    assert [r["id"] for r in rows] == [801, 802, 803], \
+        f"pre-reply 行被过滤掉了（issue #117 复发）：{[r['id'] for r in rows]}"
+    # consume() 必须把它们列入 woke——Agent 才看得见处理期间漏掉的消息（含图片）
+    woke = followup.consume(state, rows)
+    assert [r["id"] for r in woke] == [801, 802, 803], "pre-reply 该唤醒，不能吞"
+    assert state["after_id"] == 803, "游标要越过 pre-reply"
+    assert state["wakes"] == 1, state
+    # 但 pre-reply 不占预算——它们是处理期间漏掉的，不是真正的接话
+    assert state["budget"] == 5, "pre-reply 不该扣额度（issue #117）"
+    assert followup.stale(state) is None, followup.stale(state)
+
+    # 发送开始之后的接话才占预算
+    append([(810, {"sender": "群友", "content": "回复之后说的",
+                   "timestamp": int(sent_at * 1000)}, sent_at + 5)])
+    woke = followup.consume(state, followup.since(state["after_id"], SID,
+                                                  state["not_before"]))
+    assert [r["id"] for r in woke] == [810], woke
+    assert state["budget"] == 4, "post-reply 才扣额度"
+    followup.close()
+    print("  ok  处理期间的消息照常返回、照常唤醒、不占预算（issue #117）")
 
 
 def check_pagination():
@@ -551,6 +601,10 @@ def main():
     # PD2a 用例追加 id 700+ 的新消息，排在 watch 子进程测试之后
     check_plugin_gating()
     check_disable_no_wake()
+    # issue #117 专项：追加 id 800+ 的新消息，必须排在所有 `since(小 anchor)`
+    # 用例（含 check_command_gate 的 since(199..207)、check_disable_no_wake 的
+    # since(700)）之后——否则 800+ 会被它们当成接话捞进去，断言翻车。
+    check_pre_reply_visible()
     check_db_fallback_not_gated()
     check_window_status()
     check_legacy_section()

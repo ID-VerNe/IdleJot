@@ -113,14 +113,15 @@ def active_session_id():
 def open(after_id, max_messages=None, idle_seconds=None, session=None, not_before=None):
     """回复成功后开窗。after_id 通常就是刚回复的那条消息。
 
+    not_before 是发送开始的墙上时间，用作**预算标记**：Agent 从拿到唤醒到真正把
+    回复发出去，中间经常隔着十几分钟，这段积压的 id 都大于被回复的那条，只按 id
+    扫会把它们全算成接话，一次吃光 budget、窗口开出来就被自己关掉（issue #29）。
+    带上时间标记后，`consume()` 把 pre-reply 的接话识别出来——照常唤醒、照常推进
+    游标，但不算额度（issue #117：以前 `since()` 在 SQL 层用 `at>=?` 过滤，这些行
+    根本不返回，处理期间群里发的消息就永久从追问窗口里消失了）。
+
     故意不用「当前最新消息 id」当起点：发送过程中群里照旧在说话，拿最新 id 会把
     这几句吞掉。从被回复的那条往后看，它们才算「回复之后群里说的」。
-
-    not_before 是发送开始的墙上时间，给锚点补一个向过去的下界：Agent 从拿到唤醒
-    到真正把回复发出去，中间经常隔着十几分钟，这段积压的 id 都大于被回复的那条，
-    只按 id 扫会把它们全算成接话，一次吃光 budget、窗口开出来就被自己关掉
-    （issue #29）。带上时间下界后，窗口只覆盖「发送开始之后」的发言，等价于锚点
-    取 max(after_id, 发送开始后的第一条)。
     """
     cfg = settings()
     if max_messages is None:
@@ -161,12 +162,18 @@ def stale(window, now=None):
 def since(after_id, session, not_before=None, limit=50):
     """窗口之后的全部消息，含自己说的（调用方按 is_self 过滤要不要唤醒）。
 
-    只捞 id、payload 两列，跟 `reply.recent_chatter` 同一份库同一套字段；
-    区别只在它是往前看而不是取最近 N 条。
+    只捞 id、payload、media、at 四列，跟 `reply.recent_chatter` 同一份库同一套
+    字段；区别只在它是往前看而不是取最近 N 条。`at` 一并取回，让 `consume()` 逐
+    行判 pre/post-reply——`not_before` 不再在 SQL 层过滤（issue #117：处理期间
+    群友发的消息被过滤掉就永久消失，`consume()` 的游标只推进它看得见的行，被过滤
+    的行下一轮仍在 SQL 层挡掉）。
 
-    not_before 过滤掉发送开始前的历史（issue #29）。行数超过 limit 时循环分页
-    读完：以前只取前 50 条，consume() 却把游标推到最后一行，第 51 条起会被
-    静默跳过，之后再也不会被任何一轮看到。
+    `not_before` 参数保留（不改调用接口），现在只是预算标记的输入：pre-reply 行
+    照常返回、照常唤醒，由 `consume()` 决定扣不扣额度，而不是在这里让它们从查询
+    结果里消失。
+
+    行数超过 limit 时循环分页读完：以前只取前 50 条，consume() 却把游标推到最后一
+    行，第 51 条起会被静默跳过，之后再也不会被任何一轮看到。
     """
     if not session:
         return []
@@ -175,11 +182,8 @@ def since(after_id, session, not_before=None, limit=50):
     except sqlite3.Error:
         return []
     limit = max(1, int(limit))
-    sql = "SELECT id, payload, media FROM chat_inbox WHERE session_id=? AND id>?"
+    sql = "SELECT id, payload, media, at FROM chat_inbox WHERE session_id=? AND id>?"
     params = [session, int(after_id or 0)]
-    if not_before:
-        sql += " AND at>=?"
-        params.append(float(not_before))
     sql += " ORDER BY id LIMIT ?"
     out = []
     try:
@@ -187,7 +191,7 @@ def since(after_id, session, not_before=None, limit=50):
             rows = db.execute(sql, (*params, limit)).fetchall()
             if not rows:
                 break
-            for event_id, payload, raw_media in rows:
+            for event_id, payload, raw_media, at in rows:
                 try:
                     data = json.loads(payload)
                 except ValueError:
@@ -206,6 +210,7 @@ def since(after_id, session, not_before=None, limit=50):
                     "raw": data.get("content") or "",
                     "text": " ".join((data.get("content") or "").split()),
                     "ts": data.get("timestamp"),
+                    "at": float(at) if at is not None else 0.0,
                     "self": bool(data.get("is_self")),
                     "synthetic": bool(data.get("synthetic")),
                     "recalled": bool(data.get("recalled")),
@@ -230,6 +235,13 @@ def consume(window, rows):
     自己说的话、系统提示和 `#` 指令也推进 after_id——不然每轮都要重新扫过它们
     ——但不占 budget、不唤醒：机器人自言自语不算接话，`#` 指令归 commands.py
     （issue #70）。
+
+    pre-reply 的闲聊（`at < not_before`，Agent 处理回复期间群里说的话）**照常
+    唤醒**、照常推进游标，但不占 budget——它们是处理期间漏掉的接话，得让 Agent
+    看见（issue #117：以前在 `since()` 的 SQL 层过滤，处理期间发的消息永久从查询
+    结果里消失）。`not_before` 从「可见性过滤」退化为「预算标记」：可见性交给
+    `since()` 一次返回全量，预算只扣真正在发送开始之后接的话。
+
     有人接话就续期（until 推后）；这一批把 budget 扣到 0 就**当场收窗**，不留到
     下一轮 stale()（issue #98：以前那批照样唤醒，报告还写着「额度还剩 0 条」，
     Agent 白跑一趟）。最后一批照旧全部返回——不唤醒等于吞消息，比多一次往返更糟。
@@ -241,14 +253,18 @@ def consume(window, rows):
     # up 二次加载成 `__main__` 和 `up` 两份。
     import up  # noqa: PLC0415
 
+    not_before = float(window.get("not_before") or 0)
     woke = [r for r in rows
             if not r["self"] and not r["synthetic"]
             and not up.is_command(r.get("raw") or r["text"])]
+    # 只扣发送开始之后的接话：pre-reply 是处理期间漏掉的，不该再算一次额度
+    # （issue #117）；它仍要唤醒，预算只是真正的接话上限。
+    chargeable = [r for r in woke if float(r.get("at") or 0) >= not_before]
     window["after_id"] = max(r["id"] for r in rows)
     if woke:
         # 钳在 0：背着聊天记录回来时一批可能远超额度，那是「这段时间群里都在聊」，
         # 一次唤醒给全比拆成几轮更省事；额度只是窗口的上限，不是要透支成负数。
-        window["budget"] = max(0, int(window.get("budget") or 0) - len(woke))
+        window["budget"] = max(0, int(window.get("budget") or 0) - len(chargeable))
         window["until"] = time.time() + float(window.get("idle_seconds") or 180)
         window["wakes"] = int(window.get("wakes") or 0) + 1
     # 有没有唤醒都要落盘：整批都是 `#` 指令时 after_id 也必须推进，否则下一轮

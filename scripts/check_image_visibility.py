@@ -82,13 +82,14 @@ def build():
     db.execute("CREATE TABLE chat_sessions (id TEXT, conversation_id TEXT, active INTEGER)")
     db.execute("CREATE TABLE chat_inbox (id INTEGER PRIMARY KEY, session_id TEXT, message_id TEXT,"
                " payload TEXT, media TEXT NOT NULL DEFAULT '[]', details TEXT NOT NULL DEFAULT '[]',"
-               " delivered INTEGER NOT NULL DEFAULT 0)")
+               " delivered INTEGER NOT NULL DEFAULT 0, at REAL NOT NULL DEFAULT 0)")
     db.execute("INSERT INTO chat_sessions VALUES (?,?,1)", (SID, f"{SELF}:group:123"))
-    # followup.since 夹具：一条段内带图的追问窗消息
-    db.execute("INSERT INTO chat_inbox (id,session_id,message_id,payload,media) VALUES (?,?,?,?,?)",
+    # followup.since 夹具：一条段内带图的追问窗消息。at 给个非零值，对齐实机
+    # chat_inbox.at（实机由 mcp_chat 写入 time.time()）；since() 现在要 SELECT at。
+    db.execute("INSERT INTO chat_inbox (id,session_id,message_id,payload,media,at) VALUES (?,?,?,?,?,?)",
                (EID_MEDIA, SID, "m-media", json.dumps({
                    "sender": "群友丁", "content": "[图片]", "timestamp": NOW_MS,
-                   "is_self": False, "segments": []}, ensure_ascii=False), "[]"))
+                   "is_self": False, "segments": []}, ensure_ascii=False), "[]", float(NOW_MS / 1000)))
     db.commit()
     db.close()
 

@@ -55,8 +55,12 @@ def conversation_of(group_id, account=None) -> str:
     return f"{account}:group:{gid}" if account else ""
 
 
-def _enabled_groups():
-    """config 里显式 enabled 的群号，保持书写顺序。"""
+def enabled_groups():
+    """config 里显式 enabled 的群号，保持书写顺序。
+
+    公开名（不带下划线）：`session.identity_problem()` 要把它写进拒绝信息里，
+    跨模块调私有函数等于把「这是内部细节」的约定当没写。
+    """
     groups = wg_config.config().get("groups") or {}
     return [str(gid) for gid, item in groups.items()
             if isinstance(item, dict) and item.get("enabled")]
@@ -80,7 +84,7 @@ def resolve():
     if raw:
         return raw, f"file:{path}"
     groups = wg_config.config().get("groups") or {}
-    enabled = _enabled_groups()
+    enabled = enabled_groups()
     if len(enabled) == 1:
         return conversation_of(enabled[0]), "config:唯一启用群"
     # 没写 enabled 但整份配置只有一个群：老配置的常见形态，不算歧义。
@@ -101,7 +105,7 @@ def pinned() -> bool:
 
 def ambiguous() -> bool:
     """多个群都启用、却没有钉死：读侧不做隔离，回复也无法校验归属。"""
-    return not pinned() and len(_enabled_groups()) > 1
+    return not pinned() and len(enabled_groups()) > 1
 
 
 def describe() -> str:
@@ -110,8 +114,8 @@ def describe() -> str:
     if conversation:
         return f"{conversation}（{source}）"
     if ambiguous():
-        groups = "、".join(_enabled_groups())
-        return (f"未钉死（config 有 {len(_enabled_groups())} 个启用群：{groups}——"
+        groups = "、".join(enabled_groups())
+        return (f"未钉死（config 有 {len(enabled_groups())} 个启用群：{groups}——"
                 f"读侧不做隔离、回复不做归属校验；给每个会话设 "
                 f"IDLEJOT_WG_CONVERSATION=<账号>:group:<群号> 或写 "
                 f"{CONVERSATION_FILE}）")
@@ -122,7 +126,7 @@ def note() -> str:
     """只在该说的话有用时说一句：歧义态告警，其余返回空串。"""
     if not ambiguous():
         return ""
-    return (f"WARN: 群身份未钉死（config 有 {len(_enabled_groups())} 个启用群），"
+    return (f"WARN: 群身份未钉死（config 有 {len(enabled_groups())} 个启用群），"
             f"本会话会看到所有群的唤醒、也能回任意群——issue #164 的隔离对多群无效。"
             f"用 IDLEJOT_WG_CONVERSATION 或 {CONVERSATION_FILE} 钉死本会话的群")
 

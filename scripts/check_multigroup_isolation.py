@@ -21,7 +21,9 @@
   5. 钉死群 111 → `reply.py 1 "x"` 照常走到发送（对照组：护栏不挡本群）；
   6. `plan()` 的 `target_not_in_batch` 只在本群 id 里挑；全是别群 id 时失败退出；
   7. 身份解析四档：env > `<state>/wg_conversation.txt` > config 里唯一的群 > 空；
-  8. 多群未钉死 → `session.identity_problem()` 非空（拒绝启动），单群 → 空；
+  8. 多群未钉死 → `session.identity_problem()` 非空（拒绝启动），单群 → 空，
+     **零配置 → 也必须空且 `ensure()` 照常重建**（对照组：这条踩过，
+     `check_issue_16_audit_fixes.py` 的 `ensure()` 用例就是零配置夹具）；
   9. `wg_isolation.describe()` 歧义态说「未钉死」且带「隔离」字样，钉死态报依据；
  10. 判据完整性自检：把 `rows_of` 换成恒空 → 1/2 必须红；换成恒返回全部 → 3 必须红。
 
@@ -380,18 +382,60 @@ def 身份四档优先级():
 
 @case
 def 多群未钉死拒绝启动():
-    """`session.identity_problem()` 说清原因；单群为空（零配置老机器照常起）。"""
+    """多群未钉死 → 拒绝原因说清；单群 → 空；**零配置 → 也必须空**（对照组）。
+
+    零配置那档是踩出来的：第一版把「config 里一个群都没有」也算成「没有群身份」，
+    于是 `ensure()` 一进门就返回空——`check_issue_16_audit_fixes.py` 的
+    `test_ensure_rebuilds_dead_session` 用的正是零配置夹具（`os.environ.clear()`
+    之后没有任何 groups），它当场红在 `session.ensure() == "fresh-sid"`。
+    「多群所以选谁都是替用户选」与「一个群都没配」是两件事：后者改前也照样起，
+    由 `wg_config.problems()`（issue #51）单独报。所以这里必须把零配置钉成**不拦**。
+    """
+    from unittest.mock import patch
+
+    import mcp_client
     import session
 
+    saved_group, saved_refused = session.GROUP, session._REFUSED
     results = []
-    clear_state()
-    write_config(both_groups())
-    problem = session.identity_problem()
-    results.append(bool(problem) and "未钉死" in problem)
-    write_config({GROUP_A: {"enabled": True}})
-    session.GROUP = CONV_A          # 单群档已解析出群号
-    results.append(session.identity_problem() == "")
-    return results == [True, True] or f"results={results}"
+    try:
+        clear_state()
+        write_config(both_groups())
+        session.GROUP = ""
+        problem = session.identity_problem()
+        results.append(bool(problem) and "未钉死" in problem)
+
+        write_config({GROUP_A: {"enabled": True}})
+        session.GROUP = CONV_A          # 单群档已解析出群号
+        results.append(session.identity_problem() == "")
+
+        # 对照组 1：零配置（groups 为空）不许被当成「没身份」。
+        write_config({})
+        session.GROUP = ""
+        results.append(session.identity_problem() == "")
+        results.append(session.refuse_if_unidentified() is False)
+
+        # 对照组 2：零配置下 `ensure()` 必须照常走重建（issue #16 用例的原形）。
+        sid_file = SCRATCH / "wg_session_probe.txt"
+        sid_file.write_text("stale-sid", encoding="utf-8")
+        calls = []
+
+        def fake_call(name, arguments, timeout=None):
+            calls.append(name)
+            if name == "get_chat_session":
+                return {}
+            if name == "list_chat_sessions":
+                return {"sessions": []}
+            return {"session_id": "fresh-sid"}
+
+        with patch.object(session, "SID_FILE", sid_file), \
+                patch.object(mcp_client, "call_tool", fake_call):
+            rebuilt = session.ensure()
+        results.append(rebuilt == "fresh-sid")
+    finally:
+        session.GROUP, session._REFUSED = saved_group, saved_refused
+        (SCRATCH / "wg_session_probe.txt").unlink(missing_ok=True)
+    return results == [True] * 5 or f"results={results} calls={calls}"
 
 
 @case

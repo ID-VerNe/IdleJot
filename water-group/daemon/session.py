@@ -57,29 +57,32 @@ _REFUSED = False
 
 
 def identity_problem():
-    """本会话没有可用的群身份时返回原因，否则空串（issue #164 PC）。
+    """**多群未钉死**时返回拒绝原因，否则空串（issue #164 PC）。
 
     改前这里会「取第一个 enabled 的群」——多群时那是**按配置书写顺序**替用户选群，
     B 群的会话静默锁到 A 群，读侧再把两个群都给它看，回复也不校验归属。所以多群
     未钉死时宁可拒绝：一个说清原因的拒绝，比一个发错群的会话好。
+
+    **只管歧义，不管「一个群都没有」**：零配置（`groups` 为空、或全都没 enabled）
+    时改前也是空群号、也照样起，把它算成「没身份」会改掉既有行为——`check_issue_16_
+    audit_fixes.py` 的 `ensure()` 重建用例就是零配置夹具，它会整条红。那种情况已经
+    由 `wg_config.problems()`（issue #51）单独报出来，`up.py --status` 也印，不该由
+    这里二次裁决。这里只拦「有多个群、所以选谁都是替用户选」这一种。
     """
-    if GROUP:
+    if GROUP or not wg_isolation.ambiguous():
         return ""
-    if wg_isolation.ambiguous():
-        groups = "、".join(wg_isolation._enabled_groups())
-        return (f"本会话的群身份未钉死，而 config 里有 {len(wg_isolation._enabled_groups())} "
-                f"个启用群（{groups}）。多群下「取第一个 enabled」等于按书写顺序替你"
-                f"选群，正是 issue #164 的现场，所以这里拒绝启动。\n"
-                f"       钉死方式（二选一）：\n"
-                f"         - 环境变量 IDLEJOT_WG_CONVERSATION=<账号>:group:<群号>\n"
-                f"         - 或写 {STATE_DIR / wg_isolation.CONVERSATION_FILE}"
-                f"（内容同上，一行）")
-    return ("config.json 里没有可用的群：groups 为空或没有 enabled 的群。"
-            "补上 groups 后重试（water-group/config.example.json 有形状）。")
+    groups = "、".join(wg_isolation.enabled_groups())
+    return (f"本会话的群身份未钉死，而 config 里有 {len(wg_isolation.enabled_groups())} "
+            f"个启用群（{groups}）。多群下「取第一个 enabled」等于按书写顺序替你"
+            f"选群，正是 issue #164 的现场，所以这里拒绝启动。\n"
+            f"       钉死方式（二选一）：\n"
+            f"         - 环境变量 IDLEJOT_WG_CONVERSATION=<账号>:group:<群号>\n"
+            f"         - 或写 {STATE_DIR / wg_isolation.CONVERSATION_FILE}"
+            f"（内容同上，一行）")
 
 
 def refuse_if_unidentified():
-    """没有群身份就打印原因并返回 True（调用方据此退出）。"""
+    """多群歧义时打印原因并返回 True（调用方据此退出）。零配置不拦。"""
     global _REFUSED
     problem = identity_problem()
     if not problem:
@@ -155,9 +158,9 @@ def start():
 
 
 def ensure():
-    # 群身份是前提：没有它 `start()` 会拿空 conversation_id 去开会话，而
+    # 多群歧义是前提：那种状态下 `start()` 拿的是空 conversation_id，而
     # `clear_group_sessions()` 会按空串比对——两个群都匹配不上、也都不该动
-    # （issue #164 PC）。
+    # （issue #164 PC）。零配置不拦（见 `identity_problem()`）。
     if refuse_if_unidentified():
         return ""
     sid = current()

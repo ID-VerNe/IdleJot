@@ -711,7 +711,9 @@ def describe_无缺口时仍返回空串():
     """排除型对照（issue #148）：恒加窗口注脚的实现红在这条。
 
     与契约 2 的后半条同口径，但这里专门针对新加的注脚——把窗口无条件拼进
-    `describe()` 的实现会在这里红。`window_note()` 自己也要空串。
+    `describe()` 的实现会在这里红。`window_note()` 自己也要空串（issue #151：
+    早先 docstring 这么写但断言只查 `describe()`，恒返回非空的 `window_note()`
+    能骗过；当前调用图下不可达，属措辞与断言不一致）。
     """
     start = local_epoch(2026, 10, 27, 7, 21, 40)
     end = local_epoch(2026, 10, 27, 9, 30, 26)
@@ -722,9 +724,10 @@ def describe_无缺口时仍返回空串():
         try:
             wg_gap.record(fixed_record(computed, start, end, missing=0))
             empty = wg_gap.describe()
+            note = wg_gap.window_note()
         finally:
             restore()
-    return empty == ""
+    return empty == "" and note == ""
 
 
 # ---------- 契约 12：跨天窗口两端补日期 ----------
@@ -780,11 +783,16 @@ def 漏收at的时间戳带日期():
 
     `at_me_lines()` 用 `stamp()`（带日期），与唤醒行的 `clock()`（`HH:MM:SS`）
     不同形——两者同形时 Agent 分不清哪条是现刻待回、哪条是账本历史。
+
+    夹具的日期**刻意与窗口两端都不同**（窗口跨三天、消息落在中间那天，issue
+    #151）：早先窗口与消息同日时，「拿 `window_end` 的日期冒充消息日期」的坏
+    实现能骗过本用例——它输出「看起来带日期、但日期是错的」，比不带日期更
+    容易误导读者。日期分离后，任何借用窗口日期的实现都会红。
     """
-    start = local_epoch(2026, 10, 26, 23, 50, 0)
+    start = local_epoch(2026, 10, 25, 22, 0, 0)
     end = local_epoch(2026, 10, 27, 7, 21, 40)
     computed = local_epoch(2026, 10, 27, 7, 22, 5)
-    missed_at = local_epoch(2026, 10, 27, 3, 5, 9)
+    missed_at = local_epoch(2026, 10, 26, 3, 5, 9)
     line = {"msg_id": "d", "time": int(missed_at), "sender": "乙", "body": "在吗"}
     with temp_dir(prefix="wg-gap-") as home:
         fixture_home(home)
@@ -795,6 +803,8 @@ def 漏收at的时间戳带日期():
             lines = wg_gap.at_me_lines()
             # 唤醒行的时间戳口径（对照）：同一时刻只给时分秒
             wake_stamp = wg_clock.clock(missed_at)
+            # 窗口两端的日期（反例判据）：漏收行的日期不许等于其中任何一个
+            window_dates = {wg_clock.stamp(start)[:10], wg_clock.stamp(end)[:10]}
         finally:
             restore()
     if len(lines) != 1:
@@ -804,8 +814,10 @@ def 漏收at的时间戳带日期():
     # 带日期的行里当然也含 `03:05:09`，只查子串会把修复版判红（假红）。这里钉
     # `id=- msg_id=<id> YYYY-MM-DD HH:MM:SS ` 这个前缀，唤醒行则是
     # `id=<正数> HH:MM:SS `——两者第一眼就能分开。
+    # issue #151：日期还必须是**消息自己的**，不许借用窗口任一端的日期。
     return (STAMPED_GAP_LINE.match(text) is not None
-            and "2026-10-27 03:05:09" in text
+            and "2026-10-26 03:05:09" in text
+            and "2026-10-26" not in window_dates
             and "id=-" in text and "msg_id=d" in text
             and "乙" in text and "在吗" in text
             # 对照：唤醒行口径的同一时刻确实只有时分秒（证明两种形态真的不同）

@@ -507,7 +507,7 @@ def list_wakes():
     # issue #148：抬头由 `wg_gap.header_lines()` 一次给全（段标题 + 窗口起止 +
     # 账本时刻），不给时刻的话三小时前的早晨账本与几分钟前的新缺口读起来一样。
     gap_lines = wg_gap.at_me_lines()
-    for ln in (wg_gap.header_lines() + gap_lines if gap_lines else []):
+    for ln in ((wg_gap.header_lines() + gap_lines) if gap_lines else []):
         print(ln)
     wg_send_failure.print_last()
     shown = 0

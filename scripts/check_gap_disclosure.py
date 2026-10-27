@@ -29,15 +29,29 @@
 9. 本地一条都没有（首次部署 / 换群）不报缺口——与「停机漏收」区分，否则新部署
    会把群里全部历史都算成「漏的」。
 10. 窗口右边界取 `napcat_launch.json:started_epoch`，读不到时回落 `computed_at`。
+11. 缺口非空时 `describe()` 必须带上**窗口起止**与**账本计算时刻**，且明写「仅供参考」
+    （issue #148）：账本只在 collector 启动时算一次，不带时刻时三小时前的早晨停机
+    账本与几分钟前的新缺口同形，Agent 会把旧账读成现刻事故。无缺口时仍返回空串
+    （排除型对照：恒加注脚的实现红在后半条）。
+12. 窗口**跨天**时两端补 `MM-DD`，同一天**不**补（issue #148）：只写 `07:21–09:30`
+    的话，下午读起来像今天早上漏的，而它可能是前一夜。对照：恒带日期的实现红在
+    同一天那条，恒不带的红在跨天那条。
+13. `at_me_lines()` 的时间戳带日期（`YYYY-MM-DD HH:MM:SS`），与唤醒行的
+    `HH:MM:SS` 不同形（issue #148）——漏掉的 @ 可能是昨夜停机时段的。
+14. `reply.py --list` 的缺口段标题下面紧跟窗口上下文（与 `--status` 同一份措辞），
+    且排在 `id=-` 行之前（issue #148）：只列漏掉的 @ 而不给窗口时，读者仍然分不清
+    这是昨夜停机账本还是刚发生的事故。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_DB`，不碰实机状态：
 
     .venv/Scripts/python.exe scripts/check_gap_disclosure.py
 """
 import contextlib
+import datetime
 import io
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -71,6 +85,10 @@ import reply  # noqa: E402  (list_wakes 用例需要；模块级 import 触发�
 
 ACCOUNT = "10001"
 GROUP = "123"
+
+# 漏收行的形态（契约 13）：`id=- msg_id=<id> YYYY-MM-DD HH:MM:SS [漏] <人>: <正文>`。
+# 唤醒行是 `id=<正数> HH:MM:SS ...`——带日期是两者的分界线，不靠「有没有时分秒」判。
+STAMPED_GAP_LINE = re.compile(r"^id=- msg_id=\S+ \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[漏\] ")
 
 
 def fixture_home(home):
@@ -444,6 +462,37 @@ def reply_list_无缺口时不加段():
     return "停机窗口漏掉的 @" not in buf.getvalue()
 
 
+@case
+def reply_list_段标题带窗口时刻():
+    """issue #148：`--list` 的缺口段也要说清「哪段时间、账本何时算的」。
+
+    段标题下面紧跟一行窗口上下文，与 `--status` 的缺口行同一份措辞
+    （`wg_gap.window_note()`）。只列 `id=-` 行不给窗口的实现红在这里。
+    """
+    start = local_epoch(2026, 10, 27, 7, 21, 40)
+    end = local_epoch(2026, 10, 27, 9, 30, 26)
+    computed = local_epoch(2026, 10, 27, 9, 30, 47)
+    line = {"msg_id": "d", "time": int(local_epoch(2026, 10, 27, 8, 2, 11)),
+            "sender": "乙", "body": "在吗"}
+    with temp_dir(prefix="wg-gap-") as home:
+        fixture_home(home)
+        restore = gap_at(home)
+        try:
+            wg_gap.record(fixed_record(computed, start, end, missing=1, at_me=1,
+                                      at_me_lines=[line]))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                reply.list_wakes()
+        finally:
+            restore()
+    out = buf.getvalue()
+    head_idx = out.find("停机窗口漏掉的 @")
+    note_idx = out.find("07:21:40–09:30:26")
+    line_idx = out.find("id=-")
+    return (head_idx >= 0 and note_idx > head_idx and line_idx > note_idx
+            and "2026-10-27 09:30:47" in out and "仅供参考" in out)
+
+
 # ---------- 契约 6：200 上限语义（候选 4）----------
 
 
@@ -588,6 +637,179 @@ def 窗口右边界取launch_epoch():
             restore()
     return (g["window_end"] == launch and g["missing"] == 1 and g["at_me"] == 1
             and g["at_me_lines"][0]["msg_id"] == "d")
+
+
+def local_epoch(year, month, day, hour, minute, second=0):
+    """某个本地墙钟时刻的 epoch 秒（契约 11–13 要钉确定的日期，不用 `time.time()`）。"""
+    return datetime.datetime(year, month, day, hour, minute,
+                             second).astimezone().timestamp()
+
+
+def fixed_record(computed, start, end, missing=29, at_me=0, at_me_lines=None):
+    """手写一份缺口账本（绕过 compute()，只为把窗口/账本时刻钉成确定的日期）。"""
+    return {"computed_at": int(computed),
+            "groups": {GROUP: {"missing": missing, "at_me": at_me,
+                               "window_start": int(start), "window_end": int(end),
+                               "truncated": False, "unreachable": False,
+                               "at_me_lines": list(at_me_lines or [])}}}
+
+
+# ---------- 契约 11：describe() 带窗口起止 + 账本时刻 + 仅供参考 ----------
+
+
+@case
+def describe_缺口非空时带窗口时刻与账本时刻():
+    """issue #148：只有「漏 29 条」的账本会被读成现刻事故。
+
+    夹具钉死窗口 07:21:40–09:30:26、账本 09:30:47 计算。生产形态（`describe()`
+    不带参数）就必须同时说出**窗口起止**与**账本计算时刻**，并明写「仅供参考」。
+    未打补丁的 base 上这条红在「输出里没有窗口」上——正是 issue 的现象。
+    """
+    start = local_epoch(2026, 10, 27, 7, 21, 40)
+    end = local_epoch(2026, 10, 27, 9, 30, 26)
+    computed = local_epoch(2026, 10, 27, 9, 30, 47)
+    with temp_dir(prefix="wg-gap-") as home:
+        fixture_home(home)
+        restore = gap_at(home)
+        try:
+            wg_gap.record(fixed_record(computed, start, end))
+            note = wg_gap.describe()
+        finally:
+            restore()
+    return ("07:21:40–09:30:26" in note
+            and "2026-10-27 09:30:47" in note
+            and "仅供参考" in note
+            and "漏 29 条" in note)
+
+
+@case
+def window_note_距今多久可按时刻钉():
+    """`window_note(now=...)` 的「多久前」可钉（issue #148）。
+
+    与上一条分开：上一条钉生产形态的措辞，这条钉相对量本身——`now` 是 12:20:00，
+    账本 09:30:47 计算，差 2 小时 49 分。相对量算错（拿消息时间当基准、或算成
+    绝对时刻）的实现红在这里。
+    """
+    start = local_epoch(2026, 10, 27, 7, 21, 40)
+    end = local_epoch(2026, 10, 27, 9, 30, 26)
+    computed = local_epoch(2026, 10, 27, 9, 30, 47)
+    now = local_epoch(2026, 10, 27, 12, 20, 0)
+    with temp_dir(prefix="wg-gap-") as home:
+        fixture_home(home)
+        restore = gap_at(home)
+        try:
+            wg_gap.record(fixed_record(computed, start, end))
+            note = wg_gap.window_note(now=now)
+        finally:
+            restore()
+    return ("07:21:40–09:30:26" in note and "2 小时 49 分前" in note
+            and "仅供参考" in note)
+
+
+@case
+def describe_无缺口时仍返回空串():
+    """排除型对照（issue #148）：恒加窗口注脚的实现红在这条。
+
+    与契约 2 的后半条同口径，但这里专门针对新加的注脚——把窗口无条件拼进
+    `describe()` 的实现会在这里红。`window_note()` 自己也要空串。
+    """
+    start = local_epoch(2026, 10, 27, 7, 21, 40)
+    end = local_epoch(2026, 10, 27, 9, 30, 26)
+    computed = local_epoch(2026, 10, 27, 9, 30, 47)
+    with temp_dir(prefix="wg-gap-") as home:
+        fixture_home(home)
+        restore = gap_at(home)
+        try:
+            wg_gap.record(fixed_record(computed, start, end, missing=0))
+            empty = wg_gap.describe()
+        finally:
+            restore()
+    return empty == ""
+
+
+# ---------- 契约 12：跨天窗口两端补日期 ----------
+
+
+@case
+def 跨天窗口两端补日期():
+    """issue #148：夜间停机段的窗口只写时分秒，下午读起来像今天早上漏的。
+
+    夹具：窗口 10-26 23:50:00 → 10-27 07:21:40。两端都要带 `MM-DD`。
+    """
+    start = local_epoch(2026, 10, 26, 23, 50, 0)
+    end = local_epoch(2026, 10, 27, 7, 21, 40)
+    computed = local_epoch(2026, 10, 27, 7, 22, 5)
+    with temp_dir(prefix="wg-gap-") as home:
+        fixture_home(home)
+        restore = gap_at(home)
+        try:
+            wg_gap.record(fixed_record(computed, start, end))
+            note = wg_gap.describe()
+        finally:
+            restore()
+    return ("10-26 23:50:00–10-27 07:21:40" in note
+            and "仅供参考" in note)
+
+
+@case
+def 同一天窗口不补日期():
+    """对照组（issue #148）：恒带日期的实现红在这条。
+
+    同一天的窗口只写 `HH:MM:SS–HH:MM:SS`，多加日期只是噪声。窗口本身仍要在。
+    """
+    start = local_epoch(2026, 10, 27, 7, 21, 40)
+    end = local_epoch(2026, 10, 27, 9, 30, 26)
+    computed = local_epoch(2026, 10, 27, 9, 30, 47)
+    with temp_dir(prefix="wg-gap-") as home:
+        fixture_home(home)
+        restore = gap_at(home)
+        try:
+            wg_gap.record(fixed_record(computed, start, end))
+            note = wg_gap.describe()
+        finally:
+            restore()
+    return ("07:21:40–09:30:26" in note and "10-27 07:21:40" not in note)
+
+
+# ---------- 契约 13：漏收 @ 的时间戳带日期 ----------
+
+
+@case
+def 漏收at的时间戳带日期():
+    """issue #148：漏掉的 @ 可能是昨夜停机时段的，只给时分秒会读成「刚漏的」。
+
+    `at_me_lines()` 用 `stamp()`（带日期），与唤醒行的 `clock()`（`HH:MM:SS`）
+    不同形——两者同形时 Agent 分不清哪条是现刻待回、哪条是账本历史。
+    """
+    start = local_epoch(2026, 10, 26, 23, 50, 0)
+    end = local_epoch(2026, 10, 27, 7, 21, 40)
+    computed = local_epoch(2026, 10, 27, 7, 22, 5)
+    missed_at = local_epoch(2026, 10, 27, 3, 5, 9)
+    line = {"msg_id": "d", "time": int(missed_at), "sender": "乙", "body": "在吗"}
+    with temp_dir(prefix="wg-gap-") as home:
+        fixture_home(home)
+        restore = gap_at(home)
+        try:
+            wg_gap.record(fixed_record(computed, start, end, missing=1, at_me=1,
+                                      at_me_lines=[line]))
+            lines = wg_gap.at_me_lines()
+            # 唤醒行的时间戳口径（对照）：同一时刻只给时分秒
+            wake_stamp = wg_clock.clock(missed_at)
+        finally:
+            restore()
+    if len(lines) != 1:
+        return False
+    text = lines[0]
+    # 「不同形」的判据是**时间戳字段的形态**，不是「串里有没有出现过时分秒」：
+    # 带日期的行里当然也含 `03:05:09`，只查子串会把修复版判红（假红）。这里钉
+    # `id=- msg_id=<id> YYYY-MM-DD HH:MM:SS ` 这个前缀，唤醒行则是
+    # `id=<正数> HH:MM:SS `——两者第一眼就能分开。
+    return (STAMPED_GAP_LINE.match(text) is not None
+            and "2026-10-27 03:05:09" in text
+            and "id=-" in text and "msg_id=d" in text
+            and "乙" in text and "在吗" in text
+            # 对照：唤醒行口径的同一时刻确实只有时分秒（证明两种形态真的不同）
+            and wake_stamp == "03:05:09")
 
 
 def main():

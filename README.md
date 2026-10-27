@@ -282,15 +282,19 @@ dossier.py --dump 60            # 取一批素材，最早的优先
 dossier.py --digest             # 规则版消化：纯关键词，不调模型
 dossier.py --mark --through <id> # 推游标（顺带清零「连续无人指名」计数）
 dossier.py --tick               # 记一轮没人指名；listen.py 每轮静默后自动调
+dossier.py --notes              # 看本群术语表（黑话 / 店名 / 约定）
+dossier.py --notes-apply 术语.json  # 写术语：[{"term": "...", "value": "..."}]
 ```
 
-触发条件在 `config.json` 的 `dossier` 段：攒够 `burst_messages`（默认 80）直接触发；或者闲置超过 `idle_minutes`（默认 20）且攒了 `min_messages`（默认 25）；或者连续 `quiet_rounds`（默认 3）轮 `listen.py` 都没被指名、且首轮距今超过 `quiet_minutes`（默认 5，下限保护）并至少有 `quiet_min_messages`（默认 1）条素材。三条判据并列，各自独立命中，互不改写。
+触发条件在 `config.json` 的 `dossier` 段：攒够 `burst_messages`（默认 80）直接触发；或者闲置超过 `idle_minutes`（默认 20）且攒了 `min_messages`（默认 25）；或者连续 `quiet_rounds`（默认 3）轮 `listen.py` 都没被指名、且这几轮加起来超过 `quiet_minutes`（默认 4，下限保护）并至少有 `quiet_min_messages`（默认 1）条素材。三条判据并列，各自独立命中，互不改写。
 
-最后那条是给「群里一直聊、但没人 @ 我」的常态准备的：默认 90s 一轮，3 轮约 4.5 分钟（取整称 5 分钟）。轮次是主判据，分钟数是下限——`--timeout 30` 时三轮只有 90 秒，只钉轮次会让「约 5 分钟」变成假话。计数由 `listen.py` 在每轮静默超时后写进 `state/wg_dossier.json`，有人指名（`WAKE`）或 `--mark` 时归零；`reply.py --wait` 续挂的 `--no-digest` 与门禁的 `--probe` 都不计数。`--check` 的 `NO` 行会带上当前进度（`quiet=2/3(4.1min)`），`YES` 行会说明是哪条判据命中的。
+最后那条是给「群里一直聊、但没人 @ 我」的常态准备的：默认 90s 一轮，3 轮约 4.5 分钟。轮次是主判据，分钟数是下限——`--timeout 30` 时三轮只有 90 秒，只钉轮次会让「挂满一段时间」变成假话。**下限默认 4 而不是 5**：三个默认轮次只有 4.5 分钟，下限取 5 会让默认配置下第 3 轮永远过不去，轮次判据变成死码（`NO` 行照样显示 `3/3`，只是永远差一步）。`quiet_since` 记的是首轮**开始**（`--tick --round-seconds` 把 `watch.py --timeout` 的时长回推掉），否则 N 轮只跨 N−1 个间隔。计数由 `listen.py` 在每轮静默超时后写进 `state/wg_dossier.json`，有人指名（`WAKE`）或 `--mark` 时归零；`reply.py --wait` 续挂的 `--no-digest` 与门禁的 `--probe` 都不计数。`--check` 的 `NO` 行会带上当前进度（`quiet=2/3(4.1min)`），`YES` 行会说明是哪条判据命中的。
 
 两层：`--digest` 走关键词打标，零成本，每次超时都该跑；`--dump` → 提炼 → `consolidate_chat_memory` → `--mark` 是模型版，质量高但贵，只在 `--check` 说该做时才做。
 
-群友记忆只通过 MCP 工具维护（`query_member_dossier` / `update_member_dossier` / `consolidate_chat_memory`），**不要直连 SQLite**。
+画像沉淀下来是要用的：唤醒行、`reply.py --list` / `--context` 会附上命中的那几个人（发送者 + 正文点名的，最多两个）的一行画像——外号、XP、最近一条记忆、本群八卦；唤醒块末尾另有一行本群术语。只在命中时附，截断到 60 字/人，不占正文额度；要看某个人的完整卡用 `reply.py --who <花名>`。这一层是只读的，口径唯一出处在 `water-group/daemon/wg_dossiers.py`。
+
+写侧有两条路：MCP 工具（`query_member_dossier` / `update_member_dossier` / `consolidate_chat_memory`）与 daemon 侧的 `dossier.py`（`--apply` 写画像、`--notes-apply` 写群级术语、`--ingest` 写群级事件）。**不要直连 SQLite**。
 
 ### 人格卡
 

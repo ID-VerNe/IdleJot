@@ -84,9 +84,11 @@ DEFAULTS = {
     # 连续多少轮 watch.py 超时（= 这一轮没人指名）后判 DUE（issue #162）。
     # 轮次是主判据：需求说的是「连续 3 次挂 listen」。
     "quiet_rounds": 3,
-    # 下限保护：首轮超时距现在不足这么多分钟就不触发。90s × 3 = 270s ≈ 4.5 分钟，
-    # 取整称 5 分钟；`--timeout 30` 时 3 轮只有 90 秒，光钉轮次会让这句话变假。
-    "quiet_minutes": 5,
+    # 下限保护：这几轮加起来不足这么多分钟就不触发。`--timeout 30` 时 3 轮只有
+    # 90 秒，光钉轮次会让「挂满约 5 分钟」变成假话。默认 90s/轮 × 3 = 270s =
+    # 4.5 分钟，下限取 4 留 30s 余量——**不能取 5**：5 > 4.5 会让默认配置下 3 轮
+    # 永远过不去，轮次判据就成了死码（issue #162 修复过程中实测到过这个坑）。
+    "quiet_minutes": 4,
     # 静默路径的素材下限：0 条时触发等于空跑一次模型调用（issue 待讨论 1）。
     "quiet_min_messages": 1,
 }
@@ -298,7 +300,7 @@ def cmd_check(cfg):
     return NOT_YET
 
 
-def cmd_tick(reset=False):
+def cmd_tick(reset=False, round_seconds=None):
     """Count one round nobody named us, or clear the counter (issue #162).
 
     Called by `listen.py` right after `watch.py` returns 2 (timed out = this
@@ -308,6 +310,15 @@ def cmd_tick(reset=False):
     `quiet_since` is written on the first counted round and never moved after
     that -- moving it would keep pushing the floor ahead of the rounds and the
     path would never fire.
+
+    It is written as the *start* of that first round, not its end: `--tick`
+    runs after `watch.py --timeout N` has already returned, so "now" is the
+    moment round 1 ended. Anchoring there makes N rounds span only N-1
+    intervals, and the `quiet_minutes` floor then quietly pushes the default
+    configuration from round 3 out to round 5 -- the rounds criterion would
+    still look alive in the `NO` line while never firing (issue #162).
+    `round_seconds` is how long that round actually waited, so the elapsed
+    time the `NO` line prints is the time the group was really quiet.
     """
     if reset:
         save_mark({"quiet_rounds": 0, "quiet_since": None})
@@ -316,7 +327,11 @@ def cmd_tick(reset=False):
     rounds, since = quiet_state()
     updates = {"quiet_rounds": rounds + 1}
     if since is None:
-        updates["quiet_since"] = time.time()
+        try:
+            back = max(0.0, float(round_seconds or 0))
+        except (TypeError, ValueError):
+            back = 0.0
+        updates["quiet_since"] = time.time() - back
     data = save_mark(updates)
     print(f"quiet rounds={data.get('quiet_rounds')} since="
           f"{wg_clock.clock(data.get('quiet_since')) if data.get('quiet_since') else '-'}")
@@ -642,6 +657,57 @@ def cmd_restore_pollution(as_json=False, dry_run=False):
     return 0
 
 
+def cmd_notes(source=None, group=None, dry_run=False, as_json=False):
+    """群级结构化术语的读与写（issue #31 的 daemon 侧入口，issue #163 接链）。
+
+    不给 ``source`` 就是读：把本群的术语表原样列出来（`term=value`，附 kind 与
+    更新时间）。给了就是一个 JSON 载荷
+    ``[{"term": "遥遥领先", "value": "自嘲用法", "kind": "glossary"}]``，走
+    `upsert_group_notes` 按 ``(群号, term)`` 覆盖写——同一个词在一个群里只有一个
+    意思，不累积历史。
+
+    写侧本来只有 MCP 的 `consolidate_chat_memory(notes=...)` 调得到，而水群 Agent
+    走的是 daemon CLI：不补这个入口，`group_notes` 会一直是 0 行，唤醒行的
+    「【群级术语】」也就永远不触发。
+    """
+    gid = resolve_group(group)
+    if not gid:
+        print("no group id: pass --group, or bind a session first", file=sys.stderr)
+        return 2
+    mem = engine()
+    if source is None:
+        notes = mem.query_group_notes(gid)
+        lines = [f"=== 群级术语 group={gid} 共 {len(notes)} 条 ==="]
+        lines += [f"  {n['term']}={n['value']}（{n['kind']}）" for n in notes] or ["  （空）"]
+        emit({"group_id": gid, "notes": notes}, as_json, lines)
+        return 0
+    try:
+        payload = json.loads(read_payload(source))
+    except OSError as exc:
+        print(f"cannot read {source}: {exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"payload is not valid JSON: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(payload, list) or not payload:
+        print("payload must be a non-empty list of {term, value, kind}", file=sys.stderr)
+        return 2
+    bad = [f"notes[{i}] needs term" for i, n in enumerate(payload)
+           if not isinstance(n, dict) or not str(n.get("term") or "").strip()]
+    if bad:
+        for line in bad:
+            print(line, file=sys.stderr)
+        return 2
+    if dry_run:
+        print(f"would upsert {len(payload)} note(s) group={gid}")
+        for n in payload:
+            print(f"  {n['term']}={n.get('value', '')}")
+        return 0
+    result = mem.upsert_group_notes(gid, payload)
+    emit(result, as_json, [f"notes updated={result.get('updated', 0)} group={gid}"])
+    return 0 if result.get("success") else 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="在没人 @ 的时候沉淀群友画像")
     parser.add_argument("--check", action="store_true", help="该提炼了吗")
@@ -652,6 +718,9 @@ def main():
     parser.add_argument("--tick", nargs="?", const="round", choices=("round", "reset"),
                         metavar="{round,reset}",
                         help="记一轮「没人指名」（缺省 round）；reset 清零（有人指名时用）")
+    parser.add_argument("--round-seconds", type=float, metavar="S",
+                        help="配合 --tick round：这一轮实际等了多久（`listen.py` 传 --timeout）；"
+                             "首轮据此把 quiet_since 回推到本轮开始，否则 N 轮只算 N-1 个间隔")
     parser.add_argument("--through", type=int, metavar="ID",
                         help="配合 --mark / --ingest：只推进到这批素材的最后一条，便于分批处理积压")
     parser.add_argument("--ingest", metavar="FILE",
@@ -664,6 +733,10 @@ def main():
                         help="剔除主档中覆盖行已持有的群内事实，原列表入 key_memories_backup")
     parser.add_argument("--restore-pollution", action="store_true",
                         help="按 key_memories_backup 还原上一次 scrub")
+    parser.add_argument("--notes", action="store_true",
+                        help="读本群术语表（黑话 / 店名 / 约定，issue #31）")
+    parser.add_argument("--notes-apply", metavar="JSON",
+                        help="按 JSON 载荷写群级术语（[{term,value,kind}]），- 读 stdin")
     parser.add_argument("--json", action="store_true", help="机器可读输出（配合上面三个动词）")
     parser.add_argument("--group", metavar="ID",
                         help="群号；缺省取活动会话或载荷里的 group_id")
@@ -676,7 +749,7 @@ def main():
     if args.mark:
         return cmd_mark(args.through)
     if args.tick is not None:
-        return cmd_tick(args.tick == "reset")
+        return cmd_tick(args.tick == "reset", args.round_seconds)
     if args.ingest is not None:
         return cmd_ingest(args.ingest, args.group, args.through, args.dry_run)
     if args.apply is not None:
@@ -687,6 +760,8 @@ def main():
         return cmd_scrub_pollution(args.json, args.dry_run)
     if args.restore_pollution:
         return cmd_restore_pollution(args.json, args.dry_run)
+    if args.notes or args.notes_apply is not None:
+        return cmd_notes(args.notes_apply, args.group, args.dry_run, args.json)
     if args.digest:
         return cmd_digest()
     if args.dump is not None:
@@ -694,6 +769,7 @@ def main():
     if args.check:
         return cmd_check(cfg)
     parser.error("需要 --check / --dump / --mark / --tick / --digest / --ingest / --apply / "
+                 "--notes / --notes-apply / "
                  "--audit-pollution / --scrub-pollution / --restore-pollution 之一")
 
 

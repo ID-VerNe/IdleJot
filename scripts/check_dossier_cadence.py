@@ -27,7 +27,15 @@ issue #162 的现象：`dossier.py --check` 只有两条阈值（攒够 `burst_m
 10. 对照组：同一组 `now`、同一份 `quiet_since`，只把 `quiet_rounds` 降到 2，
     全部必须 NOT_YET——否则「绿」只证明时长这一维被读到，轮次那一维是死的；
 11. `NO` 行的 `quiet=2/3(4.1min)` 用**正则捕获组**逐字段比，不拿子串（#151/#152
-    的教训：`"2/3" in text` 挡不住「rounds 印对、since 印错」的坏实现）。
+    的教训：`"2/3" in text` 挡不住「rounds 印对、since 印错」的坏实现）；
+12. 写坏的 mark 值（`quiet_since: false` / 字符串 / 列表 / 负数）降级成「没有
+    计数」，不崩、也不变成「下限恒过」（`bool` 是 `int` 子类的坑，同 #124）；
+13. **默认配置下第 3 轮必须 DUE**。这条补的是一个真实漏测：前 12 条全绿时，
+    默认 `quiet_minutes=5` 让 3 轮（4.5 分钟）永远过不了下限，实际要到第 5 轮
+    才触发——轮次判据成了死码，而 `NO` 行照样显示 `3/3`。用例 2 把下限覆盖成 0、
+    用例 3 只钉「下限在拦」，没有一条断言默认组合能真的触发。修法是两头：
+    `--tick --round-seconds` 把 `quiet_since` 回推到首轮**开始**（否则 N 轮只跨
+    N-1 个间隔），默认下限取 4（< 4.5 留余量）。用例同时钉住两头。
 
 已知边界（这条门禁**不**声称能抓住的）：
 
@@ -494,6 +502,104 @@ def test_bad_mark_values_do_not_crash(home):
     print(f"✓ 12. {len(cases)} 种写坏的 mark 值都降级成「没有计数」，不崩、不变成恒真")
 
 
+def test_default_config_fires_on_round_three(home):
+    """默认配置 + 默认 90s 轮长 → **第 3 轮就该 DUE**（issue #162）。
+
+    这条用例来自一次真实的自查：前面 12 条全绿，默认配置却要到第 5 轮才触发。
+
+    根因是 `--tick` 跑在 `watch.py` **返回之后**，所以首轮记下的 `quiet_since`
+    是本轮**结束**的时刻；N 轮于是只跨 N-1 个间隔，`quiet_minutes=5` 的下限
+    要求「5 分钟」就等于 3.33 个间隔，把默认配置推到第 5 轮。轮次判据在 `NO`
+    行里照样显示 `3/3`，看起来是活的，实际永远差一步。
+
+    为什么前面没抓住：用例 2 把 `quiet_minutes` 覆盖成 0（下限完全不参与），
+    用例 3 只断言「3 轮 + 默认下限 → NOT_YET」，**没有任何一条断言默认组合下
+    第 3 轮必须 DUE**。缺的不是数量，是「默认值组合」这个维度。
+
+    修法两头都要：`--tick` 用 `--round-seconds` 把 `quiet_since` 回推到本轮开始，
+    `quiet_minutes` 的默认值取 4（< 4.5 分钟的三个间隔，留 30s 余量）。这条用例
+    同时钉住两头——只改一边，第 3 轮就过不去。
+    """
+    seed_store(home, messages=4)
+    # 默认配置：不覆盖任何阈值，`quiet_rounds=3` / `quiet_minutes=4`。
+    dossier = _dossier_module()
+    cfg = dict(dossier.DEFAULTS)
+    assert cfg["quiet_rounds"] == 3, f"默认轮次判据被改了：{cfg['quiet_rounds']}"
+    # 三个默认 90s 轮次 = 270s = 4.5 分钟。下限必须小于它，否则默认配置下
+    # 轮次判据永远被下限挡住，变成死码。
+    span = cfg["quiet_rounds"] * 90 / 60.0
+    assert cfg["quiet_minutes"] < span, (
+        f"默认 quiet_minutes={cfg['quiet_minutes']} 不小于 "
+        f"{cfg['quiet_rounds']} 个默认轮次（{span:.1f}min）——"
+        f"默认配置下轮次判据永远触发不了，issue #162 的需求等于没做")
+
+    # 回推那一维用进程内单测：`--check` 是真实子进程、读真实时钟，patch 过的
+    # 模块时钟只影响本进程，混用会得到「写进去的是模拟时刻、读出来按真实时钟算」
+    # 的假象。所以这里只验 `quiet_since` 落盘的位置对不对。
+    start = time.time()
+    with patch.object(dossier, "MARK", home / MARK_REL):
+        for index in range(3):
+            moment = start + index * 90
+            with patch.object(dossier.time, "time", lambda moment=moment: moment):
+                assert dossier.cmd_tick(False, 90) == 0
+        state = mark(home)
+        assert state.get("quiet_rounds") == 3, state
+        elapsed = (moment - float(state["quiet_since"])) / 60
+        assert 4.4 <= elapsed <= 4.6, (
+            f"首轮开始时刻没被回推：elapsed={elapsed:.2f}min，"
+            f"应约等于 3 × 90s = 4.5min；"
+            f"若约 3.0min 说明 quiet_since 记的是首轮结束（N 轮只跨 N-1 个间隔）")
+
+    # 端到端那一维用真实子进程 + 缩短的轮长：三个 1s 轮次 = 3s，把下限临时
+    # 压到 0.02min（1.2s）就等价于「3 个间隔已过下限」。这里验的是默认
+    # `quiet_minutes` 与默认 `quiet_rounds` 的**关系**能真的触发，不是数字本身。
+    write_config(home, {"quiet_minutes": 0.02})
+    reset = tick(home, "reset")
+    assert reset.returncode == 0, (reset.returncode, reset.stdout, reset.stderr)
+    for _ in range(3):
+        done = tick(home, "--round-seconds", "1")
+        assert done.returncode == 0, (done.returncode, done.stdout, done.stderr)
+    state = mark(home)
+    assert state.get("quiet_rounds") == 3, state
+    three = check(home)
+    assert three.returncode == 0, (
+        f"3 轮且下限已过必须 DUE，实际 {three.returncode}：{three.stdout}")
+    line = next((ln for ln in three.stdout.splitlines() if ln.startswith("YES")), "")
+    assert line.startswith("YES quiet"), line
+    print(f"✓ 13. 默认轮次=3 + 下限 {cfg['quiet_minutes']}min < 3×90s={span:.1f}min，"
+          f"第 3 轮 DUE（{line}）")
+
+
+def test_listen_backdates_first_round(home):
+    """真实 `listen.py` 静默一轮 → `quiet_since` 被回推到**这一轮开始**（issue #162）。
+
+    `--tick` 跑在 `watch.py --timeout N` 返回**之后**，所以它看到的「现在」是本轮
+    结束。不回推的话首轮记成结束时刻，N 轮只跨 N-1 个间隔，默认配置被
+    `quiet_minutes` 推到第 5 轮（用例 13 钉的是判据那一侧，这条钉接线）。
+
+    这条来自变异测试：把 `listen.py` 的 `tick(round_seconds=wait)` 改回 `tick()`，
+    用例 13 照样全绿——它走的是直接调 `--tick`，根本没经过 `listen.py` 的传参。
+    新加的接线必须有对应的用例，否则等于没接。
+
+    用 `--timeout 2` 把量级压到秒：`quiet_since` 距 now 应约 2s，而不是约 0s。
+    """
+    seed_store(home, messages=0)
+    before = time.time()
+    done = run(home, LISTEN, "--timeout", "2", "--cycles", "1")
+    after = time.time()
+    assert done.returncode == 0, (done.returncode, done.stdout, done.stderr)
+    state = mark(home)
+    assert state.get("quiet_rounds") == 1, (state, done.stdout[-800:])
+    since = float(state["quiet_since"])
+    # 回推量 = 这一轮实际等的秒数。允许 watch.py 自己的启动开销，只要求
+    # 「since 早于本轮开始之前一点点」而不是「约等于 now」。
+    back = after - since
+    assert 1.5 <= back <= (after - before) + 3.5, (
+        f"quiet_since 没有回推到本轮开始：距 now {back:.2f}s，"
+        f"--timeout 2 时应约 2s 以上（记成结束时刻的话约 0s）")
+    print(f"✓ 14. listen.py --timeout 2 → quiet_since 回推 {back:.2f}s（首轮开始）")
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -531,8 +637,14 @@ def main():
         seed_store(home)
         write_config(home)
         test_bad_mark_values_do_not_crash(home)
+    with temp_dir(prefix="wg-cadence-") as home:
+        write_config(home)
+        test_default_config_fires_on_round_three(home)
+    with temp_dir(prefix="wg-cadence-") as home:
+        write_config(home)
+        test_listen_backdates_first_round(home)
     print("=" * 72)
-    print("✓ dossier 沉淀时机（连续 N 轮无人指名）12 项门禁全部通过")
+    print("✓ dossier 沉淀时机（连续 N 轮无人指名）14 项门禁全部通过")
     print("=" * 72)
 
 

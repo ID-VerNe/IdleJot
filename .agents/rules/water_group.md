@@ -72,8 +72,9 @@
 
 触发有三条（`config.json` 的 `dossier` 段）：攒够 `burst_messages`（默认 80）；
 或闲置 `idle_minutes`（默认 20）且攒够 `min_messages`（默认 25）；或连续
-`quiet_rounds`（默认 3）轮 `listen.py` 没人指名、首轮距今超过 `quiet_minutes`
-（默认 5）且至少 `quiet_min_messages`（默认 1）条素材。轮次由 `listen.py` 每轮
+`quiet_rounds`（默认 3）轮 `listen.py` 没人指名、这几轮加起来超过 `quiet_minutes`
+（默认 4，须小于 3 × 轮长，否则轮次判据成死码）且至少 `quiet_min_messages`
+（默认 1）条素材。轮次由 `listen.py` 每轮
 静默后 `--tick` 自己记，`WAKE` 与 `--mark` 清零；`--no-digest` 与 `--probe` 不计。
 
 写档案只走 MCP `update_member_dossier` / `query_member_dossier` / `consolidate_chat_memory`，

@@ -88,6 +88,11 @@ NO_RESTART = {
     "water-group/daemon/wg_clock.py": "shared clock helper for guard/CLI, no daemon imports it",
     "water-group/daemon/wg_quotes.py": "shared quote renderer for guard/CLI, no daemon imports it",
     "water-group/daemon/wg_text.py": "shared body renderer for guard/CLI, no daemon imports it",
+    # issue #163：画像渲染（wg_dossiers）与 --context 读链（wg_context）只被
+    # watch / reply 这两个一次性 CLI import；守护进程里没有副本，改了下次调用
+    # 自然生效，重启子进程没有意义。
+    "water-group/daemon/wg_dossiers.py": "shared dossier renderer for CLI (watch/reply), no daemon imports it",
+    "water-group/daemon/wg_context.py": "shared context reader for CLI (reply), no daemon imports it",
     "water-group/daemon/wg_aliases.py": "shared alias renderer for CLI (watch/reply), no daemon imports it",
     "water-group/daemon/wg_budget.py": "shared wait-budget constants for CLI (reply/listen), no daemon imports it",
     "water-group/daemon/wg_bubbles.py": "shared bubble-cap/split helper for CLI (reply), no daemon imports it",

@@ -114,7 +114,7 @@ def run(script, *args):
                                       cwd=str(ROOT))
 
 
-def tick(mode="round"):
+def tick(mode="round", round_seconds=None):
     """Count one round nobody named us (issue #162); `reset` clears the counter.
 
     Not routed through `run`: that relays the child's text, and a line per round
@@ -127,9 +127,17 @@ def tick(mode="round"):
     A failure is reported rather than swallowed: a counter that silently stops
     growing looks exactly like "the group keeps mentioning us", and that is the
     bug this whole path exists to fix.
+
+    `round_seconds` is the wait this round actually spent (`--timeout`, possibly
+    clamped by the budget). `--tick` runs *after* `watch.py` returns, so without
+    it the first round is anchored at its own end and N rounds only span N-1
+    intervals -- with the `quiet_minutes` floor that pushed the default
+    configuration from round 3 to round 5.
     """
-    result = winconsole.run_hidden([python_exe(), str(HERE / "dossier.py"),
-                                    "--tick", mode], cwd=str(ROOT),
+    args_ = [python_exe(), str(HERE / "dossier.py"), "--tick", mode]
+    if round_seconds:
+        args_ += ["--round-seconds", str(round_seconds)]
+    result = winconsole.run_hidden(args_, cwd=str(ROOT),
                                    capture_output=True, text=True,
                                    encoding="utf-8", errors="replace")
     if result.returncode != 0:
@@ -230,7 +238,7 @@ def _rounds(args):
         # also run by hand and by gates, and neither should inflate a counter
         # that spans processes. Probes are excluded for the same reason as above.
         if not args.probe:
-            tick()
+            tick(round_seconds=wait)
         # Rule-based digestion is free, so it runs on every quiet stretch; the
         # model-backed pass is left to whoever picks up the DOSSIER_DUE below.
         run("dossier.py", "--digest")

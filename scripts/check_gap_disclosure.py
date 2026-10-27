@@ -88,7 +88,11 @@ GROUP = "123"
 
 # 漏收行的形态（契约 13）：`id=- msg_id=<id> YYYY-MM-DD HH:MM:SS [漏] <人>: <正文>`。
 # 唤醒行是 `id=<正数> HH:MM:SS ...`——带日期是两者的分界线，不靠「有没有时分秒」判。
-STAMPED_GAP_LINE = re.compile(r"^id=- msg_id=\S+ \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[漏\] ")
+# 两个捕获组（issue #151 复核）：`(\\S+)` 是消息 id、`(...)` 是行首那个时间戳字段。
+# 判据必须比对**捕获到的那个字段**，不能在整行里找子串——子串在行尾也能命中，
+# 「头字段日期是错的、行尾补一句正确时刻」的实现在子串判据下是绿的。
+STAMPED_GAP_LINE = re.compile(
+    r"^id=- msg_id=(\S+) (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[漏\] ")
 
 
 def fixture_home(home):
@@ -711,7 +715,9 @@ def describe_无缺口时仍返回空串():
     """排除型对照（issue #148）：恒加窗口注脚的实现红在这条。
 
     与契约 2 的后半条同口径，但这里专门针对新加的注脚——把窗口无条件拼进
-    `describe()` 的实现会在这里红。`window_note()` 自己也要空串。
+    `describe()` 的实现会在这里红。`window_note()` 自己也要空串（issue #151：
+    早先 docstring 这么写但断言只查 `describe()`，恒返回非空的 `window_note()`
+    能骗过；当前调用图下不可达，属措辞与断言不一致）。
     """
     start = local_epoch(2026, 10, 27, 7, 21, 40)
     end = local_epoch(2026, 10, 27, 9, 30, 26)
@@ -722,9 +728,10 @@ def describe_无缺口时仍返回空串():
         try:
             wg_gap.record(fixed_record(computed, start, end, missing=0))
             empty = wg_gap.describe()
+            note = wg_gap.window_note()
         finally:
             restore()
-    return empty == ""
+    return empty == "" and note == ""
 
 
 # ---------- 契约 12：跨天窗口两端补日期 ----------
@@ -780,11 +787,24 @@ def 漏收at的时间戳带日期():
 
     `at_me_lines()` 用 `stamp()`（带日期），与唤醒行的 `clock()`（`HH:MM:SS`）
     不同形——两者同形时 Agent 分不清哪条是现刻待回、哪条是账本历史。
+
+    夹具的日期**刻意与窗口两端都不同**（窗口跨三天、消息落在中间那天，issue
+    #151）：早先窗口与消息同日时，「拿 `window_end` 的日期冒充消息日期」的坏
+    实现能骗过本用例——它输出「看起来带日期、但日期是错的」，比不带日期更
+    容易误导读者。日期分离后，任何**借用窗口或账本时刻日期**的实现都会红。
+
+    判据比对**行首时间戳字段本身**，不是在整行里找子串（复核补强）：子串判据
+    挡不住「头字段日期错、行尾补一句正确时刻」的实现，那种输出对读者而言与
+    坏实现同害，不该判绿。
+
+    本用例覆盖不到的：把日期**硬编码**成夹具那一天的实现。固定夹具对它没有
+    判别力（要覆盖得用多组不同日期的夹具），这是本用例的已知边界，不是
+    「任何错日期都会红」——docstring 不这么声称。
     """
-    start = local_epoch(2026, 10, 26, 23, 50, 0)
+    start = local_epoch(2026, 10, 25, 22, 0, 0)
     end = local_epoch(2026, 10, 27, 7, 21, 40)
     computed = local_epoch(2026, 10, 27, 7, 22, 5)
-    missed_at = local_epoch(2026, 10, 27, 3, 5, 9)
+    missed_at = local_epoch(2026, 10, 26, 3, 5, 9)
     line = {"msg_id": "d", "time": int(missed_at), "sender": "乙", "body": "在吗"}
     with temp_dir(prefix="wg-gap-") as home:
         fixture_home(home)
@@ -800,13 +820,22 @@ def 漏收at的时间戳带日期():
     if len(lines) != 1:
         return False
     text = lines[0]
+    msg_stamp = wg_clock.stamp(missed_at)
+    # 夹具前提，不是对实现的断言：消息日期必须与窗口两端都不同，否则「借窗口
+    # 日期冒充消息日期」的坏实现与正确实现同形，本用例退回零判别力。写成显式
+    # 前置检查而不是塞进 return，是为了它红的时候一眼看得出是夹具被动过。
+    if msg_stamp[:10] in {wg_clock.stamp(start)[:10], wg_clock.stamp(end)[:10]}:
+        return False
     # 「不同形」的判据是**时间戳字段的形态**，不是「串里有没有出现过时分秒」：
     # 带日期的行里当然也含 `03:05:09`，只查子串会把修复版判红（假红）。这里钉
     # `id=- msg_id=<id> YYYY-MM-DD HH:MM:SS ` 这个前缀，唤醒行则是
     # `id=<正数> HH:MM:SS `——两者第一眼就能分开。
-    return (STAMPED_GAP_LINE.match(text) is not None
-            and "2026-10-27 03:05:09" in text
-            and "id=-" in text and "msg_id=d" in text
+    # issue #151 复核：日期还得**就是这个字段里的**值，所以比 `group(2)` 而不是
+    # `in text`——行尾补一句「（原时刻 2026-10-26 03:05:09）」不该算通过。
+    m = STAMPED_GAP_LINE.match(text)
+    return (m is not None
+            and m.group(1) == "d"
+            and m.group(2) == msg_stamp
             and "乙" in text and "在吗" in text
             # 对照：唤醒行口径的同一时刻确实只有时分秒（证明两种形态真的不同）
             and wake_stamp == "03:05:09")

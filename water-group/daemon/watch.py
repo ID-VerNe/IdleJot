@@ -11,6 +11,14 @@ follow-up window is open (追问窗口插件，issue #4 PD2a) ordinary chatter a
 last reply counts too, read straight from chat_inbox. They never overlap — a
 mention always wins — and the window closes itself once the group goes quiet.
 
+A wake line says who spoke and what they said; it also carries what the bot already
+knows about them (issue #163): the sender's dossier card -- aliases, XP, the freshest
+memory, this group's latest gossip -- plus a card for anyone the text names, and one
+line of this group's terms (black talk, shop names, conventions) per wake block. Only
+people actually identified get a card, each card is one clipped line, and the body's
+80-character budget is computed before the cards are appended, so the dossier never
+eats the message (see `wg_dossiers`).
+
 A wake that aged out while nobody was listening is not reported as a wake (the
 cold start would replay days of dead mentions), but it is no longer silent
 either: the timeout block ends with an ``EXPIRED:`` count and its ids, so
@@ -42,7 +50,9 @@ import up  # noqa: E402  (wake_reason / events / replied_ids live there)
 import wg_budget  # noqa: E402  (等待预算，issue #83)
 import wg_aliases  # noqa: E402  (别名指向渲染，issue #30)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
+import wg_dossiers  # noqa: E402  (群友画像 / 群级术语，issue #163)
 import wg_images  # noqa: E402  (图片标记渲染)
+import wg_isolation  # noqa: E402  (本会话只管一个群，issue #164 PA)
 import wg_listener_state  # noqa: E402  (监听存亡账本的续心跳，issue #112)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
@@ -164,9 +174,27 @@ def main():
     deadline = time.time() + args.timeout
     ledger = up.replied_ids()
 
+    # issue #164 PA：本会话只管一个群。事件流是单文件混装所有群（collector 写入点
+    # 只有一个），所以过滤只能在这一侧做——改前这里一条与 conversation_id 有关的
+    # 条件都没有，钉死群 111 的会话照样被群 222 的 @ 叫醒。未钉死时 rows_of 原样
+    # 返回（单群机器与改前完全一致），并打一行说明隔离没生效。
+    note = wg_isolation.note()
+    if note:
+        print(note)
+    reported_empty = False
+
     while True:
-        rows = up.events()
+        raw_rows = up.events()
+        rows = wg_isolation.rows_of(raw_rows)
         ledger = up.replied_ids()
+        # 过滤把自己的会话滤空了要出声（issue #164）：群号/self_account/状态目录
+        # 配错时，「过滤生效」与「群里没人说话」在输出里长得一模一样。每轮只报一次。
+        empty_note = wg_isolation.filter_report(raw_rows)
+        if empty_note and not reported_empty:
+            reported_empty = True
+            print(empty_note)
+        elif not empty_note:
+            reported_empty = False
         # 过期唤醒和 --list 一样滤掉：冷启动后 .tmp 是新的、游标归零，陈年
         # 未回唤醒会整批变成「新唤醒」打印出来，Agent 据此回头回复旧话题。
         fresh = [e for e in rows
@@ -186,17 +214,23 @@ def main():
                 # 80 字额度不再被 [引用 QQ 消息 <id>]@<qq> 这类段占位吃掉。
                 body, _, _ = wg_text.render_body(e.get("content"), wg_text.WAKE_BODY_CHARS,
                                                   e.get("id"))
-                # 人名指向：发送者附档案锚，正文命中的外号指出是谁（issue #30）。
+                # 人名指向与画像：档案锚 + 正文命中的外号 + 命中者的画像卡
+                # （issue #30 / #163，口径唯一出处在 wg_dossiers.anchors）。
                 gid = wg_aliases.group_of(e.get("conversation_id"))
-                tag = wg_aliases.sender_tag(e.get("sender"), gid)
-                hits = wg_aliases.body_hits(e.get("content"), gid,
-                                            sender=e.get("sender"))
+                tag, hits, cards = wg_dossiers.anchors(e.get("sender"),
+                                                       e.get("content"), gid)
                 print(f"id={e.get('id')} {stamp} [{up.wake_reason(e)}] "
                       f"{e.get('sender')}{tag}: {body}"
                       f"{('  ' + quotes) if quotes else ''}"
                       f"{('  ' + images) if images else ''}"
-                      f"{''.join('  ' + h for h in hits)}")
+                      f"{''.join('  ' + h for h in hits)}{cards}")
             write_cursor(max(latest_id(rows), max(e.get("id") or 0 for e in fresh)))
+            # 群级术语每块只印一次（issue #31 的读侧）：它说的是「这个群这些词
+            # 什么意思」，不是某条消息的属性，所以不随行重复。
+            note = wg_dossiers.group_note_line(
+                wg_aliases.group_of(fresh[0].get("conversation_id")))
+            if note:
+                print(note)
             print("WAKE")
             return 0
 
@@ -216,17 +250,20 @@ def main():
                 body, _, _ = wg_text.render_body(r.get("text"),
                                                   wg_text.WAKE_BODY_CHARS,
                                                   r.get("id"))
-                # 人名指向与唤醒行同款（issue #30）；追问行没有
+                # 人名指向与画像同唤醒行同款（issue #30 / #163）；追问行没有
                 # conversation_id 字段时退回跨群主档别名。
                 gid = wg_aliases.group_of(r.get("conversation_id"))
-                tag = wg_aliases.sender_tag(r.get("sender"), gid)
-                hits = wg_aliases.body_hits(r.get("text"), gid,
-                                            sender=r.get("sender"))
+                tag, hits, cards = wg_dossiers.anchors(r.get("sender"),
+                                                       r.get("text"), gid)
                 print(f"id={r.get('id')} {stamp} [追问] {r.get('sender')}{tag}: "
                       f"{body}"
                       f"{('  ' + r['quote']) if r.get('quote') else ''}"
                       f"{('  ' + r['images']) if r.get('images') else ''}"
-                      f"{''.join('  ' + h for h in hits)}")
+                      f"{''.join('  ' + h for h in hits)}{cards}")
+            note = wg_dossiers.group_note_line(
+                wg_aliases.group_of(woke[0].get("conversation_id")))
+            if note:
+                print(note)
             # 报告文案由 followup 决定：额度用完的那一批不说「还剩 0 条」
             # （issue #98）。收窗也在 consume() 里做完，不再留到下一轮。
             print(scan["report"])

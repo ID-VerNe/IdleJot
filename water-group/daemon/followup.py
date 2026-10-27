@@ -46,10 +46,11 @@ import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_images  # noqa: E402  (图片标记渲染，issue #35 追问行同款)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
+import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #164 PC)
 from wg_paths import data_dir, state_dir
 STATE = state_dir()
 DB = Path(os.environ.get("IDLEJOT_WG_DB") or os.environ.get("TULPA_WG_DB", data_dir() / "mcp-access.sqlite3"))
-CONFIG = ROOT / "water-group" / "config.json"
+CONFIG = wg_config.path()
 WINDOW = STATE / "wg_followup.json"
 
 # 跟多少、跟多久，都可以在 config.json 里改：旧键是顶层 followup 段，新键是

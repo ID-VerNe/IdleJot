@@ -25,6 +25,7 @@ Usage:
   reply.py --list
   reply.py --context 30 [--around <event_id>]
   reply.py --show <event_id>      读这条消息的全文（行内截断后的补救路径）
+  reply.py --who <花名>            只解析到 QQ，并把他的画像卡整张打出来（issue #163）
 
 <text> 里的换行会拆成多条气泡（默认最多 20 条，首条挂引用；`--max-bubbles`
 或 config.json 的 `reply.max_bubbles` 可以调小，issue #131）。想连发几句就分行写，
@@ -38,7 +39,6 @@ import argparse
 import json
 import os
 import re
-import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -53,23 +53,29 @@ import plugins  # noqa: E402  (事件型能力派发口：追问窗口，issue #
 import wg_aliases  # noqa: E402  (别名指向渲染，issue #30)
 import wg_bubbles  # noqa: E402  (气泡上限与拆句的唯一出口，issue #131)
 import wg_budget  # noqa: E402  (等待预算的唯一出口，issue #79/#83)
+# --context 的读链（会话 id / 闲聊 / 上下文行）已拆到 wg_context（issue #163）：
+# 本文件撞了 1000 行红线。这里再导出，门禁与 `--context` 入口照旧按 reply.* 调。
+from wg_context import recent_chatter, show_context  # noqa: E402,F401
+import wg_dossiers  # noqa: E402  (群友画像 / 群级术语，issue #163)
 import wg_gap  # noqa: E402  (停机窗口缺口账本，issue #114)
 import winconsole  # noqa: E402
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #128)
 import wg_images  # noqa: E402
+import wg_isolation  # noqa: E402  (群身份与跨群护栏，issue #164)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_send_failure  # noqa: E402  (发送失败的原文 / 禁言诊断 / 失败账本，issue #132)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
 
 ROOT = HERE.parents[1]
-from wg_paths import data_dir, state_dir
+from wg_paths import state_dir
 STATE = state_dir()
 SID_FILE = STATE / "wg_session.txt"
 STATE_FILE = STATE / "wg_state.json"
 EVENTS = STATE / "wg_events.jsonl"
 REPLIED = STATE / "wg_replied.jsonl"
-DB = Path(os.environ.get("IDLEJOT_WG_DB") or os.environ.get("TULPA_WG_DB", data_dir() / "mcp-access.sqlite3"))
+# 会话库的只读路径在 wg_context 里（`--context` 与 `--show` 的读链都归它），
+# 这里不再留一份同义常量：两份路径会各自漂移（issue #163 拆分时清掉）。
 
 RETRY_SLEEP = 3
 SOURCE_WAIT = 30
@@ -136,13 +142,18 @@ def record(event_ids, text):
                                 ensure_ascii=False) + "\n")
 
 
-def plan(sid, batch, target, intent, quote):
+def plan(sid, batch, target, intent, quote, group_id=None):
     """Returns (plan_id, final_target); plan_id is None when planning failed.
 
     The final target can differ from the requested one when the batch rotated
     mid-compose. The caller needs it to decide whether quoting still makes sense:
     quoting a stranger's message to answer someone else reads as a mistake.
+
+    ``group_id`` 是本会话的群（issue #164 PB）。批次轮换后的重定向**只在同一群的
+    id 里挑**：改前直接取 ``allowed[-1]``，批次里最新那条属于哪个群就发到哪个群，
+    另一个会话的目标还会被记成「已回」——两个会话都以为对方处理了。
     """
+    allowed_in_group = wg_isolation.same_group_ids(read_events(), group_id)
     for attempt in range(8):
         args = {"session_id": sid, "batch_id": batch, "action": "reply",
                 "expressions": ["text"], "intent": intent}
@@ -178,14 +189,22 @@ def plan(sid, batch, target, intent, quote):
             # new batch, and only its own events are valid targets. The response
             # names the ones that are, so adopt the newest and retry the same batch
             # instead of re-reading the state file and losing another round.
+            #
+            # issue #164 PB：只在**本群**的 id 里挑。别群的 id 同样是「本批有效」，
+            # 取它就会把回复发到另一个群，并把那条记成已回。
             allowed = data.get("valid_event_ids") or []
+            if allowed_in_group is not None:
+                allowed = [i for i in allowed if i in allowed_in_group]
             if allowed:
                 new_target = allowed[-1]
                 if new_target != target:
                     print(f"  batch rotated, retargeting {target} -> {new_target}")
                     target = new_target
                     continue
-            print("  no valid target in this batch")
+                print(f"  batch rotated; {target} is still the newest in this group")
+                return None, target
+            print("  no valid target in this batch" if allowed_in_group is None
+                  else "  这批里没有本群的目标，不跨群重定向")
             return None, target
         if code == "batch_expired":
             fresh = batch_id()
@@ -492,20 +511,31 @@ def list_wakes():
     Importing up keeps one source of truth for "who woke us", "did we answer"
     and "is it still worth answering" — the third one is the reply TTL, so a
     wake older than `pending_reply.max_age_seconds` reads [过期], not [待回].
+
+    issue #164 PA：只看本会话的群。改前遍历全量事件流，钉死群 111 的会话照样
+    看到群 222 的唤醒——两个会话都以为那些 @ 是给自己的。未钉死时不过滤（与改前
+    一致），但会打一行 `note()` 说清隔离没生效。
     """
     import up
 
     rows = up.events()
+    # issue #164 PA：只看本会话的群。改前遍历全量事件流，钉死群 111 的会话照样
+    # 看到群 222 的唤醒——两个会话都以为那些 @ 是给自己的。未钉死时不过滤（与
+    # 改前一致），但下面会打 `note()` 说清隔离没生效。
+    rows = wg_isolation.rows_of(rows)
     ledger = up.replied_ids()
     # 表头先给「现在」：下面每行只有消息自己的时间戳，没有基准的话，Agent
     # 分不清一条 20:50 的 @ 是刚发的还是十分钟前的（issue #95）。
     print(f"# 唤醒记录 · {wg_clock.now_line()}")
-    # issue #114：停机窗口内漏收的 @ 本机消息（NapCat 不在的那段时间，永久不进
-    # chat_inbox）。这里列出来，让「没人叫我」与「有人叫过但机器不在」可区分——
-    # 列在唤醒块之前：Agent 先看到漏的、再看到当前待回的。行首 `id=-`（占位，
-    # 不可 reply.py <id>），`msg_id=` 是 OneBot 原始 id，Agent 真要回手动发送用。
-    # issue #148：抬头由 `wg_gap.header_lines()` 一次给全（段标题 + 窗口起止 +
-    # 账本时刻），不给时刻的话三小时前的早晨账本与几分钟前的新缺口读起来一样。
+    # issue #164 PA：本会话钉死在哪一群，一眼看得见——下面每行都只来自它。
+    print(f"# 本会话群 · {wg_isolation.describe()}")
+    warn = wg_isolation.note()
+    if warn:
+        print(warn)
+    # issue #114：停机窗口内漏收的 @ 本机消息在这里列出来，让「没人叫我」与
+    # 「有人叫过但机器不在」可区分。抬头由 `wg_gap.header_lines()` 一次给全
+    # （段标题 + 窗口起止 + 账本时刻，issue #148）：不给时刻，三小时前的早晨
+    # 账本与几分钟前的新缺口读起来一样。
     gap_lines = wg_gap.at_me_lines()
     for ln in ((wg_gap.header_lines() + gap_lines) if gap_lines else []):
         print(ln)
@@ -523,140 +553,27 @@ def list_wakes():
         # 截断了带 … 和 --show 指引。
         body, _, _ = wg_text.render_body(e.get("content"), wg_text.LIST_BODY_CHARS,
                                           e.get("id"))
-        # 人名指向与唤醒行同款（issue #30）。
+        # 人名指向与画像与唤醒行同款（issue #30 / #163）。
         gid = wg_aliases.group_of(e.get("conversation_id"))
-        tag = wg_aliases.sender_tag(e.get("sender"), gid)
-        hits = wg_aliases.body_hits(e.get("content"), gid, sender=e.get("sender"))
+        tag, hits, cards = wg_dossiers.anchors(e.get("sender"), e.get("content"), gid)
         print(f"id={e.get('id')} {stamp} [{mark}] [{reason}] {e.get('sender')}{tag}: "
               f"{body}"
               f"{('  ' + quotes) if quotes else ''}{('  ' + images) if images else ''}"
-              f"{''.join('  ' + h for h in hits)}")
+              f"{''.join('  ' + h for h in hits)}{cards}")
         shown += 1
+    note = wg_dossiers.group_note_line(
+        wg_aliases.group_of(rows[-1].get("conversation_id")) if rows else "")
+    if note:
+        print(note)
+    # 过滤把自己滤空要说出来（issue #164）：群号/self_account/状态目录配错时，
+    # 「过滤生效」与「群里没人说话」在输出里完全一样，Agent 会一直等一个不会
+    # 来的唤醒。正常空流不吵——`filter_report` 只在「有东西但一条都不属于我」时出声。
+    empty = wg_isolation.filter_report(up.events())
+    if empty:
+        print(empty)
     if not shown:
         print("没有唤醒记录")
     return 0
-
-
-def active_session_id():
-    """The session the collector is holding, read from the database.
-
-    wg_session.txt can lag behind a rebuilt session, and the context query has to
-    follow whichever session the messages were actually written under.
-    """
-    try:
-        db = sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
-    except sqlite3.Error:
-        return ""
-    try:
-        row = db.execute(
-            "SELECT id FROM chat_sessions WHERE active=1 ORDER BY rowid DESC LIMIT 1"
-        ).fetchone()
-    except sqlite3.Error:
-        return ""
-    finally:
-        db.close()
-    return row[0] if row else ""
-
-
-def recent_chatter(limit, around=None):
-    """Every message the group sent, not just the ones that woke us.
-
-    mention_only keeps ordinary chatter out of wg_events.jsonl, so the daemon
-    files cannot answer "what were they talking about just now". chat_inbox can:
-    the backend stores each event before deciding whether to deliver it.
-    """
-    sid = active_session_id() or session_id()
-    if not sid:
-        return []
-    try:
-        db = sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
-    except sqlite3.Error:
-        return []
-    sql = "SELECT id, payload, media FROM chat_inbox WHERE session_id=?"
-    params = [sid]
-    if around:
-        sql += " AND id<=?"
-        params.append(int(around))
-    sql += " ORDER BY id DESC LIMIT ?"
-    params.append(max(1, int(limit)))
-    out = []
-    try:
-        for event_id, payload, raw_media in reversed(db.execute(sql, params).fetchall()):
-            try:
-                data = json.loads(payload)
-            except ValueError:
-                continue
-            if data.get("synthetic"):
-                continue
-            try:
-                media = json.loads(raw_media or "[]")
-            except ValueError:
-                media = []
-            out.append({
-                "id": event_id,
-                "sender": data.get("sender") or "",
-                "text": " ".join((data.get("content") or "").split()),
-                "ts": data.get("timestamp"),
-                "self": bool(data.get("is_self")),
-                "recalled": bool(data.get("recalled")),
-                # 群号：别名指向按群取覆盖行并集（issue #30）。
-                "conversation_id": data.get("conversation_id") or "",
-                # 引用原文：payload 里只有编号，父消息在同一会话的库里就查得到（issue #94）。
-                "quote": wg_quotes.render_payload(db, sid, data),
-                # 图片标记让 Agent 知道这条能看图，以及是否已经落盘（issue #27）。
-                "images": wg_images.render(dict(data, id=event_id), media),
-            })
-    except sqlite3.Error:
-        pass
-    finally:
-        db.close()
-    return out
-
-
-def show_context(limit, around=None):
-    """Print recent chatter so a reply can follow the thread, not just the ping.
-
-    A wake line says "someone @'d you". It does not say what the group had been
-    talking about for the last twenty minutes, and replying off the ping alone is
-    how a bot answers a question that was already settled three messages later.
-    """
-    import up
-
-    rows = recent_chatter(limit, around)
-    if not rows:
-        # 读不到记录时「现在」更要给：Agent 至少知道该不该追问、隔了多久。
-        print(wg_clock.now_line())
-        print("读不到聊天记录：会话没建立，或数据库里还没有这批消息")
-        return 1
-    wakes = {e.get("id") for e in up.events() if up.wake_reason(e)}
-    span = f"{around} 之前" if around else "最近"
-    # 每行只有 HH:MM:SS，表头不带日期的话跨零点就没法判断「昨天还是今天」。
-    print(f"# {span} {len(rows)} 条（含闲聊，不只是 @）· {wg_clock.now_line()}")
-    for row in rows:
-        stamp = wg_clock.clock_ms(row["ts"])
-        who = "我" if row["self"] else (row["sender"] or "?")
-        # 上下文行同一份渲染口径（issue #32）：段占位不占额度，截断了说被切过。
-        text, _, _ = wg_text.render_body(row["text"], wg_text.CONTEXT_BODY_CHARS,
-                                         row["id"])
-        # 人名指向：闲聊里叫外号也要知道是谁（issue #30）。
-        gid = wg_aliases.group_of(row.get("conversation_id"))
-        tag = "" if row["self"] else wg_aliases.sender_tag(row["sender"], gid)
-        hits = [] if row["self"] else wg_aliases.body_hits(row["text"], gid,
-                                                           sender=row["sender"])
-        marks = []
-        if row["recalled"]:
-            marks.append("撤回")
-        if row["id"] in wakes:
-            marks.append("唤醒")
-        if around and row["id"] == int(around):
-            marks.append("回这条")
-        tail = f"  <- {'、'.join(marks)}" if marks else ""
-        quote = ("  " + row["quote"]) if row.get("quote") else ""
-        alias_tail = "".join("  " + h for h in hits)
-        print(f"{row['id']} {stamp} {who}{tag}: {text}{quote}{('  ' + row['images']) if row.get('images') else ''}{alias_tail}{tail}")
-    return 0
-
-
 def latest_group_id():
     for row in reversed(read_events()):
         parts = str(row.get("conversation_id") or "").split(":")
@@ -678,13 +595,16 @@ def unanswered(answered):
     Expired wakes are excluded too: the NOTE exists to stop a burst from being
     half-answered, and a @ from yesterday in that list is noise -- it reads as
     "you still owe the group an answer" when the topic is long dead.
+
+    issue #164 PA：只算本会话的群。别群的 @ 也进这个清单，就是在提醒本会话去回
+    别人的群——而本会话连发都发不出去（PB 护栏会拒）。
     """
     import up
 
     rows = up.events()
     ledger = up.replied_ids()
     done = set(answered)
-    return [e for e in rows
+    return [e for e in wg_isolation.rows_of(rows)
             if up.wake_reason(e)
             and (e.get("id") or 0) not in done
             and not up.replied_after(e.get("id"), rows, ledger)
@@ -871,6 +791,11 @@ def main():
     if args.who:
         qq, label = resolve_member(args.who, args.group or latest_group_id())
         print(f"{args.who} -> {qq or '未解析'}（{label}）")
+        # 专门问一个人时把画像整张给出来（issue #163）：这是唯一「问他是谁」的
+        # 入口，唤醒行那 60 字是给接话用的预算，这里不必省。
+        card = wg_dossiers.who_card(qq or args.who, args.group or latest_group_id())
+        if card:
+            print(card)
         return 0 if qq else 1
     if not args.target or not (args.text or args.image):
         parser.error("需要 <event_id> 和 <text>（只发图就加 --image）")
@@ -897,6 +822,18 @@ def main():
         print(f"  note: id={target} 已过待回时效（{age_min:.0f} 分钟前），--force 放行")
 
     found = event_target(target)
+    # issue #164 PB（P0 护栏）：目标事件必须属于本会话的群，否则不进 plan()、
+    # 不发送、不记账。改前这里是 `found[0] if found else (args.group or
+    # latest_group_id())`——目标事件自己的群直接拿来发，一句归属校验都没有：
+    # 钉死群 111 的会话能把话发进群 222，还把群 222 那条记成「已回」，另一个
+    # 会话于是永远不再回它（doc/MULTI_GROUP_PLAN.md:63 的 P0）。
+    # 未钉死时 target_group 原样返回 found，单群机器行为不变。
+    try:
+        found = wg_isolation.target_group(target, found)
+    except wg_isolation.CrossGroup as exc:
+        print(f"拒绝：{exc}")
+        print(f"      本会话群：{wg_isolation.describe()}")
+        return 1
     group_id = found[0] if found else (args.group or latest_group_id())
     if not group_id:
         print("不知道该发到哪个群：事件里没有 group 信息")
@@ -909,6 +846,17 @@ def main():
     bubble_segments = [build_segments(bubbles[0], group_id, leading=args.at)]
     bubble_segments += [build_segments(one, group_id) for one in bubbles[1:]]
     answered = [target, *[i for i in args.also if i != target]]
+    # issue #164 PB：`--also` 也是记账，别群的 id 记成「已回」等于替另一个会话
+    # 静默丢消息——那条会永远停在「已回」，而它的会话根本不知道发生过什么。
+    if wg_isolation.pinned():
+        by_id = {e.get("id"): e for e in up.events()}
+        cross = [i for i in answered
+                 if i in by_id and not wg_isolation.belongs(by_id[i])]
+        if cross:
+            print(f"拒绝：--also 里的 {cross} 不属于本会话的群"
+                  f"（{wg_isolation.describe()}）——把它们记成「已回」会让另一个"
+                  f"会话永远不再回这些消息")
+            return 1
     print(f"target={target} group={group_id} session={sid}")
     # 图片先校验再动手（issue #128）：坏路径在这里就退，一张都不发，也不打印后面
     # 那行「还有 N 条没回」——那会让 Agent 以为图已经发出去了。`limit` 一起传进去：

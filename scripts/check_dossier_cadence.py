@@ -454,6 +454,46 @@ def test_no_line_reports_counter(home):
     print(f"✓ 11. NO 行 quiet 字段逐项正确（{line.strip()}）")
 
 
+def test_bad_mark_values_do_not_crash(home):
+    """mark 文件被写坏时降级成「没有计数」，不许崩、也不许变成「下限已过」（issue #162）。
+
+    `wg_dossier.json` 与 `--mark` 共用，半截 JSON、字符串、列表都可能出现。
+    最危险的一格是 `quiet_since: false`：`bool` 是 `int` 子类，`float(False)`
+    等于 0，于是「首轮距今 55 年」恒过下限——一个写坏的文件会把判据变成恒真
+    （与 #124 里 `_pid()` 踩的是同一个坑）。
+    """
+    dossier = _dossier_module()
+    cfg = dict(dossier.DEFAULTS)
+    cfg["quiet_minutes"] = 5
+    cfg["quiet_min_messages"] = 1
+    # `dossier.MARK` 是 import 期常量，指向 `check_fixture_support` 钉的那个临时根，
+    # 不是本用例的 `home`。不 patch 的话下面读的全是另一个空文件，断言恒真——
+    # 这条用例自己就假绿过（变异「bool 未排除」没被抓住）。
+    cases = [
+        {"quiet_rounds": "abc", "quiet_since": "xyz"},
+        {"quiet_rounds": True, "quiet_since": False},
+        {"quiet_rounds": -5, "quiet_since": 1e18},
+        {"quiet_rounds": [1], "quiet_since": {"a": 1}},
+        {"quiet_since": 1_700_000_000.0},
+    ]
+    with patch.object(dossier, "MARK", home / MARK_REL):
+        for payload in cases:
+            write_mark(home, payload)
+            rounds, since = dossier.quiet_state()
+            assert isinstance(rounds, int) and rounds >= 0, (payload, rounds)
+            if payload.get("quiet_since") is False:
+                assert since is None, f"quiet_since:false 被当成 epoch 0（下限恒过）：{since}"
+            if isinstance(payload.get("quiet_since"), (str, dict, list)):
+                assert since is None, (payload, since)
+            # 判据本身不许抛：把打坏的 mark 喂给 --check。
+            done = run(home, DOSSIER, "--check")
+            assert done.returncode in (0, 3), (payload, done.returncode, done.stderr)
+
+        (home / MARK_REL).write_text("not-a-dict", encoding="utf-8")
+        assert dossier.quiet_state() == (0, None), "顶层不是对象时按「没有计数」处理"
+    print(f"✓ 12. {len(cases)} 种写坏的 mark 值都降级成「没有计数」，不崩、不变成恒真")
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -487,8 +527,12 @@ def main():
     with temp_dir(prefix="wg-cadence-") as home:
         write_config(home)
         test_no_line_reports_counter(home)
+    with temp_dir(prefix="wg-cadence-") as home:
+        seed_store(home)
+        write_config(home)
+        test_bad_mark_values_do_not_crash(home)
     print("=" * 72)
-    print("✓ dossier 沉淀时机（连续 N 轮无人指名）11 项门禁全部通过")
+    print("✓ dossier 沉淀时机（连续 N 轮无人指名）12 项门禁全部通过")
     print("=" * 72)
 
 

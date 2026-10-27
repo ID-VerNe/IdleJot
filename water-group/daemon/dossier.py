@@ -181,11 +181,17 @@ def quiet_state():
     must not take the whole listener down (same stance as `wg_listener_state`).
     """
     data = load_mark()
+    if not isinstance(data, dict):
+        return 0, None
     rounds = data.get("quiet_rounds")
     since = data.get("quiet_since")
     rounds = rounds if isinstance(rounds, int) and not isinstance(rounds, bool) else 0
     try:
-        since = float(since) if since is not None else None
+        # `bool` is an `int` subclass, so `quiet_since: false` would otherwise
+        # read as epoch 0 and turn the floor into "always passed" (same trap
+        # `wg_listener_state._pid()` documents for issue #124).
+        since = (float(since) if since is not None
+                 and not isinstance(since, bool) else None)
     except (TypeError, ValueError):
         since = None
     return max(0, rounds), since

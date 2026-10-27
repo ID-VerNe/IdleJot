@@ -862,16 +862,20 @@ def 漏收at的时间戳带日期():
     #
     # 为什么这组必须存在：J 的坏行为只在「消息日 == 实现读到的今天」时出现，固定
     # 日期夹具只能靠「运行日恰好等于那个固定日」撞上，撞不上就假绿（`447ca55` 上
-    # J 今天恰好 `False` 就是这个巧合）。这里消息取 `now - 60`，而 J 读的
-    # `wg_clock.stamp()` 也是 now——两者同日，J 必然退回 `clock()`，必然被抓。
+    # J 今天恰好 `False` 就是这个巧合）。
     #
-    # 唯一的缝：跨午夜跑（now=00:00:30、msg=23:59:30）时两者不同日，J 走
-    # `stamp()` 分支输出正确，这组抓不住。那时靠上面的固定组：同日组消息在
-    # 08:02，若运行日恰是 10-27 则 J 仍退回 `clock()` 被抓；若运行日是别的日期，
-    # J 在同日组也走 `stamp()`——但那说明 J 这次输出确实是对的（消息不在今天），
-    # 不算假绿。两组互补，没有稳定的漏网日。
+    # 窗口必须**落在同一个自然日**，否则「跨天才补日期」那类实现会走 `stamp()`
+    # 分支、输出恰好正确，这组就抓不住它。用固定偏移做不到（`now - 1800` 在
+    # 00:29 跑就跨天），所以取「运行日当天零点后 1 秒 → +120 秒」，消息落在
+    # 中间。三者必然同一天、必然都在「今天」，与运行时刻无关。
     now = int(time.time())
-    if not _gap_line_ok(now - 7200, now, now - 60):
+    day_start = int(time.mktime(tuple(time.localtime(now)[:3]) + (0, 0, 1, 0, 0, -1)))
+    win_start, win_end = day_start, day_start + 120
+    msg_at = day_start + 60
+    # 消息时间必须真的落在「今天」，否则这组抓不住 J（J 只在消息是今天时才退化）
+    if wg_clock.stamp(msg_at)[:10] != wg_clock.stamp(now)[:10]:
+        return False
+    if not _gap_line_ok(win_start, win_end, msg_at):
         return False
     # 对照：唤醒行口径的同一时刻确实只有时分秒（证明两种形态真的不同）
     return wg_clock.clock(local_epoch(2026, 10, 26, 3, 5, 9)) == "03:05:09"

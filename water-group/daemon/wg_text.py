@@ -65,6 +65,12 @@ PLACEHOLDERS = (
     (re.compile(r"\[图片\]"), "[图]"),
     (re.compile(r"\[语音\]|\[视频\]|\[文件\]"), "[附件]"),
     (re.compile(r"\[表情\]|\[非文本消息\]"), "[非文本]"),
+    # issue #165：未知段现在带类型（`[不支持:json]` / `[卡片：标题]`）。唤醒行
+    # 是给人扫的一行，卡片标题那种几十字的东西不该占掉正文额度——剥成短替代，
+    # 原始体与类型仍走 `--show`（`unsupported_lines`）。`[卡片…]` 在表里必须
+    # 排在 `[不支持…]` 之后，两条互不重叠，顺序只为读起来顺。
+    (re.compile(r"\[卡片[^\]]*\]|\[分享[^\]]*\]|\[位置[^\]]*\]|\[名片[^\]]*\]|\[音乐[^\]]*\]"), "[卡片]"),
+    (re.compile(r"\[不支持:[^\]]*\]"), "[非文本]"),
 )
 
 
@@ -179,6 +185,10 @@ def _print_event(event_id, payload, source):
     if payload.get("truncated"):
         # 入库时就超了 12000 字上限：字段说的是实话，这里必须转述。
         print("（入库时已超单条上限，正文不完整）")
+    for line in unsupported_lines(payload.get("segments")):
+        # issue #165 PC：content 里只有一句「不支持:json」，读者补读时要知道
+        # 原始体在不在、被裁过没有。说得出就说，说不出的写「未保留」。
+        print(line)
     suffix = wg_quotes.render_event(payload)
     images = wg_images.render(payload)
     if suffix:
@@ -186,6 +196,28 @@ def _print_event(event_id, payload, source):
     if images:
         print(images)
     return 0
+
+
+def unsupported_lines(segments):
+    """`--show` 里为降级段补的说明行（issue #165 PC）。
+
+    content 那句 `[卡片：标题]` 只说得出「是什么」；原始体留没留、留了多少，
+    只有段上知道。这里逐段报「类型 + 原始体状态」，让「这条我收到的是空壳」
+    变成可判断的结论——`raw_truncated` 是实话，不许改写成「无原始体」。
+    """
+    lines = []
+    for segment in segments or []:
+        if not isinstance(segment, dict) or segment.get("type") != "unsupported":
+            continue
+        kind = str(segment.get("kind") or "unknown")
+        raw = segment.get("raw")
+        if raw:
+            state = "原始体已截断" if segment.get("raw_truncated") else "原始体完整"
+            lines.append(f"（段 {kind}：{state}，{len(raw)} 字）")
+        else:
+            reason = "原始体超预算未保留" if segment.get("raw_truncated") else "无原始体"
+            lines.append(f"（段 {kind}：{reason}）")
+    return lines
 
 
 def show_event(event_id):

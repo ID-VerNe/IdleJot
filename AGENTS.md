@@ -400,75 +400,76 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 11 | `static` | `check_tmp_hygiene.py` | 私有目录巡检：tmp/ 禁脚本、bin 与 archive 须登记（#6） |
 | 12 | `static` | `check_sender_name.py` | 发信人名形态：QQ 引用气泡文案不得进 sender 或 aliases（#39） |
 | 13 | `static` | `check_text_truncation.py` | 长文本截断契约（#90） |
-| 14 | `static` | `check_app_log_once.py` | app.log 一次后端启动只写一份横幅（#97） |
-| 15 | `static` | `check_log_encoding.py` | 控制台与日志编码两层钉死（#4） |
-| 16 | `static` | `check_slash_commands.py` | # 指令守护纯逻辑：过滤、冷却、去重、帮助 |
-| 17 | `runtime` | `check_daemon_entries.py` | daemon 入口冒烟：以 python <script> 方式启动每个入口，验证函数内延迟导入可达 |
-| 18 | `runtime` | `check_stop_stack.py` | 一键停栈完整性：孤儿清扫、自杀防护、只读探针不被误杀、端口兜底 |
-| 19 | `runtime` | `check_bootstrap_health.py` | 一键后台启动的健康检查与代理隔离 |
-| 20 | `runtime` | `check_napcat_launch_order.py` | NapCat 启动顺序：直接注入优先，注入失败不降级到 .bat（防 #39 黑框复发）；端口在≠登录态在（#50）：早退三问 get_login_info 才说在线、注入后等登录态确认 |
-| 21 | `runtime` | `check_config_fail_loud.py` | 配置缺失 fail-loud：注入前拒绝、监听拒绝启动、--status 说出缺什么（#51） |
-| 22 | `runtime` | `check_water_group_import.py` | water_group 桥接 shim：单实例、模块身份唯一 |
-| 23 | `runtime` | `check_watchdog_token.py` | watchdog 探针现读 OneBot token（防 #17 复发） |
-| 24 | `runtime` | `check_watchdog_halt.py` | watchdog halt 可恢复：冷却重试，不许永久停机（#45） |
-| 25 | `runtime` | `check_watchdog_launch_identity.py` | 注入实例按启动记录认领，--stop 计数不再漏报（#46） |
-| 26 | `runtime` | `check_watchdog_login_error.py` | Login Error 进 watchdog 时间线：napcat.log 新错误按 (ErrType, ErrCode) 去重 300s 映射、未映射码原文照录；unresponsive 分型；halt reason 带 last launch note（#50） |
-| 27 | `runtime` | `check_collector_self_echo.py` | collector 不落盘自身回显（防 #28 复发） |
-| 28 | `runtime` | `check_up_facade.py` | up.py 门面完整性：公开定义必须能从门面拿到且同一对象（#37） |
-| 29 | `runtime` | `check_napcat_onebot_contract.py` | NapCat 风格 WebSocket 帧契约 |
-| 30 | `runtime` | `check_napcat_qq_probe.py` | NapCat 探针契约：假消息 + loopback HTTP |
-| 31 | `runtime` | `check_qq_account_diagnostics.py` | QQ 账号诊断：目录夹具、失败分类、隐私 |
-| 32 | `mcp` | `check_issue_16_audit_fixes.py` | #16 审计缺陷回归：store 异常类型、grants 排序、MCP 响应解析、会话活性 |
-| 33 | `mcp` | `check_mcp.py` | MCP 协议层契约：真实 MCP HTTP + 隔离源夹具，从不发 QQ 消息 |
-| 34 | `mcp` | `check_mcp_onebot.py` | OneBot 设置到工具可见性再到 HTTP notice 读取（隔离夹具） |
-| 35 | `mcp` | `check_mcp_chat_output.py` | 轮询输出截断、游标与版本刷新语义 |
-| 36 | `mcp` | `check_mcp_chat_turns.py` | 对话轮次生命周期与原生引用（19 项并发与防竞争检查） |
-| 37 | `mcp` | `check_mcp_chat_prompts.py` | 提示词装配与人格卡：目录发现、缓存、体积上限与社交状态（#64） |
-| 38 | `mcp` | `check_mcp_picker.py` | 平台过滤先于分页、会话搜索与参数校验（#64） |
-| 39 | `mcp` | `check_mcp_reactions.py` | 表情回应 dry-run：真实 MCP HTTP + loopback OneBot |
-| 40 | `mcp` | `check_mcp_language_learning.py` | 实时边聊边学契约（合成夹具，无模型调用） |
-| 41 | `mcp` | `check_mcp_language_integration.py` | 语言学习跨层集成（真实 MCP wire + 合成 WS） |
-| 42 | `mcp` | `check_mcp_multi_group_learning.py` | 一套凭证两群库的隔离与持久化 |
-| 43 | `mcp` | `check_mcp_jargon_matching.py` | 群友黑话再发现：仅 peer、合成批次 |
-| 44 | `mcp` | `check_mcp_jargon_pipeline.py` | 黑话流水线各阶段独立校验 |
-| 45 | `mcp` | `check_mcp_expression_evidence.py` | 表达证据 vs 机器人政策回归 |
-| 46 | `mcp` | `check_plugin_registry.py` | 插件注册表（#4 PA 与 PB） |
-| 47 | `mcp` | `check_app_plugins.py` | app 侧插件协议：显式 scope/expression 声明、静态表、停用即降级、宿主无插件名硬编码（#4 PD/PD2b） |
-| 48 | `storage` | `check_artifacts.py` | 工件导入、SHA256 共享解析、引用门槛、缓存回收与 OneBot/HTTP 边界（#64） |
-| 49 | `storage` | `check_memory_engine_imports.py` | 水群模块单实例身份（动 shim 或 sync_* 时必跑） |
-| 50 | `storage` | `check_group_memory.py` | 记忆引擎、MCP 读写工具与两层存储 |
-| 51 | `storage` | `check_group_notes.py` | 群级结构化术语读写闭环（#31） |
-| 52 | `storage` | `check_dossier_ingest.py` | dossier 写入动词：--ingest / --through / --apply / --dry-run（#6） |
-| 53 | `storage` | `check_dossier_cadence.py` | 画像沉淀时机：连续 N 轮无人指名即触发，quiet_since 只写首轮、WAKE 与 --mark 清零、--no-digest 与 --probe 不计数、NO 行字段逐项正确（#162） |
-| 54 | `storage` | `check_pollution_scrub.py` | 跨群主档污染审计、清理与还原（#34） |
-| 55 | `storage` | `check_qr_login.py` | 每用户扫码登录：passport 双流、DPAPI、限流、隐私（#6） |
-| 56 | `storage` | `check_upgrade.py` | 升级用真实 SQLite/WAL 夹具 |
-| 57 | `storage` | `check_hot_reload.py` | 全栈热重载：闭包覆盖、target 映射、debounce、quarantine、不 spawn（#58） |
-| 58 | `reply` | `check_anti_habituation.py` | 反语癖固化与多样性提示词注入 |
-| 59 | `reply` | `check_plan_recovery.py` | stale 拒绝后的重规划（plan_id 为 None 也不崩） |
-| 60 | `reply` | `check_wake_ledger.py` | 已回判定：一条回复不得把后续 @ 洗成已回 |
-| 61 | `reply` | `check_forward_wake.py` | 合并转发里的 @ 与关键词参与唤醒（#9） |
-| 62 | `reply` | `check_followup.py` | 追问窗口：回复之后还能听见群里说什么 |
-| 63 | `reply` | `check_repeater.py` | 复读/接龙：三人不同 QQ 才跟、接龙四种格式跟下一号、指令/敏感词/本机名字/外链/超长/带 @ 带图一律不跟、一波只尝试一次且冷却跨重启（#155） |
-| 64 | `reply` | `check_pending_reply.py` | 待回时效：超时唤醒不再算待回 |
-| 65 | `reply` | `check_reply_context.py` | reply.py --context 回之前看得到群聊上下文 |
-| 66 | `reply` | `check_bubble_cap.py` | 单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131） |
-| 67 | `reply` | `check_reply_quote.py` | OneBot mention 与引用预检 |
-| 68 | `reply` | `check_reply_send_failure.py` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）；禁言到点必须复查，过期预测不许继续当此刻事实（#145） |
-| 69 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
-| 70 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
-| 71 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、四种格式都真能发、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度（超了拒、额度内照发）、不回退计划通道、发图也记账（#128） |
-| 72 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
-| 73 | `reply` | `check_wake_dossier.py` | 沉淀的群友画像必须到达唤醒行 / --list / --context（不是只挂在 MCP 的 chat_guidance 里）：命中才附、不串到别人身上、每人一行有硬顶且不挤正文额度、群级术语一次一块不跨群、引擎坏了照常唤醒（#163） |
-| 74 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
-| 75 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
-| 76 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
-| 77 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
-| 78 | `reply` | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
-| 79 | `reply` | `check_busboss.py` | 车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103） |
-| 80 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164） |
+| 14 | `static` | `check_unsupported_segment.py` | 白名单外的消息段必须保真：type 恒英文 unsupported、kind 与受限长度 raw 都留下来，中文标签不许回流成段类型（#165） |
+| 15 | `static` | `check_app_log_once.py` | app.log 一次后端启动只写一份横幅（#97） |
+| 16 | `static` | `check_log_encoding.py` | 控制台与日志编码两层钉死（#4） |
+| 17 | `static` | `check_slash_commands.py` | # 指令守护纯逻辑：过滤、冷却、去重、帮助 |
+| 18 | `runtime` | `check_daemon_entries.py` | daemon 入口冒烟：以 python <script> 方式启动每个入口，验证函数内延迟导入可达 |
+| 19 | `runtime` | `check_stop_stack.py` | 一键停栈完整性：孤儿清扫、自杀防护、只读探针不被误杀、端口兜底 |
+| 20 | `runtime` | `check_bootstrap_health.py` | 一键后台启动的健康检查与代理隔离 |
+| 21 | `runtime` | `check_napcat_launch_order.py` | NapCat 启动顺序：直接注入优先，注入失败不降级到 .bat（防 #39 黑框复发）；端口在≠登录态在（#50）：早退三问 get_login_info 才说在线、注入后等登录态确认 |
+| 22 | `runtime` | `check_config_fail_loud.py` | 配置缺失 fail-loud：注入前拒绝、监听拒绝启动、--status 说出缺什么（#51） |
+| 23 | `runtime` | `check_water_group_import.py` | water_group 桥接 shim：单实例、模块身份唯一 |
+| 24 | `runtime` | `check_watchdog_token.py` | watchdog 探针现读 OneBot token（防 #17 复发） |
+| 25 | `runtime` | `check_watchdog_halt.py` | watchdog halt 可恢复：冷却重试，不许永久停机（#45） |
+| 26 | `runtime` | `check_watchdog_launch_identity.py` | 注入实例按启动记录认领，--stop 计数不再漏报（#46） |
+| 27 | `runtime` | `check_watchdog_login_error.py` | Login Error 进 watchdog 时间线：napcat.log 新错误按 (ErrType, ErrCode) 去重 300s 映射、未映射码原文照录；unresponsive 分型；halt reason 带 last launch note（#50） |
+| 28 | `runtime` | `check_collector_self_echo.py` | collector 不落盘自身回显（防 #28 复发） |
+| 29 | `runtime` | `check_up_facade.py` | up.py 门面完整性：公开定义必须能从门面拿到且同一对象（#37） |
+| 30 | `runtime` | `check_napcat_onebot_contract.py` | NapCat 风格 WebSocket 帧契约 |
+| 31 | `runtime` | `check_napcat_qq_probe.py` | NapCat 探针契约：假消息 + loopback HTTP |
+| 32 | `runtime` | `check_qq_account_diagnostics.py` | QQ 账号诊断：目录夹具、失败分类、隐私 |
+| 33 | `mcp` | `check_issue_16_audit_fixes.py` | #16 审计缺陷回归：store 异常类型、grants 排序、MCP 响应解析、会话活性 |
+| 34 | `mcp` | `check_mcp.py` | MCP 协议层契约：真实 MCP HTTP + 隔离源夹具，从不发 QQ 消息 |
+| 35 | `mcp` | `check_mcp_onebot.py` | OneBot 设置到工具可见性再到 HTTP notice 读取（隔离夹具） |
+| 36 | `mcp` | `check_mcp_chat_output.py` | 轮询输出截断、游标与版本刷新语义 |
+| 37 | `mcp` | `check_mcp_chat_turns.py` | 对话轮次生命周期与原生引用（19 项并发与防竞争检查） |
+| 38 | `mcp` | `check_mcp_chat_prompts.py` | 提示词装配与人格卡：目录发现、缓存、体积上限与社交状态（#64） |
+| 39 | `mcp` | `check_mcp_picker.py` | 平台过滤先于分页、会话搜索与参数校验（#64） |
+| 40 | `mcp` | `check_mcp_reactions.py` | 表情回应 dry-run：真实 MCP HTTP + loopback OneBot |
+| 41 | `mcp` | `check_mcp_language_learning.py` | 实时边聊边学契约（合成夹具，无模型调用） |
+| 42 | `mcp` | `check_mcp_language_integration.py` | 语言学习跨层集成（真实 MCP wire + 合成 WS） |
+| 43 | `mcp` | `check_mcp_multi_group_learning.py` | 一套凭证两群库的隔离与持久化 |
+| 44 | `mcp` | `check_mcp_jargon_matching.py` | 群友黑话再发现：仅 peer、合成批次 |
+| 45 | `mcp` | `check_mcp_jargon_pipeline.py` | 黑话流水线各阶段独立校验 |
+| 46 | `mcp` | `check_mcp_expression_evidence.py` | 表达证据 vs 机器人政策回归 |
+| 47 | `mcp` | `check_plugin_registry.py` | 插件注册表（#4 PA 与 PB） |
+| 48 | `mcp` | `check_app_plugins.py` | app 侧插件协议：显式 scope/expression 声明、静态表、停用即降级、宿主无插件名硬编码（#4 PD/PD2b） |
+| 49 | `storage` | `check_artifacts.py` | 工件导入、SHA256 共享解析、引用门槛、缓存回收与 OneBot/HTTP 边界（#64） |
+| 50 | `storage` | `check_memory_engine_imports.py` | 水群模块单实例身份（动 shim 或 sync_* 时必跑） |
+| 51 | `storage` | `check_group_memory.py` | 记忆引擎、MCP 读写工具与两层存储 |
+| 52 | `storage` | `check_group_notes.py` | 群级结构化术语读写闭环（#31） |
+| 53 | `storage` | `check_dossier_ingest.py` | dossier 写入动词：--ingest / --through / --apply / --dry-run（#6） |
+| 54 | `storage` | `check_dossier_cadence.py` | 画像沉淀时机：连续 N 轮无人指名即触发，quiet_since 只写首轮、WAKE 与 --mark 清零、--no-digest 与 --probe 不计数、NO 行字段逐项正确（#162） |
+| 55 | `storage` | `check_pollution_scrub.py` | 跨群主档污染审计、清理与还原（#34） |
+| 56 | `storage` | `check_qr_login.py` | 每用户扫码登录：passport 双流、DPAPI、限流、隐私（#6） |
+| 57 | `storage` | `check_upgrade.py` | 升级用真实 SQLite/WAL 夹具 |
+| 58 | `storage` | `check_hot_reload.py` | 全栈热重载：闭包覆盖、target 映射、debounce、quarantine、不 spawn（#58） |
+| 59 | `reply` | `check_anti_habituation.py` | 反语癖固化与多样性提示词注入 |
+| 60 | `reply` | `check_plan_recovery.py` | stale 拒绝后的重规划（plan_id 为 None 也不崩） |
+| 61 | `reply` | `check_wake_ledger.py` | 已回判定：一条回复不得把后续 @ 洗成已回 |
+| 62 | `reply` | `check_forward_wake.py` | 合并转发里的 @ 与关键词参与唤醒（#9） |
+| 63 | `reply` | `check_followup.py` | 追问窗口：回复之后还能听见群里说什么 |
+| 64 | `reply` | `check_repeater.py` | 复读/接龙：三人不同 QQ 才跟、接龙四种格式跟下一号、指令/敏感词/本机名字/外链/超长/带 @ 带图一律不跟、一波只尝试一次且冷却跨重启（#155） |
+| 65 | `reply` | `check_pending_reply.py` | 待回时效：超时唤醒不再算待回 |
+| 66 | `reply` | `check_reply_context.py` | reply.py --context 回之前看得到群聊上下文 |
+| 67 | `reply` | `check_bubble_cap.py` | 单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131） |
+| 68 | `reply` | `check_reply_quote.py` | OneBot mention 与引用预检 |
+| 69 | `reply` | `check_reply_send_failure.py` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）；禁言到点必须复查，过期预测不许继续当此刻事实（#145） |
+| 70 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
+| 71 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
+| 72 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、四种格式都真能发、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度（超了拒、额度内照发）、不回退计划通道、发图也记账（#128） |
+| 73 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
+| 74 | `reply` | `check_wake_dossier.py` | 沉淀的群友画像必须到达唤醒行 / --list / --context（不是只挂在 MCP 的 chat_guidance 里）：命中才附、不串到别人身上、每人一行有硬顶且不挤正文额度、群级术语一次一块不跨群、引擎坏了照常唤醒（#163） |
+| 75 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
+| 76 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
+| 77 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
+| 78 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
+| 79 | `reply` | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
+| 80 | `reply` | `check_busboss.py` | 车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103） |
+| 81 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164） |
 
-共 80 个 CI 门禁，分 5 个分片（`static` 16、`runtime` 15、`mcp` 16、`storage` 10、`reply` 23）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
+共 81 个 CI 门禁，分 5 个分片（`static` 17、`runtime` 15、`mcp` 16、`storage` 10、`reply` 23）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
 <!-- gates:ci:end -->
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

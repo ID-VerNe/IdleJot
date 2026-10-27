@@ -12,7 +12,7 @@ This gate statically scans source and asserts four things:
 1. No SQLite/diagnostic path is derived from the repo root. It must go through
    `wg_paths.data_dir()` or `chatlocal.config.DATA`.
 2. `memory_engine.py` resolves its data root from `WATER_GROUP_HOME`.
-3. The four daemons that read `mcp-access.sqlite3` import `data_dir`.
+3. Every daemon that reads `mcp-access.sqlite3` imports `data_dir`.
 4. `chatlocal/reply_timing.py` writes under `chatlocal.config.DATA`.
 
 Paths that intentionally live in the repo are listed in `INTENTIONAL` below.
@@ -43,7 +43,14 @@ DATA_DIRS = r'(?:data|diagnostics|logs|state)'
 DERIVE_RE = re.compile(
     rf'{ROOT_EXPR}\s*/\s*[\'"]({DATA_DIRS})(?:[/\\\\][^\'"]*)?[\'"]')
 
-DAEMONS = ('reply.py', 'followup.py', 'dossier.py', 'mint_grant.py')
+# 会话库的读侧入口。`wg_context.py` 是 issue #163 从 reply.py 拆出去的 --context
+# 读链（reply.py 撞了 1000 行红线），它接过的正是这条规则要盯的活。
+DAEMONS = ('reply.py', 'followup.py', 'dossier.py', 'mint_grant.py', 'wg_context.py')
+# 「必须 import data_dir」只在文件真的碰库时才成立：拆分之后 reply.py 一个
+# sqlite 都不连，要求它 import 一个用不上的东西等于养一句注释（issue #163）。
+# 判据因此改成「提到库 / 库的路径变量就必须走 data_dir」；下面那条逐行匹配
+# `DB = ...` 的正则对每个文件照旧跑，牙没掉。
+DB_MARKERS = ('sqlite3', 'mcp-access.sqlite3', 'IDLEJOT_WG_DB', 'TULPA_WG_DB')
 
 
 def _iter_sources():
@@ -106,7 +113,8 @@ def scan_daemon_db_paths():
             problems.append(f'water-group/daemon/{name} 缺失')
             continue
         text = path.read_text(encoding='utf-8')
-        if 'data_dir' not in text:
+        reads_db = any(marker in text for marker in DB_MARKERS)
+        if reads_db and 'data_dir' not in text:
             problems.append(
                 f'water-group/daemon/{name} 没 import data_dir —— DB 仍可能指向仓库')
         for match in re.finditer(r'^DB\s*=.*$', text, re.MULTILINE):
@@ -320,7 +328,7 @@ def main():
     print('✓ 检测器自测通过（能抓住 issue #14 的原始写法）')
     print('✓ 没有运行时数据路径从仓库根推导')
     print('✓ memory_engine 数据根读 WATER_GROUP_HOME')
-    print('✓ 4 个 daemon 的 DB 走 data_dir()')
+    print(f'✓ {len(DAEMONS)} 个 daemon 的 DB 走 data_dir()')
     print('✓ reply_timing 走 chatlocal.config.DATA')
     print('✓ isolated_env() 钉住 WATER_GROUP_HOME')
     print('✓ 没有残留的手工分隔符处理（replace/os.sep/os.path.join）')

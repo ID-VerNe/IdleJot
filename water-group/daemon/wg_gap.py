@@ -254,11 +254,74 @@ def clear():
         pass
 
 
-def describe():
+def _span_bounds(groups):
+    """所有可核对群缺口窗口的并集边界 `(start, end)`；取不到时 `(None, None)`。
+
+    各群共用同一个右边界（`launch_epoch` 或 `computed_at`）、左边界各异。并集边界
+    是「这段时间」的真话；各报一遍会把状态行撑成多行（issue #148）。
+    """
+    starts = []
+    ends = []
+    for entry in groups.values():
+        if not isinstance(entry, dict) or entry.get("unreachable"):
+            continue
+        if not entry.get("missing"):
+            continue
+        start = entry.get("window_start")
+        end = entry.get("window_end")
+        if start is not None:
+            starts.append(start)
+        if end is not None:
+            ends.append(end)
+    if not starts or not ends:
+        return None, None
+    return min(starts), max(ends)
+
+
+def window_note(now=None):
+    """缺口窗口的上下文括号内容：`停机窗口 07:21:40–09:30:26（账本 09:30:47 计算，3 小时前，仅供参考）`。
+
+    issue #148：`wg_gap.json` 只在 collector 启动时算一次，之后整天的 `--status` /
+    `--list` / `NO_WORK` 都重复同一行——不带时刻时，三小时前的早晨停机账本与几分钟
+    前的新缺口同形。这里把窗口起止、账本计算时刻、距今多久三件事一次说清，并明写
+    「仅供参考」，与 #142 给监听账本历史段加的注脚同口径。
+
+    无缺口 / 无记录 / 窗口取不到时返回空串（调用方不加这句话，不造假事实）。
+    `now` 只给测试钉时刻用，生产走默认。
+    """
+    rec = read()
+    if not rec:
+        return ""
+    groups = rec.get("groups") or {}
+    start, end = _span_bounds(groups)
+    if start is None or end is None:
+        return ""
+    pieces = []
+    shown = wg_clock.window(start, end)
+    if shown:
+        pieces.append(f"停机窗口 {shown}")
+    computed = rec.get("computed_at")
+    try:
+        computed = int(computed)
+    except (TypeError, ValueError):
+        computed = None
+    if computed:
+        age = wg_clock.ago(computed, now=now)
+        detail = f"账本 {wg_clock.stamp(computed)} 计算"
+        if age:
+            detail += f"，{age}"
+        pieces.append(f"（{detail}，仅供参考）")
+    return "".join(pieces)
+
+
+def describe(now=None):
     """一行人话给 `up.py --status`。无缺口 / 无记录 / 全 unreachable 时返回空串。
 
     空串=不造假事实：与 #112 `wg_listener_state.describe()` 同口径，恒加注脚的实现
     红在「无缺口时也加字」上（排除型对照）。
+
+    issue #148：计数前面必须带窗口上下文（`window_note()`）——只有「漏 29 条」
+    的话，一个只在 collector 启动时算过一次的账本会被读成现刻事故。
     """
     rec = read()
     if not rec:
@@ -284,8 +347,9 @@ def describe():
         return ""
     parts = []
     if total_missing:
-        parts.append(f"停机窗口漏 {total_missing} 条（@ 本机 {total_at_me} 条）"
-                     "，见 reply.py --list")
+        note = window_note(now=now)
+        lead = f"{note}，漏 {total_missing} 条" if note else f"停机窗口漏 {total_missing} 条"
+        parts.append(f"{lead}（@ 本机 {total_at_me} 条），见 reply.py --list")
     if truncated:
         parts.append("只能核对最近 200 条，更早的无法核对")
     if unreachable:
@@ -298,6 +362,9 @@ def at_me_lines():
 
     行首 `id=-`（占位，明确不可 `reply.py <id>`）+ `msg_id=`（OneBot 原始 id，Agent
     真要回手动 OneBot 发送用），区别于真唤醒行的 `id=<正数>`。
+
+    时间戳用 `wg_clock.stamp()`（带日期，issue #148）：漏收行与唤醒行（`HH:MM:SS`）
+    因此不同形——漏掉的 @ 可能是昨夜停机时段的，只给时分秒会读成「刚漏的」。
     """
     rec = read()
     if not rec:
@@ -307,9 +374,23 @@ def at_me_lines():
         if not isinstance(e, dict) or e.get("unreachable"):
             continue
         for m in e.get("at_me_lines") or []:
-            stamp = wg_clock.clock(m.get("time"))
+            stamp = wg_clock.stamp(m.get("time"))
             lines.append(f"id=- msg_id={m.get('msg_id')} {stamp} [漏] "
                          f"{m.get('sender')}: {m.get('body')}")
+    return lines
+
+
+def header_lines():
+    """`reply.py --list` 缺口段的抬头行（issue #114 / #148）。
+
+    放在这里而不是调用方，是因为「段标题 + 窗口上下文」必须与 `describe()` 同一份
+    措辞；而且 `reply.py` 已贴 1000 行红线（`check_module_size.py`），多一行注释都
+    会把门禁顶红——抬头由本模块一次给全，调用方只负责打印。
+    """
+    lines = ["# 停机窗口漏掉的 @（不在唤醒账本里，不可 reply.py <id>）："]
+    note = window_note()
+    if note:
+        lines.append(f"# {note}")
     return lines
 
 

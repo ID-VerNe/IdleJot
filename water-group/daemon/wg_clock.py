@@ -11,6 +11,14 @@
     stamp(ts)    "2026-10-23 20:52:07"                 需要绝对时刻的地方
     clock(ts)    "20:52:07"                            消息时间戳（沿用旧格式）
     clock_ms(ms) 同上，入参是毫秒（wg_events.jsonl 的 timestamp 单位）
+    span(secs)   "3 小时 12 分"                        时长（多久 / 空窗多长）
+    ago(ts)      "3 小时 12 分前"                      距今多久（issue #148）
+    window(start, end) "07:21:40–09:30:26"             一段窗口；跨天时两端补日期
+
+`span` / `ago` / `window` 是 issue #148 收上来的：缺口账本要报「账本是什么时候算的、
+距今多久」，而时长渲染此前私有在 `wg_listener_state._span()` 里。同一件事只许有一份
+实现（与 `text_limits.clip()` 同口径），否则「14 分 37 秒」与「14 分 37 秒前」会在
+两处慢慢漂。
 
 时区不写死 UTC+8：偏移从本地时区算，跨时区部署时标签跟着走，报告不会说谎。
 """
@@ -20,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 
 FORMAT_STAMP = "%Y-%m-%d %H:%M:%S"
 FORMAT_CLOCK = "%H:%M:%S"
+FORMAT_MONTH_DAY = "%m-%d"
 
 
 def _local(ts=None):
@@ -77,3 +86,52 @@ def seconds_left(deadline, now=None):
     except (TypeError, ValueError):
         return None
     return max(0, int(left))
+
+
+def span(seconds):
+    """时长的人话：`37 秒` / `14 分 37 秒` / `3 小时 12 分`。
+
+    从 `wg_listener_state._span()` 搬上来的唯一实现（issue #148）：缺口账本要报
+    「账本距今多久」，监听账本报「空窗多长」，两处必须是同一套刻度，否则同一个
+    时长在两个入口读起来不一样。负数按 0 处理（时钟回拨不该报出「-3 秒」）。
+    """
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds} 秒"
+    minutes, rest = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes} 分 {rest} 秒"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} 小时 {minutes} 分"
+
+
+def ago(ts, now=None):
+    """`3 小时 12 分前`：某个时刻距今多久（issue #148）。
+
+    与 `span()` 同一刻度。取不到时刻（None / 非数值）时返回空串，调用方据此
+    不加这句话——说不出「多久前」比说一句假的好（与 #112 同口径）。
+    """
+    try:
+        moment = time.time() if now is None else float(now)
+        return f"{span(moment - float(ts))}前"
+    except (TypeError, ValueError):
+        return ""
+
+
+def window(start, end):
+    """一段窗口：`07:21:40–09:30:26`；**跨天**时两端补 `MM-DD`。
+
+    跨天必须补日期（issue #148）：早上拉起的停机窗口是 `10-26 23:50–10-27 07:21`，
+    只写时分秒的话下午读起来像「今天早上七点漏的」，而它其实是前一夜。同一天则
+    不补——`07:21:40–09:30:26` 已经够读，多加日期只是噪声。
+    `start` / `end` 任一取不到时返回空串（调用方不加窗口）。
+    """
+    try:
+        begin = _local(float(start))
+        finish = _local(float(end))
+    except (TypeError, ValueError, OSError):
+        return ""
+    if begin.date() == finish.date():
+        return f"{begin.strftime(FORMAT_CLOCK)}–{finish.strftime(FORMAT_CLOCK)}"
+    return (f"{begin.strftime(FORMAT_MONTH_DAY)} {begin.strftime(FORMAT_CLOCK)}"
+            f"–{finish.strftime(FORMAT_MONTH_DAY)} {finish.strftime(FORMAT_CLOCK)}")

@@ -292,14 +292,12 @@ def on_watch(stale_after=None, now=None):
 
 
 def _span(seconds):
-    seconds = max(0, int(seconds))
-    if seconds < 60:
-        return f"{seconds} 秒"
-    minutes, rest = divmod(seconds, 60)
-    if minutes < 60:
-        return f"{minutes} 分 {rest} 秒"
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours} 小时 {minutes} 分"
+    """时长渲染的本地别名：唯一实现在 `wg_clock.span()`（issue #148）。
+
+    本模块只在这里留一层薄壳，不改任何调用点；两份实现会各自漂移，而同一个
+    「空窗多长」在 `--status` 与缺口行里必须读起来一样。
+    """
+    return wg_clock.span(seconds)
 
 
 def _watching_note(rows, moment):

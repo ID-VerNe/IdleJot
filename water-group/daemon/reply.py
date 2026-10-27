@@ -504,11 +504,11 @@ def list_wakes():
     # chat_inbox）。这里列出来，让「没人叫我」与「有人叫过但机器不在」可区分——
     # 列在唤醒块之前：Agent 先看到漏的、再看到当前待回的。行首 `id=-`（占位，
     # 不可 reply.py <id>），`msg_id=` 是 OneBot 原始 id，Agent 真要回手动发送用。
+    # issue #148：抬头由 `wg_gap.header_lines()` 一次给全（段标题 + 窗口起止 +
+    # 账本时刻），不给时刻的话三小时前的早晨账本与几分钟前的新缺口读起来一样。
     gap_lines = wg_gap.at_me_lines()
-    if gap_lines:
-        print("# 停机窗口漏掉的 @（不在唤醒账本里，不可 reply.py <id>）：")
-        for ln in gap_lines:
-            print(ln)
+    for ln in (wg_gap.header_lines() + gap_lines if gap_lines else []):
+        print(ln)
     wg_send_failure.print_last()
     shown = 0
     for e in rows:

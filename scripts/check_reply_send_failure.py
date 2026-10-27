@@ -44,9 +44,14 @@ sys.path.insert(0, str(ROOT))
 
 # 数据根 / 配置 / 库全部钉进临时目录，import 任何 daemon 模块之前完成：
 # memory_store 与 wg_paths 的常量是 import 期求值的（与 check_alias_visibility 同款）。
+# `IDLEJOT_WG_STATE` 必须**显式覆盖**：`wg_paths.state_dir()` 的优先级是
+# `IDLEJOT_WG_STATE or TULPA_WG_STATE`，只钉后者会被外部环境穿透——那正是
+# 「测试写生产状态」的口子（#145 的账本复查上线后，穿透就意味着向实机 OneBot
+# 发查询、把结论写进实机账本）。
 _SCRATCH = Path(tempfile.mkdtemp(prefix="wg_send_failure_"))
 os.environ["WATER_GROUP_HOME"] = str(_SCRATCH / "home")
 os.environ["TULPA_WG_STATE"] = str(_SCRATCH / "state")
+os.environ["IDLEJOT_WG_STATE"] = str(_SCRATCH / "state")
 os.environ["IDLEJOT_WG_DB"] = str(_SCRATCH / "chats.sqlite3")
 os.environ["IDLEJOT_WG_CONFIG"] = str(_SCRATCH / "config.json")
 for path in ("home", "state"):
@@ -440,16 +445,47 @@ def 没有失败记录时不出声():
     return "# 上次发送失败" not in buf.getvalue()
 
 
-# ---------- issue #145：过期禁言必须复查，不许继续报「禁言至」 ----------
+# ---------- issue #145：禁言账本必须复查，不许继续报「禁言至」 ----------
+
+
+@case
+def 提前解禁_禁言时刻在未来也必须复查():
+    """**issue #145 的实机现场**（本文件里唯一直接对应该症状的用例）。
+
+    issue 的证据链：账本 `mute_until` 在 **未来** 53 分钟（11:18:29），而此刻实测
+    `shut_up_timestamp=0`——管理员提前解禁了。旧实现（`if rec.get("mute_until")`）
+    照样打「禁言至 11:18:29」，Agent 据此放弃回待回的唤醒。
+
+    所以复查的触发条件不能是「`mute_until` 已到点」：提前解禁时它必然还在未来。
+    判据必须是「这份预测还新不新」（账本 `at` 距今超过 `RECHECK_AFTER`）。
+
+    断言：① 不再出现「禁言至」；② 说「实测解禁」；③ `recovered` / `recovered_at`
+    真的落盘（#132 预留的字段第一次有写者）；④ 原判时刻留在账本里可追溯。
+    """
+    now = time.time()
+    until = int(now) + 3180                     # issue 现场：未来 53 分钟
+    _reset(now, shut_up=0, all_shut=False)
+    _ledger(until, at=int(now) - 7200)
+    out = _list()
+    rec = wg_send_failure.read() or {}
+    ok = ("禁言至" not in out
+          and "实测解禁" in out
+          and rec.get("recovered") is True
+          and rec.get("recovered_at") is not None
+          and int(rec.get("mute_until") or 0) == until)
+    if not ok:
+        print(f"    输出={out.strip()!r} 账本 recovered={rec.get('recovered')!r} "
+              f"recovered_at={rec.get('recovered_at')!r} "
+              f"请求数={FIX['member_queries']}")
+    return ok
 
 
 @case
 def 过期禁言_现查已解禁就说实测解禁():
-    """#145 的原始症状：`mute_until` 已过期 60 秒，表头照样打「禁言至 未来时刻」。
+    """issue「现象」段的复现命令场景：`mute_until` 已过期 60 秒。
 
-    修好后必须：① 不再出现「禁言至 <任何时刻>」；② 说「实测解禁」（现查
-    `shut_up_timestamp=0` 且 `group_all_shut=False`，这是实测不是推断）；
-    ③ `recovered` / `recovered_at` 真的落盘（#132 预留的字段第一次有写者）。
+    与上一条同一条修复路径，但它只覆盖「已到点」这一半；单靠它会让「只判已到点」
+    的错误实现假绿（#145 的实机现场是未来时刻）。
     """
     now = time.time()
     until = int(now) - 60
@@ -470,28 +506,41 @@ def 过期禁言_现查已解禁就说实测解禁():
 
 
 @case
-def 未到点_不查也不改口径():
-    """对照组：`mute_until` 还在未来时，① 尾巴必须仍是「禁言至 …（还剩 N 秒）」；
-    ② **不许**发 `get_group_member_info`（只读入口未到点就不该打扰 OneBot）。
+def 账本刚写不复查():
+    """对照组：账本写入不到 `RECHECK_AFTER` 秒时零请求。
 
-    恒删禁言尾巴的实现红在 ①，每次 `--list` 都查一遍的实现红在 ②。
+    `diagnose()` 在失败那一刻已经查过 `shut_up_timestamp`，紧接着再问一遍只是白打
+    接口。恒查的实现红在 `member_queries == 0`。
     """
     now = time.time()
     until = int(now) + 300
     _reset(now, shut_up=until, all_shut=False)
-    _ledger(until, at=int(now) - 60)
+    _ledger(until, at=int(now) - 10)             # 刚写 10 秒
     out = _list()
-    rec = wg_send_failure.read() or {}
     return (_has(out, f"禁言至 {wg_clock.clock(until)}")
-            and any(f"还剩 {n} 秒" in out for n in (298, 299, 300))
-            and FIX["member_queries"] == 0
-            and rec.get("recovered") is None)
+            and FIX["member_queries"] == 0)
 
 
 @case
-def 过期禁言_现查仍禁言不冒充解禁():
-    """对照组的另一面：账本说到点了，但现查 `shut_up_timestamp` 仍在未来（管理员
-    又禁了一次 / 账本记早了）→ 不许说「解禁」，要以现查到的时刻为准。"""
+def 未复查的禁言时刻标明来源():
+    """账本刚写（还没复查）时，禁言尾巴必须说清这个时刻是**失败时探测**来的。
+
+    对照组：把「禁言至 X」直接当成此刻结论的实现红在「据失败时探测」这句缺失上
+    （#142 的纪律：推断要说成推断）。
+    """
+    now = time.time()
+    until = int(now) + 300
+    _reset(now, shut_up=until, all_shut=False)
+    _ledger(until, at=int(now) - 10)
+    out = _list()
+    return (_has(out, f"禁言至 {wg_clock.clock(until)}", "据失败时探测")
+            and any(f"还剩 {n} 秒" in out for n in (298, 299, 300)))
+
+
+@case
+def 复查仍禁言_以现查为准():
+    """对照组：账本说未来某时刻，现查 `shut_up_timestamp` 是**另一个**未来时刻
+    （管理员重新禁了一次）→ 不许说解禁，要换成现查到的时刻并标明复查。"""
     now = time.time()
     still = int(now) + 240
     _reset(now, shut_up=still, all_shut=False)
@@ -500,12 +549,14 @@ def 过期禁言_现查仍禁言不冒充解禁():
     rec = wg_send_failure.read() or {}
     stamps = [wg_clock.clock(still + n) for n in range(-2, 3)]
     return (rec.get("recovered") is None
+            and rec.get("recheck_result") == "muted"
             and any(f"禁言至 {stamp}" in out for stamp in stamps)
+            and "复查仍禁言" in out
             and "实测解禁" not in out)
 
 
 @case
-def 过期禁言_全员禁言说未知解禁时刻():
+def 全员禁言说未知解禁时刻():
     """全员禁言时 `shut_up_timestamp` 常常是 0：这时不许说解禁（#132 的假事实）。"""
     now = time.time()
     _reset(now, shut_up=0, all_shut=True)
@@ -518,7 +569,7 @@ def 过期禁言_全员禁言说未知解禁时刻():
 
 
 @case
-def 过期禁言_探测失败说未能确认():
+def 探测失败说未能确认():
     """探测失败只能降级措辞（「复查未能确认」），不许当解禁、也不许继续断言禁言。"""
     now = time.time()
     _reset(now, member_fails=True)
@@ -532,10 +583,51 @@ def 过期禁言_探测失败说未能确认():
 
 
 @case
-def 复查限流_一分钟内只查一次():
-    """同一分钟内被反复叫起（`--list` 连跑）不该每次都打接口。"""
+def 探测失败不吃上一轮结论():
+    """上一轮复查留下 `group_shut=True`，这一轮探测直接失败：不许拿旧值顶着**本次**
+    复查的时刻说话（那是把两次不同的探测缝成一句假事实）。"""
     now = time.time()
-    _reset(now, shut_up=0, all_shut=False)
+    _reset(now, member_fails=True)
+    _ledger(int(now) - 60, at=int(now) - 3600,
+            recheck_result="muted", group_shut=True,
+            rechecked_at=int(now) - 600)
+    out = _list()
+    rec = wg_send_failure.read() or {}
+    return (rec.get("group_shut") is None
+            and rec.get("recheck_result") == "unknown"
+            and "全员禁言" not in out
+            and "复查未能确认" in out)
+
+
+@case
+def 群信息查不到_复查不冒充解禁():
+    """成员探测成功（`shut_up_timestamp=0`）但 `group_all_shut` 读不到：**不许**当解禁。
+
+    `scope is None` 是「不知道」，不是「没全员禁言」。变异实测：把判定从
+    `scope is False` 放宽成 `scope is not True`，其余 28 条全绿——只有这条能抓。
+    """
+    now = time.time()
+    _reset(now, shut_up=0, group_fails=True)
+    _ledger(int(now) - 60, at=int(now) - 3600)
+    out = _list()
+    rec = wg_send_failure.read() or {}
+    return (rec.get("recovered") is None
+            and rec.get("recheck_result") == "unknown"
+            and "实测解禁" not in out
+            and "复查未能确认" in out)
+
+
+@case
+def 复查限流_一分钟内只查一次():
+    """同一分钟内被反复叫起（`--list` 连跑）不该每次都打接口。
+
+    必须用**探测失败**场景：成功复查会写下 `recovered=True`，第二次就被「已有结论」
+    那条前置挡住了——那样的用例测不到限流（变异实测：删掉限流代码它照样全绿）。
+    失败复查只写 `rechecked_at`，`recovered` 仍是 `None`，第二次会不会再查完全取决
+    于限流这一条。
+    """
+    now = time.time()
+    _reset(now, member_fails=True)
     _ledger(int(now) - 60, at=int(now) - 3600)
     _list()
     first = FIX["member_queries"]
@@ -545,21 +637,22 @@ def 复查限流_一分钟内只查一次():
 
 
 @case
-def 复查三前置零请求():
-    """无账本 / 已有结论 / 未到点：三种前置都零请求（对照组，防「每次 --list 都查」）。"""
+def 复查前置零请求():
+    """无账本 / 非禁言类失败 / 已有结论：三种前置都零请求（防「每次 --list 都查」）。"""
     now = time.time()
     _reset(now, shut_up=0, all_shut=False)
     wg_send_failure.clear()
     _list()
     none_ledger = FIX["member_queries"]
-    _ledger(int(now) + 300, at=int(now) - 60)          # 未到点
+    # 参数错类失败（没有 mute_until）：复查没有对象
+    _ledger(0, at=int(now) - 3600)
     _list()
-    future = FIX["member_queries"]
-    _ledger(int(now) - 60, at=int(now) - 3600, recovered=True,
+    not_mute = FIX["member_queries"]
+    _ledger(int(now) + 60, at=int(now) - 3600, recovered=True,
             recovered_at=int(now) - 30)                # 已有结论
     _list()
     settled = FIX["member_queries"]
-    return none_ledger == 0 and future == 0 and settled == 0
+    return none_ledger == 0 and not_mute == 0 and settled == 0
 
 
 @case

@@ -47,6 +47,7 @@ import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_images  # noqa: E402  (图片标记渲染，issue #35 追问行同款)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #164 PC)
+import wg_text  # noqa: E402  (issue #169 PC：connect_ro 延迟导入门面)
 from wg_paths import data_dir, state_dir
 STATE = state_dir()
 DB = Path(os.environ.get("IDLEJOT_WG_DB") or os.environ.get("TULPA_WG_DB", data_dir() / "mcp-access.sqlite3"))
@@ -104,7 +105,7 @@ def close():
 def active_session_id():
     """当前会话 id，读库不读 wg_session.txt——后者会滞后于会话重建。"""
     try:
-        db = sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        db = wg_text.connect_ro(DB, timeout=5)
     except sqlite3.Error:
         return ""
     try:
@@ -249,7 +250,7 @@ def since(after_id, session, not_before=None, limit=50):
     if not session:
         return []
     try:
-        db = sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        db = wg_text.connect_ro(DB, timeout=5)
     except sqlite3.Error:
         return []
     limit = max(1, int(limit))
@@ -405,7 +406,7 @@ def lookup(event_id):
     id 是 AUTOINCREMENT 的全局 rowid，跨会话唯一，不用再按会话过滤。
     """
     try:
-        db = sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        db = wg_text.connect_ro(DB, timeout=5)
     except sqlite3.Error:
         return None
     try:
@@ -429,7 +430,7 @@ def latest_group_id():
     if not sid:
         return ""
     try:
-        db = sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        db = wg_text.connect_ro(DB, timeout=5)
     except sqlite3.Error:
         return ""
     try:

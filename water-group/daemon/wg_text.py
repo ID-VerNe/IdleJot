@@ -86,6 +86,23 @@ def clip():
     return _clip
 
 
+def connect_ro(path, *, timeout=5.0):
+    """chatlocal.sqlite_util.connect_ro 的延迟导入门面（issue #169 PC）。
+
+    daemon 读侧（dossier / followup / wg_context / wg_gap / wg_text / mint_grant）
+    原本各写一份 `sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True,
+    timeout=5)`——Windows 反斜杠直接拼 `?mode=ro` 会被 sqlite 当文件名的一部分，
+    `wg_gap.py:63` 把这个坑写成了注释却没进助手。合流到 `chatlocal.sqlite_util.
+    connect_ro`，本门面只做延迟导入（同 `clip()` 范式：`chatlocal/config.py` 在
+    import 期建数据目录，daemon 不能模块级 `import chatlocal`）。timeout 默认 5.0
+    与原读侧一致；`investigation_sql` 那种跑不可信 SQL 的紧预算自己传 `timeout=0.5`。
+    """
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from chatlocal.sqlite_util import connect_ro as _connect_ro
+    return _connect_ro(path, timeout=timeout)
+
+
 def strip_placeholders(text):
     """把段占位换成短替代，返回 (替代后的文本, 剥离前的原长)。
 
@@ -200,11 +217,12 @@ def _read_events():
 def _inbox_row(event_id):
     """chat_inbox 里按全局 rowid 取一行；拿不到或库不可读都返回 None。
 
-    只读连接，与 followup.lookup / reply.recent_chatter 同一套姿势：
-    `?mode=ro` 保证这条路径永远不改库。
+    只读连接走 `wg_text.connect_ro`（issue #169 PC：`?mode=ro` 的唯一归属在
+    `chatlocal.sqlite_util.connect_ro`，本模块延迟导入），与 followup.lookup /
+    reply.recent_chatter 同一套姿势——这条路径永远不改库。
     """
     try:
-        db = sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        db = connect_ro(DB, timeout=5)
     except sqlite3.Error:
         return None
     try:

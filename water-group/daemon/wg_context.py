@@ -49,7 +49,7 @@ def active_session_id():
     follow whichever session the messages were actually written under.
     """
     try:
-        db = sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        db = wg_text.connect_ro(DB, timeout=5)
     except sqlite3.Error:
         return ""
     try:
@@ -78,7 +78,7 @@ def recent_chatter(limit, around=None):
     if not sid:
         return []
     try:
-        db = sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        db = wg_text.connect_ro(DB, timeout=5)
     except sqlite3.Error:
         return []
     sql = "SELECT id, payload, media FROM chat_inbox WHERE session_id=?"

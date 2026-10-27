@@ -88,13 +88,18 @@ NO_RESTART = {
     "water-group/daemon/wg_clock.py": "shared clock helper for guard/CLI, no daemon imports it",
     "water-group/daemon/wg_quotes.py": "shared quote renderer for guard/CLI, no daemon imports it",
     "water-group/daemon/wg_text.py": "shared body renderer for guard/CLI, no daemon imports it",
+    # issue #163：画像渲染（wg_dossiers）与 --context 读链（wg_context）只被
+    # watch / reply 这两个一次性 CLI import；守护进程里没有副本，改了下次调用
+    # 自然生效，重启子进程没有意义。
+    "water-group/daemon/wg_dossiers.py": "shared dossier renderer for CLI (watch/reply), no daemon imports it",
+    "water-group/daemon/wg_context.py": "shared context reader for CLI (reply), no daemon imports it",
     "water-group/daemon/wg_aliases.py": "shared alias renderer for CLI (watch/reply), no daemon imports it",
     "water-group/daemon/wg_budget.py": "shared wait-budget constants for CLI (reply/listen), no daemon imports it",
     "water-group/daemon/wg_bubbles.py": "shared bubble-cap/split helper for CLI (reply), no daemon imports it",
-    # issue #164：`--list` / `--context` 的渲染，只被 reply.py（一次性 CLI）import。
-    # （同批的 `wg_isolation.py` 不在这里：它经 session.py 进了 collector 的闭包、
-    # 经 plugins 进了 commands 的闭包，改它必须重启那两个子进程。）
-    "water-group/daemon/wg_wake_list.py": "shared wake-list renderer for CLI (reply), no daemon imports it",
+    # issue #164：`wg_isolation.py` **故意不在这里**——它经 session.py 进了 collector
+    # 的闭包、经 plugins 进了 commands 的闭包，改它必须重启那两个子进程。
+    # （原先还有一条 `wg_wake_list.py`：合并上游 #163 后 `--context` 的读链整条搬进
+    # `wg_context.py`，`--list` 的渲染也不再拆出去，那个文件已删除。）
     # issue #132：发送失败的诊断 / 禁言探测 / 失败账本，只被 reply.py（一次性 CLI）
     # import；守护进程里没有副本，改了下次调用自然生效。
     "water-group/daemon/wg_send_failure.py": "shared send-failure diagnostics for CLI (reply), no daemon imports it",

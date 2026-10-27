@@ -25,7 +25,7 @@
 .venv/Scripts/python.exe water-group/daemon/reply.py --show <id>       # 读某条消息全文（wg_events 命中带引用展开；缺 id 明说原因）
 .venv/Scripts/python.exe water-group/daemon/reply.py <id> "<正文>" --at <花名>  # 正文前 @ 人，可重复；真 @ 不是正文里的文本
 .venv/Scripts/python.exe water-group/daemon/reply.py --context 30 --around <id> # 只看这条之前的部分
-.venv/Scripts/python.exe water-group/daemon/reply.py --who <花名>     # 只解析花名到 QQ 与归属群，不发送
+.venv/Scripts/python.exe water-group/daemon/reply.py --who <花名>     # 解析花名到 QQ 与归属群并给出画像卡，不发送
 .venv/Scripts/python.exe water-group/daemon/reply.py <id> "看这张" --image <图片路径>  # 发本地图片，可重复；每张独占一条气泡排在文字之后
 .venv/Scripts/python.exe water-group/daemon/look.py --event <id>       # 唤醒行图片标「可补读」时先落盘再读；--pick 看候选、--recent 看最近
 ```
@@ -87,12 +87,14 @@
 （`enabled` 三态 + `groups` 白名单 + `options.max_messages` / `idle_seconds`），
 旧写法顶层 `followup` 段仍逐字段兼容；详见 `~/.water-group/rules/water_group.md`。
 
-> **职责边界（issue #83）**：接管后主 Agent 只水群——白名单是 `listen.py` / `reply.py` / `up.py --status`（只读）/ 追问窗口接话。
-> 改仓库、跑测试门禁、写文档、审 PR、排查一律 `Agent(run_in_background: true)` 派后台 subagent，派完立刻回监听，不原地等。
+> **职责边界（issue #83 / #160）**：接管后主 Agent 只水群——白名单是 `listen.py` / `reply.py` / `up.py --status`（只读）/ 追问窗口接话 / `tail` 一行日志。
+> 改仓库、跑测试门禁、写文档、审 PR、排查**一律立 issue 后停手，不派 subagent、不亲手做**；执行交给用户启动的独立会话（issue #160 撤掉「必须派活」，保留「必须留证据」）。
 >
-> **发现缺陷立即提 issue（最高优先级，issue #115）**：这一条的优先级高于水群本身——发现缺陷（值守、开发、审 PR、跑门禁时都算）当场立单，**不需要先问用户、不需要攒批、不需要等第二次复现**。**提 issue 不属于「改仓库」**，因此不受上面「主 Agent 只水群」白名单的限制；派后台 subagent 去做的是**修复**（issue → plan → worktree → PR），不是提 issue。唯一例外：纯进程重启，或用户当次明确说「不用提」。issue 正文仍须过隐私门禁，仍不得暴露真实群号 / QQ / 群名片。
+> **发现缺陷立即提 issue（最高优先级，issue #115）**：这一条的优先级高于水群本身——发现缺陷（值守、开发、审 PR、跑门禁时都算）当场立单，**不需要先问用户、不需要攒批、不需要等第二次复现**。**提 issue 不属于「改仓库」**，因此不受上面「主 Agent 只水群」白名单的限制。**提完 issue 主 Agent 的产出到此为止**：修复（issue → plan → worktree → PR）由用户启动的独立会话做，不由主 Agent 派 subagent 代劳。唯一例外：纯进程重启，或用户当次明确说「不用提」。issue 正文仍须过隐私门禁，仍不得暴露真实群号 / QQ / 群名片。
 >
-> 细则见 `.agents/rules/water_group.md` §6，派活 prompt 模板见 `.agents/skills/water-group/SKILL.md` §五。
+> **多群并发 = 用户开 N 个会话，一会话一群**，各会话互不可见；**不是**一个 Agent 派 N 个 subagent。所以「不派活」不削弱多群能力——多群靠会话数量，不靠派活。
+>
+> 细则见 `.agents/rules/water_group.md` §6，独立会话交接清单见 `.agents/skills/water-group/SKILL.md` §五。
 
 日常循环、按花名 @ 人、连发 @ 的处理、排查表，全部在 **`~/.water-group/rules/water_group.md`**（私有，不在仓库），动手前读它；仓库的 `.agents/rules/water_group.md` 只有通用骨架。本文件后面的内容是仓库开发与维护规范，不是挂机 SOP。
 
@@ -309,13 +311,13 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
 
 所有仓库改动（代码、文档、门禁、配置）按五步走，缺一步即不合规：
 
-1. **先发 issue（发现即提，不等批准）**：发现缺陷当场立单，**不需要用户同意**，最高优先级规则见 §0「职责边界」（issue #115）。按 [`doc/ISSUE_GUIDE.md`](doc/ISSUE_GUIDE.md) 立单，正文四要素（现象 / 证据链 / 影响面 / 修复候选）齐全——issue 是派活与验收的唯一依据。行为类 issue 的现象段必须带**一条可直接粘贴的复现命令**（期望输出 / 实际输出 / 触发条件齐全），给不出就贴 `needs-repro`，见 [`doc/ISSUE_GUIDE.md`](doc/ISSUE_GUIDE.md)「复现命令与 `needs-repro`」。**发布前正文过隐私门禁**（`scripts/check_publication.py --require-private --text <草稿>`），见 §5.3。
+1. **先发 issue（发现即提，不等批准）**：发现缺陷当场立单，**不需要用户同意**，最高优先级规则见 §0「职责边界」（issue #115）。按 [`doc/ISSUE_GUIDE.md`](doc/ISSUE_GUIDE.md) 立单，正文四要素（现象 / 证据链 / 影响面 / 修复候选）齐全——issue 是执行与验收的唯一依据。行为类 issue 的现象段必须带**一条可直接粘贴的复现命令**（期望输出 / 实际输出 / 触发条件齐全），给不出就贴 `needs-repro`，见 [`doc/ISSUE_GUIDE.md`](doc/ISSUE_GUIDE.md)「复现命令与 `needs-repro`」。**发布前正文过隐私门禁**（`scripts/check_publication.py --require-private --text <草稿>`），见 §5.3。
 2. **写 plan 追评到 issue 下面**：探索结论（带 `文件:行号` 证据）+ 方案 + 明确不做 + 验证方式，并含一行「用 issue 的复现命令复现：成功 / 失败（贴原始输出）」——复现失败退回发现者补充，不进实施；定稿后实施只追加不改口。
 3. **开 worktree 改代码**：`git worktree add .tmp/wt-<issue> -b type/<issue>-<slug> slim`，不在主工作区切分支；分支 / PR 标题 / commit 三处带 issue 号。大 issue 拆多个 PR 时，分节用 `P+字母`、优先级用 `P+数字`，命名落点见 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「拆分与命名规范」。
 4. **开 PR**：按 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)，正文分段齐全，修红门禁必须带基线验证段；**CI 全绿 + 无冲突才合并**（`slim` 已开分支保护、required check 为 `checks`，CI 没绿时 GitHub 直接判 `BLOCKED`；设置漂移跑 `scripts/check_repo_settings.py` 复现，见 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「合并条件」）。行为类 PR 用 `Refs #NN`，纯文档 / 纯重构才用 `Closes #NN`（见 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「关闭方式」）；diff 触及门禁链（`scripts/check_*.py` / `scripts/gates.json` / `scripts/run_gates.py` / `.github/workflows/ci.yml` / `.githooks/` 下钩子）时正文另带 `## 门禁改动` 与不同上下文的复核结论（见 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「门禁改动与独立复核」，`scripts/check_gate_change_review.py` 在 CI 上校验）。PR 标题 / 正文 / commit message 同样先过 §5.3 发布门禁。
 5. **合并后对账与回签**：修复者先做自述 vs 实际逐项核对（`git status`、文件存在性、门禁原始输出），并给行为类 issue 贴 `needs-live-verify`；再由发现者或全新上下文的验证 agent 按 [`doc/PR_GUIDE.md`](doc/PR_GUIDE.md)「合并后：对账与回签」的模板回签，**回签通过才关 issue**（修复者不能给自己回签）。欠账转新 issue（#41 模式）。
 
-与 §0 的边界（issue #83）分工：那里管「水群回路里主 Agent 只水群、重活派后台 subagent」，本节管「仓库改动怎么走 issue/PR」；派活 prompt 模板见 `.agents/skills/water-group/SKILL.md` §五。
+与 §0 的边界（issue #83 / #160）分工：那里管「水群回路里主 Agent 只水群、发现即立 issue 且不派活」，本节管「仓库改动怎么走 issue/PR」；独立会话交接清单见 `.agents/skills/water-group/SKILL.md` §五。
 
 ---
 
@@ -456,15 +458,16 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 69 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
 | 70 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、四种格式都真能发、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度（超了拒、额度内照发）、不回退计划通道、发图也记账（#128） |
 | 71 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
-| 72 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
-| 73 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
-| 74 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
-| 75 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
-| 76 | `reply` | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
-| 77 | `reply` | `check_busboss.py` | 车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103） |
-| 78 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164） |
+| 72 | `reply` | `check_wake_dossier.py` | 沉淀的群友画像必须到达唤醒行 / --list / --context（不是只挂在 MCP 的 chat_guidance 里）：命中才附、不串到别人身上、每人一行有硬顶且不挤正文额度、群级术语一次一块不跨群、引擎坏了照常唤醒（#163） |
+| 73 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
+| 74 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
+| 75 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
+| 76 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
+| 77 | `reply` | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
+| 78 | `reply` | `check_busboss.py` | 车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103） |
+| 79 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164） |
 
-共 78 个 CI 门禁，分 5 个分片（`static` 16、`runtime` 15、`mcp` 16、`storage` 9、`reply` 22）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
+共 79 个 CI 门禁，分 5 个分片（`static` 16、`runtime` 15、`mcp` 16、`storage` 9、`reply` 23）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
 <!-- gates:ci:end -->
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

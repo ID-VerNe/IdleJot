@@ -514,6 +514,57 @@ def cmd_restore_pollution(as_json=False, dry_run=False):
     return 0
 
 
+def cmd_notes(source=None, group=None, dry_run=False, as_json=False):
+    """群级结构化术语的读与写（issue #31 的 daemon 侧入口，issue #163 接链）。
+
+    不给 ``source`` 就是读：把本群的术语表原样列出来（`term=value`，附 kind 与
+    更新时间）。给了就是一个 JSON 载荷
+    ``[{"term": "遥遥领先", "value": "自嘲用法", "kind": "glossary"}]``，走
+    `upsert_group_notes` 按 ``(群号, term)`` 覆盖写——同一个词在一个群里只有一个
+    意思，不累积历史。
+
+    写侧本来只有 MCP 的 `consolidate_chat_memory(notes=...)` 调得到，而水群 Agent
+    走的是 daemon CLI：不补这个入口，`group_notes` 会一直是 0 行，唤醒行的
+    「【群级术语】」也就永远不触发。
+    """
+    gid = resolve_group(group)
+    if not gid:
+        print("no group id: pass --group, or bind a session first", file=sys.stderr)
+        return 2
+    mem = engine()
+    if source is None:
+        notes = mem.query_group_notes(gid)
+        lines = [f"=== 群级术语 group={gid} 共 {len(notes)} 条 ==="]
+        lines += [f"  {n['term']}={n['value']}（{n['kind']}）" for n in notes] or ["  （空）"]
+        emit({"group_id": gid, "notes": notes}, as_json, lines)
+        return 0
+    try:
+        payload = json.loads(read_payload(source))
+    except OSError as exc:
+        print(f"cannot read {source}: {exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"payload is not valid JSON: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(payload, list) or not payload:
+        print("payload must be a non-empty list of {term, value, kind}", file=sys.stderr)
+        return 2
+    bad = [f"notes[{i}] needs term" for i, n in enumerate(payload)
+           if not isinstance(n, dict) or not str(n.get("term") or "").strip()]
+    if bad:
+        for line in bad:
+            print(line, file=sys.stderr)
+        return 2
+    if dry_run:
+        print(f"would upsert {len(payload)} note(s) group={gid}")
+        for n in payload:
+            print(f"  {n['term']}={n.get('value', '')}")
+        return 0
+    result = mem.upsert_group_notes(gid, payload)
+    emit(result, as_json, [f"notes updated={result.get('updated', 0)} group={gid}"])
+    return 0 if result.get("success") else 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="在没人 @ 的时候沉淀群友画像")
     parser.add_argument("--check", action="store_true", help="该提炼了吗")
@@ -533,6 +584,10 @@ def main():
                         help="剔除主档中覆盖行已持有的群内事实，原列表入 key_memories_backup")
     parser.add_argument("--restore-pollution", action="store_true",
                         help="按 key_memories_backup 还原上一次 scrub")
+    parser.add_argument("--notes", action="store_true",
+                        help="读本群术语表（黑话 / 店名 / 约定，issue #31）")
+    parser.add_argument("--notes-apply", metavar="JSON",
+                        help="按 JSON 载荷写群级术语（[{term,value,kind}]），- 读 stdin")
     parser.add_argument("--json", action="store_true", help="机器可读输出（配合上面三个动词）")
     parser.add_argument("--group", metavar="ID",
                         help="群号；缺省取活动会话或载荷里的 group_id")
@@ -554,6 +609,8 @@ def main():
         return cmd_scrub_pollution(args.json, args.dry_run)
     if args.restore_pollution:
         return cmd_restore_pollution(args.json, args.dry_run)
+    if args.notes or args.notes_apply is not None:
+        return cmd_notes(args.notes_apply, args.group, args.dry_run, args.json)
     if args.digest:
         return cmd_digest()
     if args.dump is not None:
@@ -561,6 +618,7 @@ def main():
     if args.check:
         return cmd_check(cfg)
     parser.error("需要 --check / --dump / --mark / --digest / --ingest / --apply / "
+                 "--notes / --notes-apply / "
                  "--audit-pollution / --scrub-pollution / --restore-pollution 之一")
 
 

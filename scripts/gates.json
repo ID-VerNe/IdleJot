@@ -85,7 +85,8 @@
     {"name": "check_now_clock.py", "shard": "reply", "why": "值守工具链必须带当前时刻（#95）"},
     {"name": "check_miyoushe.py", "shard": "reply", "why": "米游社取数 handler：DS 签名、URL 参数、缓存、错误码"},
     {"name": "check_sixty.py", "shard": "reply", "why": "60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53）"},
-    {"name": "check_busboss.py", "shard": "reply", "why": "车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103）"}
+    {"name": "check_busboss.py", "shard": "reply", "why": "车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103）"},
+    {"name": "check_multigroup_isolation.py", "shard": "reply", "why": "一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164）"}
   ],
   "manual": [
     {"name": "check_console_window.py", "why": "需要真实桌面会话；--self-test 会故意闪两次黑框做 A/B 对照"},

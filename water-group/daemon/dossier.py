@@ -47,12 +47,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收口)
+import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #164 PC)
 from wg_paths import data_dir, state_dir
 STATE = state_dir()
 DB = data_dir() / "mcp-access.sqlite3"
 MARK = STATE / "wg_dossier.json"
 REPLIED = STATE / "wg_replied.jsonl"
-CONFIG = ROOT / "water-group" / "config.json"
+CONFIG = wg_config.path()
 
 DEFAULTS = {
     "idle_minutes": 20,     # quiet this long before a refresh is considered

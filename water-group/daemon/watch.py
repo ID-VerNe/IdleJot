@@ -43,6 +43,7 @@ import wg_budget  # noqa: E402  (等待预算，issue #83)
 import wg_aliases  # noqa: E402  (别名指向渲染，issue #30)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_images  # noqa: E402  (图片标记渲染)
+import wg_isolation  # noqa: E402  (本会话只管一个群，issue #164 PA)
 import wg_listener_state  # noqa: E402  (监听存亡账本的续心跳，issue #112)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
@@ -164,9 +165,27 @@ def main():
     deadline = time.time() + args.timeout
     ledger = up.replied_ids()
 
+    # issue #164 PA：本会话只管一个群。事件流是单文件混装所有群（collector 写入点
+    # 只有一个），所以过滤只能在这一侧做——改前这里一条与 conversation_id 有关的
+    # 条件都没有，钉死群 111 的会话照样被群 222 的 @ 叫醒。未钉死时 rows_of 原样
+    # 返回（单群机器与改前完全一致），并打一行说明隔离没生效。
+    note = wg_isolation.note()
+    if note:
+        print(note)
+    reported_empty = False
+
     while True:
-        rows = up.events()
+        raw_rows = up.events()
+        rows = wg_isolation.rows_of(raw_rows)
         ledger = up.replied_ids()
+        # 过滤把自己的会话滤空了要出声（issue #164）：群号/self_account/状态目录
+        # 配错时，「过滤生效」与「群里没人说话」在输出里长得一模一样。每轮只报一次。
+        empty_note = wg_isolation.filter_report(raw_rows)
+        if empty_note and not reported_empty:
+            reported_empty = True
+            print(empty_note)
+        elif not empty_note:
+            reported_empty = False
         # 过期唤醒和 --list 一样滤掉：冷启动后 .tmp 是新的、游标归零，陈年
         # 未回唤醒会整批变成「新唤醒」打印出来，Agent 据此回头回复旧话题。
         fresh = [e for e in rows

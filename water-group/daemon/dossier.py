@@ -5,15 +5,19 @@ still lands in `chat_inbox`: Tulpa inserts each event before deciding whether to
 deliver it. The raw material for a profile refresh is therefore already on disk --
 this script only decides when there is enough of it and hands it over.
 
-The trigger is deliberately boring. A burst of messages is enough on its own;
-otherwise the caller has to be idle for a while *and* have a decent pile of
-unread chatter. Both numbers live in `config.json` under `dossier` so they can be
+The trigger is deliberately boring, and there are three of them. A burst of
+messages is enough on its own; otherwise the caller has to be idle for a while
+*and* have a decent pile of unread chatter. Neither of those covers the case the
+bot actually lives in -- a group that keeps chatting without ever mentioning us
+-- so a third path counts consecutive listening rounds that nobody named us in
+(issue #162). Every number lives in `config.json` under `dossier` so it can be
 tuned without touching code.
 
 Usage:
   dossier.py --check            exit 0 when a refresh is due, 3 when it is not
   dossier.py --dump [N]         print the material, one JSON object per line
   dossier.py --mark             record everything up to now as summarised
+  dossier.py --tick [reset]     count one round nobody named us (reset = clear)
   dossier.py --ingest FILE      write one summary into the group timeline
   dossier.py --apply FILE.json  write a batch of member dossiers / events
 
@@ -36,6 +40,23 @@ so no group's memory view changes; the cross-group row is what shrinks.
 The caller is expected to turn `--dump` into `consolidate_chat_memory` records and
 then call `--mark`. Marking without summarising just loses the material, so it is
 kept out of `--check`.
+
+The quiet cadence (issue #162) needs a counter that outlives one process: each
+`listen.py --cycles 1` call runs exactly one round, so "three rounds in a row"
+spans three invocations. `--tick` writes that counter into the same mark file and
+`--mark` / a wake clears it. `quiet_rounds` is the primary test ("three times in
+a row"), `quiet_minutes` is only a floor -- `--timeout 30` makes three rounds 90
+seconds, and pinning rounds alone would turn "about five minutes" into a lie.
+`quiet_min_messages` keeps an empty group from burning a model call on nothing.
+
+`save_mark` is read-modify-write for exactly this reason: the old whole-object
+overwrite meant `--mark` erased whatever a new key had accumulated. The symptom
+was either "due again right after a refresh" or "the counter never grows", and
+both look intermittent.
+
+Known boundary: `wg_dossier.json` is one global file, not one per group, so a
+multi-group deployment shares one counter and one cursor (`doc/MULTI_GROUP_PLAN.md`
+owns that split; this issue does not widen the surface).
 """
 import argparse
 import json
@@ -47,18 +68,27 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收口)
+import wg_clock  # noqa: E402  (时刻渲染的唯一出口，issue #95)
+import wg_config  # noqa: E402  (config.json 路径的唯一出口，issue #4 PA0)
 from wg_paths import data_dir, state_dir
 STATE = state_dir()
 DB = data_dir() / "mcp-access.sqlite3"
 MARK = STATE / "wg_dossier.json"
 REPLIED = STATE / "wg_replied.jsonl"
-CONFIG = ROOT / "water-group" / "config.json"
 
 DEFAULTS = {
     "idle_minutes": 20,     # quiet this long before a refresh is considered
     "min_messages": 25,     # ...and at least this much unread chatter
     "burst_messages": 80,   # or this many messages regardless of how recent
     "max_material": 80,     # how many messages to hand over in one go
+    # 连续多少轮 watch.py 超时（= 这一轮没人指名）后判 DUE（issue #162）。
+    # 轮次是主判据：需求说的是「连续 3 次挂 listen」。
+    "quiet_rounds": 3,
+    # 下限保护：首轮超时距现在不足这么多分钟就不触发。90s × 3 = 270s ≈ 4.5 分钟，
+    # 取整称 5 分钟；`--timeout 30` 时 3 轮只有 90 秒，光钉轮次会让这句话变假。
+    "quiet_minutes": 5,
+    # 静默路径的素材下限：0 条时触发等于空跑一次模型调用（issue 待讨论 1）。
+    "quiet_min_messages": 1,
 }
 
 DUE = 0
@@ -68,7 +98,7 @@ NOT_YET = 3
 def settings():
     cfg = dict(DEFAULTS)
     try:
-        data = json.loads(CONFIG.read_text(encoding="utf-8"))
+        data = json.loads(wg_config.path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return cfg
     for key, value in (data.get("dossier") or {}).items():
@@ -106,9 +136,20 @@ def load_mark():
         return {}
 
 
-def save_mark(data):
+def save_mark(updates):
+    """Merge `updates` into the mark file (read-modify-write, issue #162).
+
+    It used to write the whole object, so whichever verb ran last erased the
+    other's keys: `--mark` dropped the quiet counter and `--tick` dropped the
+    cursor. Callers now pass only what they own.
+    """
+    data = load_mark()
+    if not isinstance(data, dict):
+        data = {}
+    data.update(updates or {})
     MARK.parent.mkdir(parents=True, exist_ok=True)
     MARK.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return data
 
 
 def idle_minutes():
@@ -130,6 +171,33 @@ def idle_minutes():
     if not latest:
         return float("inf")
     return (time.time() - latest) / 60
+
+
+def quiet_state():
+    """(rounds, since) from the mark file; `since` is a float or None (issue #162).
+
+    Bad values degrade to "no counter" rather than crashing: this file is shared
+    with `--mark`, and a half-written JSON or a string where a number belongs
+    must not take the whole listener down (same stance as `wg_listener_state`).
+    """
+    data = load_mark()
+    rounds = data.get("quiet_rounds")
+    since = data.get("quiet_since")
+    rounds = rounds if isinstance(rounds, int) and not isinstance(rounds, bool) else 0
+    try:
+        since = float(since) if since is not None else None
+    except (TypeError, ValueError):
+        since = None
+    return max(0, rounds), since
+
+
+def quiet_minutes_elapsed(now=None):
+    """Minutes since the first unanswered round; None when there is no such round."""
+    _, since = quiet_state()
+    if since is None:
+        return None
+    moment = time.time() if now is None else float(now)
+    return max(0.0, (moment - since) / 60)
 
 
 def pending_rows(session_id, after_id):
@@ -179,6 +247,22 @@ def pending_rows(session_id, after_id):
     return out
 
 
+def quiet_progress(cfg):
+    """One line segment describing the quiet counter: `2/3(4.1min)`.
+
+    The `NO` line carries it so "why has this not fired yet" is answerable from
+    the output instead of from the state file (issue #162). Without a first
+    unanswered round there is no elapsed time to show, and printing `0.0min`
+    would read like a clock rather than an absence.
+    """
+    rounds, since = quiet_state()
+    target = cfg["quiet_rounds"]
+    elapsed = quiet_minutes_elapsed()
+    if since is None or elapsed is None:
+        return f"{rounds}/{target}"
+    return f"{rounds}/{target}({elapsed:.1f}min)"
+
+
 def cmd_check(cfg):
     session_id, _ = active_session()
     if not session_id:
@@ -193,8 +277,44 @@ def cmd_check(cfg):
     if count >= cfg["min_messages"] and idle >= cfg["idle_minutes"]:
         print(f"YES idle={idle:.0f}min pending={count}")
         return DUE
-    print(f"NO idle={idle:.0f}min pending={count}")
+    # Third path (issue #162): nobody named us for N rounds in a row. Rounds are
+    # the primary test; the minutes are a floor because `--timeout` is the
+    # caller's to shrink, and three 30s rounds are not "about five minutes".
+    rounds, since = quiet_state()
+    elapsed = quiet_minutes_elapsed()
+    if (rounds >= cfg["quiet_rounds"]
+            and count >= cfg["quiet_min_messages"]
+            and elapsed is not None and elapsed >= cfg["quiet_minutes"]):
+        stamp = wg_clock.clock(since) if since is not None else "-"
+        print(f"YES quiet rounds={rounds} since={stamp} pending={count}")
+        return DUE
+    print(f"NO idle={idle:.0f}min pending={count} quiet={quiet_progress(cfg)}")
     return NOT_YET
+
+
+def cmd_tick(reset=False):
+    """Count one round nobody named us, or clear the counter (issue #162).
+
+    Called by `listen.py` right after `watch.py` returns 2 (timed out = this
+    round had no mention). `reset` is the wake path: somebody named us, which is
+    the counter-example to "N rounds in a row".
+
+    `quiet_since` is written on the first counted round and never moved after
+    that -- moving it would keep pushing the floor ahead of the rounds and the
+    path would never fire.
+    """
+    if reset:
+        save_mark({"quiet_rounds": 0, "quiet_since": None})
+        print("quiet reset rounds=0")
+        return 0
+    rounds, since = quiet_state()
+    updates = {"quiet_rounds": rounds + 1}
+    if since is None:
+        updates["quiet_since"] = time.time()
+    data = save_mark(updates)
+    print(f"quiet rounds={data.get('quiet_rounds')} since="
+          f"{wg_clock.clock(data.get('quiet_since')) if data.get('quiet_since') else '-'}")
+    return 0
 
 
 def cmd_dump(cfg, limit):
@@ -263,7 +383,10 @@ def cmd_mark(through=None):
             db.close()
         except sqlite3.Error:
             return 1
-    save_mark({"last_event_id": int(top), "last_run": int(time.time())})
+    # Clearing the quiet counter belongs to marking (issue #162): the material
+    # was just summarised, so the next round must not immediately be due again.
+    save_mark({"last_event_id": int(top), "last_run": int(time.time()),
+               "quiet_rounds": 0, "quiet_since": None})
     print(f"marked through event {top}")
     return 0
 
@@ -520,6 +643,9 @@ def main():
     parser.add_argument("--dump", nargs="?", const=0, type=int, metavar="N",
                         help="输出待提炼素材（text 为完整正文，不截断），可限制条数")
     parser.add_argument("--mark", action="store_true", help="标记到当前最新消息")
+    parser.add_argument("--tick", nargs="?", const="round", choices=("round", "reset"),
+                        metavar="{round,reset}",
+                        help="记一轮「没人指名」（缺省 round）；reset 清零（有人指名时用）")
     parser.add_argument("--through", type=int, metavar="ID",
                         help="配合 --mark / --ingest：只推进到这批素材的最后一条，便于分批处理积压")
     parser.add_argument("--ingest", metavar="FILE",
@@ -543,6 +669,8 @@ def main():
     cfg = settings()
     if args.mark:
         return cmd_mark(args.through)
+    if args.tick is not None:
+        return cmd_tick(args.tick == "reset")
     if args.ingest is not None:
         return cmd_ingest(args.ingest, args.group, args.through, args.dry_run)
     if args.apply is not None:
@@ -559,7 +687,7 @@ def main():
         return cmd_dump(cfg, args.dump or cfg["max_material"])
     if args.check:
         return cmd_check(cfg)
-    parser.error("需要 --check / --dump / --mark / --digest / --ingest / --apply / "
+    parser.error("需要 --check / --dump / --mark / --tick / --digest / --ingest / --apply / "
                  "--audit-pollution / --scrub-pollution / --restore-pollution 之一")
 
 

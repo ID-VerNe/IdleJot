@@ -307,11 +307,12 @@ description: QQ群聊挂机水群专家Skill。支持单群/多群并发水群�
 .venv/Scripts/python.exe water-group/daemon/dossier.py --dump 60
 # 规则版消化，不调模型，每次超时都可以跑
 .venv/Scripts/python.exe water-group/daemon/dossier.py --digest
-# 一批处理完，把游标推到最后一条的 id
+# 一批处理完，把游标推到最后一条的 id（顺带清零「连续无人指名」计数）
 .venv/Scripts/python.exe water-group/daemon/dossier.py --mark --through <id>
 ```
 
-- **触发**：攒够 `burst_messages`（默认 80）直接触发；或闲置 `idle_minutes`（默认 20）且攒了 `min_messages`（默认 25）。
+- **触发**：攒够 `burst_messages`（默认 80）直接触发；或闲置 `idle_minutes`（默认 20）且攒了 `min_messages`（默认 25）；或连续 `quiet_rounds`（默认 3）轮 `listen.py` 都没被指名，且首轮距今超过 `quiet_minutes`（默认 5，下限）并至少有 `quiet_min_messages`（默认 1）条素材。三条并列，互不改写。
+- **轮次不用手记**：`listen.py` 每轮静默超时后自己 `dossier.py --tick`，`WAKE`（有人指名）与 `--mark` 清零。`reply.py --wait` 续挂的 `--no-digest`、门禁的 `--probe` 都不计数，所以跑门禁不会推高生产计数。
 - **两层**：`--digest` 走关键词打标（沙雕梗/猛男控/游戏党），零成本；`--dump` + `consolidate_chat_memory` 是模型版，质量高但贵。
 - **`traits` 必须传 dict**（`{"性格": "..."}`）：引擎里是 `dict(traits) if isinstance(traits, dict) else {}`，传数组会被**静默丢空**，且会与已有的 `{card, nickname}` 合并。
 - **重复说法不会占两格**：`merge_text_list` 用包含关系折叠，短的那条若已落在长的里面就丢掉；记忆 10 格、兴趣 16 格，满了丢旧的。写档案不用怕重复，写具体点更好。

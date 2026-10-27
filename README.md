@@ -280,10 +280,13 @@ reply.py 发送成功
 dossier.py --check              # 该提炼了吗（exit 0 = 该，3 = 还不用）
 dossier.py --dump 60            # 取一批素材，最早的优先
 dossier.py --digest             # 规则版消化：纯关键词，不调模型
-dossier.py --mark --through <id> # 推游标
+dossier.py --mark --through <id> # 推游标（顺带清零「连续无人指名」计数）
+dossier.py --tick               # 记一轮没人指名；listen.py 每轮静默后自动调
 ```
 
-触发条件在 `config.json` 的 `dossier` 段：攒够 `burst_messages`（默认 80）直接触发；或者闲置超过 `idle_minutes`（默认 20）且攒了 `min_messages`（默认 25）。
+触发条件在 `config.json` 的 `dossier` 段：攒够 `burst_messages`（默认 80）直接触发；或者闲置超过 `idle_minutes`（默认 20）且攒了 `min_messages`（默认 25）；或者连续 `quiet_rounds`（默认 3）轮 `listen.py` 都没被指名、且首轮距今超过 `quiet_minutes`（默认 5，下限保护）并至少有 `quiet_min_messages`（默认 1）条素材。三条判据并列，各自独立命中，互不改写。
+
+最后那条是给「群里一直聊、但没人 @ 我」的常态准备的：默认 90s 一轮，3 轮约 4.5 分钟（取整称 5 分钟）。轮次是主判据，分钟数是下限——`--timeout 30` 时三轮只有 90 秒，只钉轮次会让「约 5 分钟」变成假话。计数由 `listen.py` 在每轮静默超时后写进 `state/wg_dossier.json`，有人指名（`WAKE`）或 `--mark` 时归零；`reply.py --wait` 续挂的 `--no-digest` 与门禁的 `--probe` 都不计数。`--check` 的 `NO` 行会带上当前进度（`quiet=2/3(4.1min)`），`YES` 行会说明是哪条判据命中的。
 
 两层：`--digest` 走关键词打标，零成本，每次超时都该跑；`--dump` → 提炼 → `consolidate_chat_memory` → `--mark` 是模型版，质量高但贵，只在 `--check` 说该做时才做。
 

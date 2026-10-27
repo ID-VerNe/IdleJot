@@ -114,6 +114,32 @@ def run(script, *args):
                                       cwd=str(ROOT))
 
 
+def tick(mode="round"):
+    """Count one round nobody named us (issue #162); `reset` clears the counter.
+
+    Not routed through `run`: that relays the child's text, and a line per round
+    saying `quiet rounds=1` would sit in the listener's output right next to the
+    `NO … quiet=1/3` line `--check` prints, which already says the same thing
+    better. Output is captured instead of inherited so a real failure can be
+    quoted -- with `CREATE_NO_WINDOW` an inherited stdout goes to the child's own
+    console and is lost.
+
+    A failure is reported rather than swallowed: a counter that silently stops
+    growing looks exactly like "the group keeps mentioning us", and that is the
+    bug this whole path exists to fix.
+    """
+    result = winconsole.run_hidden([python_exe(), str(HERE / "dossier.py"),
+                                    "--tick", mode], cwd=str(ROOT),
+                                   capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip().replace("\n", " ")
+        print(f"WARN: dossier.py --tick {mode} 失败（rc={result.returncode}）"
+              f"{'：' + detail if detail else ''}"
+              "；本轮静默轮次未计入（画像沉淀的「连续 N 轮无人指名」判据会晚触发，issue #162）")
+    return result.returncode
+
+
 def _finish(reason, code):
     """退出前先记账，再返回退出码（issue #112）。
 
@@ -173,6 +199,15 @@ def _rounds(args):
             # watch.py already printed the wake lines and the closing WAKE, and
             # run() wrote that block out in one piece. Printing WAKE again here
             # would show two of them, which reads like two wakes (issue #91).
+            #
+            # Somebody named us, which is the counter-example to "N rounds in a
+            # row without a mention" (issue #162) -- so the quiet counter goes
+            # back to zero. A probe listener is not on watch duty and must not
+            # touch production counters (#94 PB). `--no-digest` still resets:
+            # that form is `reply.py`'s continuation, and a mention arriving
+            # during it is still a mention.
+            if not args.probe:
+                tick("reset")
             restart_hint(args.timeout)
             return _finish("WAKE", 0)
         if rc != 2:
@@ -189,9 +224,15 @@ def _rounds(args):
                 return _no_work(args)
             continue
 
-        # Timed out: the group has been quiet. Rule-based digestion is free, so it
-        # runs on every quiet stretch; the model-backed pass is left to whoever
-        # picks up the DOSSIER_DUE below.
+        # Timed out: the group has been quiet. That is exactly one round nobody
+        # named us, so it is counted before the dossier check reads it (issue
+        # #162). Counted here rather than inside `--check` because `--check` is
+        # also run by hand and by gates, and neither should inflate a counter
+        # that spans processes. Probes are excluded for the same reason as above.
+        if not args.probe:
+            tick()
+        # Rule-based digestion is free, so it runs on every quiet stretch; the
+        # model-backed pass is left to whoever picks up the DOSSIER_DUE below.
         run("dossier.py", "--digest")
         if run("dossier.py", "--check") == 0:
             print("DOSSIER_DUE")

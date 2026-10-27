@@ -307,6 +307,11 @@ def _mute_tail(rec, moment):
         return f"{left}，据失败时探测）"
     if rec.get("group_shut") is True:
         return f"；全员禁言，解禁时刻未知" + (f"（{stamp} 复查）" if stamp else "")
+    if result == "muted":
+        # 复查过、结论是「仍禁言」，但那个预测时刻已经过去了：既不能说「未复查」
+        # （明明查了），也不能继续断言禁言（预测已到点）。
+        return (f"；{stamp} 复查仍禁言，预测 {wg_clock.clock(until)} 已到点"
+                if until else f"；{stamp} 复查仍禁言")
     if result == "unknown":
         return (f"；禁言应已于 {wg_clock.clock(until)} 解除，"
                 f"{stamp} 复查未能确认" if until else f"；{stamp} 复查未能确认禁言状态")

@@ -460,7 +460,10 @@ def 提前解禁_禁言时刻在未来也必须复查():
     判据必须是「这份预测还新不新」（账本 `at` 距今超过 `RECHECK_AFTER`）。
 
     断言：① 不再出现「禁言至」；② 说「实测解禁」；③ `recovered` / `recovered_at`
-    真的落盘（#132 预留的字段第一次有写者）；④ 原判时刻留在账本里可追溯。
+    真的落盘（#132 预留的字段第一次有写者）；④ 原判时刻留在账本里可追溯；
+    ⑤ `recovered_at` 必须是**这次复查的时刻**，不许拿 `mute_until`（预测）冒充，
+    也不许落在未来——否则输出会变成「已于未来某刻实测解禁」，与 #145 要消灭的
+    假事实同类（变异 N10/N16 实测逃逸后补的断言）。
     """
     now = time.time()
     until = int(now) + 3180                     # issue 现场：未来 53 分钟
@@ -468,16 +471,43 @@ def 提前解禁_禁言时刻在未来也必须复查():
     _ledger(until, at=int(now) - 7200)
     out = _list()
     rec = wg_send_failure.read() or {}
+    recovered_at = rec.get("recovered_at")
     ok = ("禁言至" not in out
           and "实测解禁" in out
           and rec.get("recovered") is True
-          and rec.get("recovered_at") is not None
-          and int(rec.get("mute_until") or 0) == until)
+          and rec.get("recheck_result") == "released"
+          and int(rec.get("mute_until") or 0) == until
+          and recovered_at is not None
+          # ⑤ 实测时刻 ≈ now，且绝不等于预测时刻、不在未来
+          and abs(int(recovered_at) - int(now)) <= 5
+          and int(recovered_at) != until
+          and int(recovered_at) <= int(time.time()) + 1)
     if not ok:
         print(f"    输出={out.strip()!r} 账本 recovered={rec.get('recovered')!r} "
-              f"recovered_at={rec.get('recovered_at')!r} "
+              f"recovered_at={recovered_at!r} until={until} "
+              f"recheck_result={rec.get('recheck_result')!r} "
               f"请求数={FIX['member_queries']}")
     return ok
+
+
+@case
+def 补发未成功也要复查():
+    """`recovered=False` 的语义是「那次补发没成功」，**不是**「禁言没解除」。
+
+    把它当成「已有结论」跳过复查，issue 的一半场景仍然无解。变异实测：把
+    `recovered is not True` 放宽成 `recovered is not None`，其余用例全绿——只有
+    这条能抓。
+    """
+    now = time.time()
+    until = int(now) + 600
+    _reset(now, shut_up=0, all_shut=False)
+    _ledger(until, at=int(now) - 3600, recovered=False)
+    out = _list()
+    rec = wg_send_failure.read() or {}
+    return (rec.get("recovered") is True
+            and rec.get("recheck_result") == "released"
+            and rec.get("recovered_at") is not None
+            and "实测解禁" in out)
 
 
 @case
@@ -493,15 +523,20 @@ def 过期禁言_现查已解禁就说实测解禁():
     _ledger(until, at=int(now) - 7200)
     out = _list()
     rec = wg_send_failure.read() or {}
+    recovered_at = rec.get("recovered_at")
     ok = ("禁言至" not in out
           and "实测解禁" in out
           and rec.get("recovered") is True
-          and rec.get("recovered_at") is not None
+          and rec.get("recheck_result") == "released"
           # 原判时刻不许被抹掉：复查是「改写结论」，不是「假装没失败过」
-          and int(rec.get("mute_until") or 0) == until)
+          and int(rec.get("mute_until") or 0) == until
+          and recovered_at is not None
+          # 实测时刻 ≈ now：不许把「原判时刻」写成「实测解禁时刻」（变异 N10）
+          and abs(int(recovered_at) - int(now)) <= 5
+          and int(recovered_at) != until)
     if not ok:
         print(f"    输出={out.strip()!r} 账本 recovered={rec.get('recovered')!r} "
-              f"recovered_at={rec.get('recovered_at')!r}")
+              f"recovered_at={recovered_at!r} recheck_result={rec.get('recheck_result')!r}")
     return ok
 
 
@@ -519,6 +554,31 @@ def 账本刚写不复查():
     out = _list()
     return (_has(out, f"禁言至 {wg_clock.clock(until)}")
             and FIX["member_queries"] == 0)
+
+
+@case
+def 复查间隔常量被钉住():
+    """`RECHECK_AFTER` 本身要有用例守，且**不许读模块常量来自指**。
+
+    `账本刚写不复查` 用 `at=now-10`、`提前解禁…` 用 `at=now-7200`，10s–7200s 之间
+    是断言盲区——把 `RECHECK_AFTER` 从 60 改到 600 时其余用例全绿（变异实测）。
+    这里用**字面值** 90 秒卡：`at = now - 90` 必须复查（若阈值被放大到 90 以上就会
+    零请求而红），`at = now - 20` 必须零请求（若阈值被改小就会复查而红）。
+    """
+    now = time.time()
+    until = int(now) + 300
+    _reset(now, shut_up=0, all_shut=False)
+    _ledger(until, at=int(now) - 90)             # 字面 90 秒：必须已过阈值
+    _list()
+    over = FIX["member_queries"]
+    _reset(now, shut_up=0, all_shut=False)
+    _ledger(until, at=int(now) - 20)             # 字面 20 秒：必须未过阈值
+    _list()
+    inside = FIX["member_queries"]
+    if over != 1 or inside != 0:
+        print(f"    RECHECK_AFTER={wg_send_failure.RECHECK_AFTER} "
+              f"90 秒前={over} 请求（应为 1）、20 秒前={inside} 请求（应为 0）")
+    return over == 1 and inside == 0
 
 
 @case

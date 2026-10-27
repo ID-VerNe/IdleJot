@@ -43,14 +43,18 @@ DATA_DIRS = r'(?:data|diagnostics|logs|state)'
 DERIVE_RE = re.compile(
     rf'{ROOT_EXPR}\s*/\s*[\'"]({DATA_DIRS})(?:[/\\\\][^\'"]*)?[\'"]')
 
-# 会话库的读侧入口。`wg_context.py` 是 issue #163 从 reply.py 拆出去的 --context
-# 读链（reply.py 撞了 1000 行红线），它接过的正是这条规则要盯的活。
-DAEMONS = ('reply.py', 'followup.py', 'dossier.py', 'mint_grant.py', 'wg_context.py')
+# 会话库的读侧入口（#163 拆分后 `--context` 在 wg_context、`--show` 在 wg_text、
+# 缺口账本在 wg_gap、keeper 在 db_keeper）。名单漏一个，那条读路径就没人在盯。
+DAEMONS = ('reply.py', 'followup.py', 'dossier.py', 'mint_grant.py',
+           'wg_context.py', 'wg_text.py', 'wg_gap.py', 'db_keeper.py')
 # 「必须 import data_dir」只在文件真的碰库时才成立：拆分之后 reply.py 一个
 # sqlite 都不连，要求它 import 一个用不上的东西等于养一句注释（issue #163）。
 # 判据因此改成「提到库 / 库的路径变量就必须走 data_dir」；下面那条逐行匹配
 # `DB = ...` 的正则对每个文件照旧跑，牙没掉。
 DB_MARKERS = ('sqlite3', 'mcp-access.sqlite3', 'IDLEJOT_WG_DB', 'TULPA_WG_DB')
+# 「这一行在说会话库」与「这一行在从仓库根推导路径」——两条同时成立即 #14 形状。
+DB_LINE_RE = re.compile(r'(?:mcp-access\.sqlite3|\bsqlite3\b)')
+ROOT_REF_RE = re.compile(ROOT_EXPR)
 
 
 def _iter_sources():
@@ -117,12 +121,39 @@ def scan_daemon_db_paths():
         if reads_db and 'data_dir' not in text:
             problems.append(
                 f'water-group/daemon/{name} 没 import data_dir —— DB 仍可能指向仓库')
-        for match in re.finditer(r'^DB\s*=.*$', text, re.MULTILINE):
+        for match in re.finditer(r'^DB\w*\s*=.*$', text, re.MULTILINE):
             line = match.group(0)
             if 'data_dir()' not in line and 'environ' not in line:
                 problems.append(
                     f'water-group/daemon/{name}: DB 既不走 data_dir() 也不读环境变量')
     return problems
+
+
+def scan_repo_db_paths():
+    """一行里同时出现「会话库」和「仓库根表达式」，就是 issue #14 的原始形状。
+
+    `DERIVE_RE` 只认 `ROOT / "data"`、`parents[1] / 'data'` 这类**目录名在名单里**
+    的写法；`DB = Path(__file__).resolve().parents[3] / "x.sqlite3"`、
+    `db = ROOT / "mcp-access.sqlite3"` 都能绕过它，而危害一模一样（仓库副本与
+    home 副本分裂成两个物理库）。这条规则不看目录名，只看「同一行既提到库、
+    又从仓库根推导」。
+
+    注释行与文档字符串跳过：它们说的是规范，不是路径（`wg_gap.py` 就有一行注释
+    写着 `~/.water-group/data/mcp-access.sqlite3`）。
+    """
+    hits = []
+    for path in _iter_sources():
+        try:
+            lines = path.read_text(encoding='utf-8').splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for lineno, line in enumerate(lines, 1):
+            code = line.strip()
+            if not code or code.startswith(('#', '"', "'")):
+                continue
+            if DB_LINE_RE.search(code) and ROOT_REF_RE.search(code):
+                hits.append((path.relative_to(ROOT).as_posix(), lineno, code))
+    return hits
 
 
 def scan_reply_timing():
@@ -254,6 +285,36 @@ def self_test():
         if match and match.group(1) not in INTENTIONAL:
             raise AssertionError(f'检测器误报了这个写法: {sample}')
     _self_test_separators()
+    _self_test_repo_db_paths()
+    return True
+
+
+def _self_test_repo_db_paths():
+    """「同行出现库 + 仓库根」这条判据：两种绕过必须红，四种正常写法不许红。
+
+    这条规则是为 `DERIVE_RE` 抓不到的写法加的（目录名不在 data/state/logs 里就
+    溜了），所以自测的样本必须正是那两种绕过——否则加了一条只会误报的规则。
+    """
+    flagged = [
+        'DB = Path(__file__).resolve().parents[3] / "mcp-access.sqlite3"',
+        'db = ROOT / "mcp-access.sqlite3"',
+        'conn_db = PROJECT_ROOT / "state" / "chat.sqlite3"',
+    ]
+    for sample in flagged:
+        if not (DB_LINE_RE.search(sample) and ROOT_REF_RE.search(sample)):
+            raise AssertionError(f'同行判据漏掉了这个写法: {sample}')
+    clean = [
+        'DB = data_dir() / "mcp-access.sqlite3"',
+        'DB = Path(os.environ.get("IDLEJOT_WG_DB") or data_dir() / "mcp-access.sqlite3")',
+        'import sqlite3',
+        '# DB = ROOT / "mcp-access.sqlite3"（注释里写规范，不是路径）',
+    ]
+    for sample in clean:
+        code = sample.strip()
+        if code.startswith('#'):
+            continue
+        if DB_LINE_RE.search(code) and ROOT_REF_RE.search(code):
+            raise AssertionError(f'同行判据误报了这个写法: {sample}')
     return True
 
 
@@ -300,6 +361,12 @@ def main():
 
     failures.extend(scan_memory_engine_root())
     failures.extend(scan_daemon_db_paths())
+
+    db_hits = scan_repo_db_paths()
+    if db_hits:
+        failures.append('会话库路径从仓库根推导（会分裂成仓库副本与 home 副本）：')
+        failures.extend(f'  {rel}:{lineno}  {line}' for rel, lineno, line in db_hits)
+
     failures.extend(scan_reply_timing())
     failures.extend(scan_isolated_env())
 
@@ -329,6 +396,7 @@ def main():
     print('✓ 没有运行时数据路径从仓库根推导')
     print('✓ memory_engine 数据根读 WATER_GROUP_HOME')
     print(f'✓ {len(DAEMONS)} 个 daemon 的 DB 走 data_dir()')
+    print('✓ 没有一行同时出现「会话库 + 仓库根推导」')
     print('✓ reply_timing 走 chatlocal.config.DATA')
     print('✓ isolated_env() 钉住 WATER_GROUP_HOME')
     print('✓ 没有残留的手工分隔符处理（replace/os.sep/os.path.join）')

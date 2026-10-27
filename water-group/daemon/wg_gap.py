@@ -41,7 +41,8 @@ from wg_paths import data_dir, state_dir  # noqa: E402
 STATE = state_dir() / "wg_gap.json"
 # `chat_inbox` 在 `~/.water-group/data/mcp-access.sqlite3`（schema 见
 # `chatlocal/mcp_chat.py:105-109`）。`IDLEJOT_WG_DB` / `TULPA_WG_DB` 可钉单个库给测试用，
-# 与 `reply.py:63` 同款解析。
+# 与 `wg_context.py` 的 `DB` 同款解析（issue #163 把 --context 读链从 `reply.py`
+# 拆出去之后，那份解析就住在 wg_context 里）。
 DB = Path(os.environ.get("IDLEJOT_WG_DB") or os.environ.get("TULPA_WG_DB",
             data_dir() / "mcp-access.sqlite3"))
 

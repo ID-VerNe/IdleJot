@@ -45,6 +45,7 @@ import wg_budget  # noqa: E402  (等待预算：重挂提示不推荐撑不住�
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_gap  # noqa: E402  (停机窗口缺口账本：漏了什么事后说得出来，issue #114)
 import wg_images  # noqa: E402  (图片标记渲染，与 reply/look 同一份实现)
+import wg_isolation  # noqa: E402  (本会话只管一个群：状态行照实报，issue #164)
 import wg_listener_state  # noqa: E402  (监听存亡账本：「无人值守」的可读事实，issue #112)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
 from wg_daemon import read_json  # noqa: E402
@@ -257,6 +258,9 @@ def report(exclude_pids=None, resident_pid=None):
     print(wg_clock.now_line())
     print(f"NapCat    : {napcat}")
     print(f"配置      : {'；'.join(problems) if problems else 'ok（self_account / onebot_token 均在位）'}")
+    # issue #164：本会话钉在哪个群、依据是什么。多群未钉死时这里明说「隔离无效」，
+    # 不再让「两个群的 @ 都看得见」看起来像正常——那正是本 issue 的现场。
+    print(f"会话群    : {wg_isolation.describe()}")
     print(f"后端      : {backend}  (47860 / 48777)")
     print(f"守护      : {guard}  心跳 {beat}")
     print(f"监听      : {listener}")

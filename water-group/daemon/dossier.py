@@ -68,13 +68,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收口)
-import wg_clock  # noqa: E402  (时刻渲染的唯一出口，issue #95)
-import wg_config  # noqa: E402  (config.json 路径的唯一出口，issue #4 PA0)
+import wg_clock  # noqa: E402  (时刻渲染的唯一出口，issue #95；--check 的 YES 行要用)
+import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #164 PC)
 from wg_paths import data_dir, state_dir
 STATE = state_dir()
 DB = data_dir() / "mcp-access.sqlite3"
 MARK = STATE / "wg_dossier.json"
 REPLIED = STATE / "wg_replied.jsonl"
+# 配置路径**不**在 import 期取（issue #164 PC 把读取口收到 `wg_config.path()`）：
+# 门禁会把数据根指到临时目录，import 期求值会读到开发机的 config.json。
+# `settings()` 里每次现读。
 
 DEFAULTS = {
     "idle_minutes": 20,     # quiet this long before a refresh is considered

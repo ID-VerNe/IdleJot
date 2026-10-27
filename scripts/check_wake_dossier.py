@@ -94,6 +94,12 @@ def build():
     cfg.update({"self_account": ME, "onebot_http_url": "http://127.0.0.1:1",
                 "onebot_ws_url": "ws://127.0.0.1:1", "onebot_token": "t"})
     cfg.setdefault("pending_reply", {})["max_age_seconds"] = 3600
+    # issue #164：`wg_isolation` 会把 `groups` 当群身份用——config.example.json
+    # 自带一个示例群（`123456789`），而本夹具的事件全在 `GROUP`（777000111）里。
+    # 不覆盖的话「config 里唯一启用群」这一档解析出示例群，读侧过滤把夹具事件全部
+    # 滤掉，本文件 11 条 `watch`/`--list` 用例集体红在「输出里没有那一行」。
+    # 这里把 groups 换成夹具自己的群：门禁测的是画像渲染，群身份必须与事件一致。
+    cfg["groups"] = {GROUP: {"enabled": True}}
     (HOME / "config.json").write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
 
     long_body = "很长的正文" * 30

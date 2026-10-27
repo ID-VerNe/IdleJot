@@ -231,14 +231,17 @@ def compute(group_ids=None, fetch=None, now=None):
 
 
 def record(entry):
-    """落盘缺口记录（原子写：tmp + os.replace）。写不进不崩——账本不该让 collector 挂。"""
-    try:
-        STATE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = STATE.with_name(STATE.name + ".tmp")
-        tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, STATE)
-    except OSError:
-        pass
+    """落盘缺口记录（原子写）。写不进不崩——账本不该让 collector 挂。
+
+    issue #169 PD：原写法 `tmp = STATE.with_name(STATE.name + ".tmp")` 是**固定名**，
+    没有 pid、没有随机后缀。两个进程同时 record() 会互相覆盖对方的临时文件——
+    一个 os.replace 把另一个进程刚写的 tmp 替换掉，落盘的是后写者的一部分内容，
+    账本数据被悄悄截断。改走 `wg_daemon.write_json`：唯一临时名（pid + 随机后缀）
+    + os.replace，并发写互不踩。`write_json` 失败返回 False 而不抛，与原 `except
+    OSError: pass` 的「写不进不崩」语义一致。
+    """
+    import wg_daemon
+    wg_daemon.write_json(STATE, entry)
 
 
 def read():

@@ -237,26 +237,79 @@ def test_chat_reader_shares_the_limit():
 
 # Agent 真正读消息的四个脚本 + 两个渲染层。墓碑断言（#7 项）钉住它们：任何一处
 # 退回手写裸切片，这条门禁就红。
+#
+# issue #169 PA：三个自带 `_clip` 的 handler 模块加进清单。加进来之前先补判据
+# （变量切片 + 任意非空常量尾巴，见下），否则「加进清单也不会红」——那是门禁
+# 说谎，正是本分节要修的。补完判据这三个文件必须红，再由 PB 分节把实现合流到
+# `wg_text.render_body` 修绿。
 DAEMON_RENDER_FILES = (
     "water-group/daemon/watch.py",
     "water-group/daemon/reply.py",
     "water-group/daemon/up.py",
     "water-group/daemon/wg_quotes.py",
     "water-group/daemon/wg_text.py",
+    "water-group/daemon/sixty.py",
+    "water-group/daemon/miyoushe.py",
+    "water-group/daemon/busboss.py",
 )
 
 # #32 的两种翻车写法。裸切片用 AST 判定（`_bare_slice_hits`）——文本扫描会把
 # docstring 里引用反例的 `(content or '')[:80]` 一起误伤；自带 `…` 的第二份
 # 截断实现留在文本层：那是 `x[:N] + '…'` 的拼接形态，AST 看不出省略号的语义。
+#
+# issue #169 PA：旧正则只认 `[:\d+] + '…'`（字面数字 + 省略号）。三份 `_clip`
+# 的真实写法是 `text[:limit] + " …（已截断）"` 与 `text[:limit - 1] + "…"`——
+# 上限是变量、尾巴是任意非空字符串。正则保留旧字面数字形态做最小兜底，新形态
+# 走 AST（`_tombstone_concat_hits`）：`正文变量切片 + 非空字符串常量`。两条
+# 都要，因为 `text[:80] + "…"` 这种字面写法 AST 也能抓，但旧正则已覆盖且更便宜，
+# 留着不删——墓碑断言多一道判据只会更牢，不会误伤（裸切片判据 `_bare_slice_hits`
+# 已经把 `text[:80]` 命中，这里只管「切片后再拼尾巴」的第二份实现）。
 _TOMBSTONE_ELLIPSIS = re.compile(r"\[\s*:\s*\d+\s*\]\s*\+\s*['\"]…")
 
 # 裸切片按 AST 判定：切的对象名字叫 content 或 text。`[:3]` 这类枚举用途
 # （拆气泡、取前几个候选）不在此列——名字就不是正文。
+#
+# issue #169 PA：上限不再要求是字面整数。`text[:limit]` / `text[:limit - 1]`
+# 这种变量切片同样是裸切片——上限是 `limit` 还是 `80` 不改变「正文被切了且
+# 调用方自己处理尾巴」的事实，而第二份截断实现正是靠变量上限 + 自拼尾巴存在
+# 的。判据只看「正文变量名 + 任何上限的 `[:...]`」，枚举用途的 `text[:3]` 仍
+# 由名字+上限形态排除（它是 `content`/`text` 上的整数切片，但取前几条候选不是
+# 正文裁长——本判据宁可多抓再由调用方解释，也不漏掉变量切片这条 #169 红线）。
 _BARE_NAMES = ("content", "text")
 
 
+def _slice_upper(node):
+    """`node.slice` 在 py3.9+ 直接是 `ast.Slice`（无 Index 包装）；返回 upper 节点。"""
+    sl = node.slice
+    if isinstance(sl, ast.Slice):
+        return sl.upper
+    return None
+
+
+def _is_truncation_slice(node):
+    """`text[:N]` 形态：起点为空（lower is None），上限非空。
+
+    这是截断切片的签名——「取前 N 字」。`text[pos:hit.start()]`（在 @ 边界切
+    子串）与 `text[pos:]`（取后缀）都不是截断：前者下界非空、后者上限为空。
+    issue #169 PA 最初把判据写成「正文变量名 + 任意上限」，结果误伤 reply.py
+    的 `text[pos:hit.start()]`——那条是切子串不是截断。钉住「下界为空」才能
+    把 `text[:limit]` / `text[:limit - 1]` / `text[:80]` 三种截断形态与合法
+    子串操作分开。
+    """
+    sl = node.slice
+    if not isinstance(sl, ast.Slice):
+        return False
+    return sl.lower is None and sl.upper is not None
+
+
 def _bare_slice_hits(tree):
-    """AST 里 `content or '')[:N]` / `text[:N]` 两种正文字符切片。"""
+    """AST 里 `(content or '')[:N]` / `text[:N]` 两种正文字符截断切片。
+
+    issue #169 PA：上限 N 不再限定为字面整数——`text[:limit]` / `text[:limit - 1]`
+    这种变量切片同样命中。上限形态记录进报错串，方便定位是哪种写法。判据钉死
+    「下界为空」（`_is_truncation_slice`），不误伤 `text[pos:hit.start()]` 这类
+    合法子串切分。
+    """
     hits = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Subscript):
@@ -272,20 +325,84 @@ def _bare_slice_hits(tree):
                     break
         if name not in _BARE_NAMES:
             continue
-        upper = node.slice
-        if isinstance(upper, ast.Constant) and isinstance(upper.value, int):
-            hits.append(f"line {node.lineno}: {name}[:{upper.value}]")
+        if not _is_truncation_slice(node):
+            continue
+        upper = _slice_upper(node)
+        hits.append(f"line {node.lineno}: {name}[:{_upper_label(upper)}]")
+    return hits
+
+
+def _upper_label(upper):
+    """把上限 AST 节点还原成可读串：`80` / `limit` / `limit - 1`。"""
+    if isinstance(upper, ast.Constant):
+        return repr(upper.value)
+    if isinstance(upper, ast.Name):
+        return upper.id
+    if isinstance(upper, ast.BinOp):
+        try:
+            return ast.unparse(upper)
+        except Exception:
+            return type(upper).__name__
+    return type(upper).__name__
+
+
+def _tombstone_concat_hits(tree):
+    """issue #169 PA：`正文截断切片 + 非空字符串常量` 的第二份截断实现。
+
+    形态是 `BinOp(left=Subscript(正文截断切片), op=Add, right=Constant(非空 str))`。
+    旧 `_TOMBSTONE_ELLIPSIS` 正则只认字面数字切片 + 省略号；三份 `_clip` 的真实
+    写法（`text[:limit] + " …（已截断）"` / `text[:limit - 1] + "…"`）上限是变量、
+    尾巴是任意非空字符串，正则逃逸。这里用 AST 抓「正文截断切片后拼了非空尾巴」：
+    尾巴空字符串不算（`text[:limit] + ""` 是无意义拼接，不是截断标记）。左操作数
+    必须是截断切片（`_is_truncation_slice`），不误伤 `text[pos:end] + sep` 这类
+    合法拼接。
+    """
+    hits = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Add):
+            continue
+        left, right = node.left, node.right
+        if not isinstance(left, ast.Subscript):
+            continue
+        target = left.value
+        name = None
+        if isinstance(target, ast.Name):
+            name = target.id
+        elif isinstance(target, ast.BoolOp):
+            for value in target.values:
+                if isinstance(value, ast.Name):
+                    name = value.id
+                    break
+        if name not in _BARE_NAMES:
+            continue
+        if not _is_truncation_slice(left):
+            continue
+        if not isinstance(right, ast.Constant) or not isinstance(right.value, str):
+            continue
+        if not right.value:
+            continue
+        hits.append(f"line {node.lineno}: {name}[...] + {right.value!r}")
     return hits
 
 
 def test_daemon_has_no_bare_slices():
-    """墓碑：#32 的裸切片与自带省略号的第二份截断都不许回来。"""
+    """墓碑：#32 的裸切片与自带省略号的第二份截断都不许回来。
+
+    issue #169 PA：判据补了两条——变量切片（`text[:limit]` / `text[:limit - 1]`）
+    与「正文切片 + 任意非空常量尾巴」（`text[:limit] + " …（已截断）"`）。三个
+    handler 模块（sixty/miyoushe/busboss）加进 `DAEMON_RENDER_FILES` 后，这两条
+    新判据必须命中它们的 `_clip`——证明门禁真能抓，再由 PB 分节合流到
+    `wg_text.render_body` 修绿。
+    """
     for rel in DAEMON_RENDER_FILES:
         source = (ROOT / rel).read_text(encoding="utf-8")
+        tree = ast.parse(source, str(ROOT / rel))
         hit = _TOMBSTONE_ELLIPSIS.search(source)
         assert hit is None, f"{rel} 自带省略号的第二份截断（#32 墓碑）：{hit.group(0)!r}"
-        hits = _bare_slice_hits(ast.parse(source, str(ROOT / rel)))
-        assert not hits, f"{rel} 退回裸切片（#32 墓碑）：{hits}"
+        bare = _bare_slice_hits(tree)
+        assert not bare, f"{rel} 退回裸切片（#32/#169 墓碑）：{bare}"
+        concat = _tombstone_concat_hits(tree)
+        assert not concat, f"{rel} 自带尾巴的第二份截断（#169 墓碑）：{concat}"
     print(f"✓ 8. daemon 渲染层 {len(DAEMON_RENDER_FILES)} 个文件无裸切片/无第二份截断实现")
 
 
@@ -404,6 +521,87 @@ def test_show_event_is_wired_into_reply_cli():
     print("✓ 11. reply.py --show 已接到 wg_text.show_event")
 
 
+# ---------------------------------------------------------------------------
+# issue #169 PA: 截断判据反例自检
+# ---------------------------------------------------------------------------
+
+# 判据反例夹具：每条都钉住「判据换成恒 True / 恒 False，用例必须随之翻转」，
+# 照 check_module_size._self_test_body 的纪律。没有这一条，新增判据可能写成
+# 「怎么跑都绿」，门禁就形同虚设。
+
+# 裸切片判据（`_bare_slice_hits`）夹具。下界为空 + 上限非空才算截断切片：
+# - `text[:80]` / `text[:limit]` / `text[:limit - 1]` 三种截断形态命中；
+# - `text[pos:hit.start()]`（@ 边界切子串，下界非空）放过；
+# - `text[pos:]`（取后缀，上限为空）放过。
+_BARE_POSITIVE_INT = "x = text[:80]\n"        # #32 原症状：字面整数裸切片
+_BARE_POSITIVE_VAR = "x = text[:limit]\n"     # #169：变量上限裸切片
+_BARE_POSITIVE_BINOP = "x = text[:limit - 1]\n"  # #169：BinOp 上限裸切片
+_BARE_NEGATIVE_SUBSTR = "x = text[pos:hit.start()]\n"  # 切子串，下界非空
+_BARE_NEGATIVE_SUFFIX = "x = text[pos:]\n"    # 取后缀，上限为空
+# 第二份截断判据（`_tombstone_concat_hits`）夹具。左操作数是截断切片 + 非空 str 尾巴：
+_CONCAT_POSITIVE_VAR = 'x = text[:limit] + " …（已截断）"\n'  # #169：变量切片 + 非空尾巴
+_CONCAT_POSITIVE_BINOP = 'x = text[:limit - 1] + "…"\n'       # #169：BinOp 切片 + 非空尾巴
+_CONCAT_NEGATIVE_EMPTY = 'x = text[:limit] + ""\n'            # 空尾巴：无意义拼接，不是截断
+_CONCAT_NEGATIVE_NONSTR = 'x = text[:limit] + 1\n'            # 非字符串尾巴：不是截断标记
+_CONCAT_NEGATIVE_NONTEXT = 'x = items[:limit] + "…"\n'        # 切的不是正文（items）
+_CONCAT_NEGATIVE_SUBSTR = 'x = text[pos:end] + "…"\n'         # 左边是子串切片，不是截断切片
+
+
+def _judgement_hits(source, judge):
+    return judge(ast.parse(source))
+
+
+def _assert_set(hits, want_nonzero, label):
+    if want_nonzero and not hits:
+        raise AssertionError(f"{label}: 判据应该命中但返回空（判据失效，可能写成怎么跑都不抓）")
+    if not want_nonzero and hits:
+        raise AssertionError(f"{label}: 判据不该命中但抓到了（判据过宽，会误伤合法写法）：{hits}")
+
+
+def test_bare_slice_judgement_ab():
+    """#169 裸切片判据：字面整数 / 变量 / BinOp 三种上限都抓；非正文不抓。"""
+    # 旧 #32 症状：字面整数裸切片仍命中（判据不能因为补了变量上限就漏掉旧的）。
+    _assert_set(_judgement_hits(_BARE_POSITIVE_INT, _bare_slice_hits), True,
+                "text[:80] 字面整数裸切片")
+    # #169 症状：变量上限裸切片命中。
+    _assert_set(_judgement_hits(_BARE_POSITIVE_VAR, _bare_slice_hits), True,
+                "text[:limit] 变量上限裸切片")
+    _assert_set(_judgement_hits(_BARE_POSITIVE_BINOP, _bare_slice_hits), True,
+                "text[:limit - 1] BinOp 上限裸切片")
+    print("✓ 12a. 裸切片判据命中字面整数/变量/BinOp 三种上限")
+
+
+def test_bare_slice_judgement_negative():
+    """#169 裸切片判据反例：子串切片（下界非空）与取后缀（上限为空）都不抓。"""
+    _assert_set(_judgement_hits(_BARE_NEGATIVE_SUBSTR, _bare_slice_hits), False,
+                'text[pos:hit.start()] 子串切片')
+    _assert_set(_judgement_hits(_BARE_NEGATIVE_SUFFIX, _bare_slice_hits), False,
+                'text[pos:] 取后缀')
+    print("✓ 12b. 裸切片判据放过子串切片/取后缀（下界非空或上限为空不是截断）")
+
+
+def test_tombstone_concat_judgement_ab():
+    """#169 第二份截断判据：正文切片 + 非空字符串尾巴抓；空尾巴/非字符串/非正文不抓。"""
+    _assert_set(_judgement_hits(_CONCAT_POSITIVE_VAR, _tombstone_concat_hits), True,
+                'text[:limit] + " …（已截断）"')
+    _assert_set(_judgement_hits(_CONCAT_POSITIVE_BINOP, _tombstone_concat_hits), True,
+                'text[:limit - 1] + "…"')
+    print("✓ 13a. 第二份截断判据命中变量/BinOp 切片 + 非空尾巴")
+
+
+def test_tombstone_concat_judgement_negative():
+    """#169 第二份截断判据反例：空尾巴、非字符串尾巴、切非正文变量、子串切片都不抓。"""
+    _assert_set(_judgement_hits(_CONCAT_NEGATIVE_EMPTY, _tombstone_concat_hits), False,
+                'text[:limit] + "" 空尾巴')
+    _assert_set(_judgement_hits(_CONCAT_NEGATIVE_NONSTR, _tombstone_concat_hits), False,
+                'text[:limit] + 1 非字符串尾巴')
+    _assert_set(_judgement_hits(_CONCAT_NEGATIVE_NONTEXT, _tombstone_concat_hits), False,
+                'items[:limit] + "…" 切非正文变量')
+    _assert_set(_judgement_hits(_CONCAT_NEGATIVE_SUBSTR, _tombstone_concat_hits), False,
+                'text[pos:end] + "…" 左边是子串切片')
+    print("✓ 13b. 第二份截断判据放过空尾巴/非字符串/非正文/子串切片（不误伤合法拼接）")
+
+
 def main():
     print("========================================================================")
     print("        [测试] issue #90 长文本截断：可检出，不静默")
@@ -420,8 +618,12 @@ def main():
         test_render_body_budget_is_prose_only()
         test_show_event_reads_the_whole_message(tmp)
         test_show_event_is_wired_into_reply_cli()
+        test_bare_slice_judgement_ab()
+        test_bare_slice_judgement_negative()
+        test_tombstone_concat_judgement_ab()
+        test_tombstone_concat_judgement_negative()
     print("========================================================================")
-    print("✓ 全部 11 项截断契约测试通过！")
+    print(f"✓ 全部 {11 + 4} 项截断契约测试通过！")
     print("========================================================================")
 
 

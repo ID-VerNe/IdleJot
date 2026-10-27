@@ -440,35 +440,36 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 51 | `storage` | `check_group_memory.py` | 记忆引擎、MCP 读写工具与两层存储 |
 | 52 | `storage` | `check_group_notes.py` | 群级结构化术语读写闭环（#31） |
 | 53 | `storage` | `check_dossier_ingest.py` | dossier 写入动词：--ingest / --through / --apply / --dry-run（#6） |
-| 54 | `storage` | `check_pollution_scrub.py` | 跨群主档污染审计、清理与还原（#34） |
-| 55 | `storage` | `check_qr_login.py` | 每用户扫码登录：passport 双流、DPAPI、限流、隐私（#6） |
-| 56 | `storage` | `check_upgrade.py` | 升级用真实 SQLite/WAL 夹具 |
-| 57 | `storage` | `check_hot_reload.py` | 全栈热重载：闭包覆盖、target 映射、debounce、quarantine、不 spawn（#58） |
-| 58 | `reply` | `check_anti_habituation.py` | 反语癖固化与多样性提示词注入 |
-| 59 | `reply` | `check_plan_recovery.py` | stale 拒绝后的重规划（plan_id 为 None 也不崩） |
-| 60 | `reply` | `check_wake_ledger.py` | 已回判定：一条回复不得把后续 @ 洗成已回 |
-| 61 | `reply` | `check_forward_wake.py` | 合并转发里的 @ 与关键词参与唤醒（#9） |
-| 62 | `reply` | `check_followup.py` | 追问窗口：回复之后还能听见群里说什么 |
-| 63 | `reply` | `check_repeater.py` | 复读/接龙：三人不同 QQ 才跟、接龙四种格式跟下一号、指令/敏感词/本机名字/外链/超长/带 @ 带图一律不跟、一波只尝试一次且冷却跨重启（#155） |
-| 64 | `reply` | `check_pending_reply.py` | 待回时效：超时唤醒不再算待回 |
-| 65 | `reply` | `check_reply_context.py` | reply.py --context 回之前看得到群聊上下文 |
-| 66 | `reply` | `check_bubble_cap.py` | 单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131） |
-| 67 | `reply` | `check_reply_quote.py` | OneBot mention 与引用预检 |
-| 68 | `reply` | `check_reply_send_failure.py` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）；禁言到点必须复查，过期预测不许继续当此刻事实（#145） |
-| 69 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
-| 70 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
-| 71 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、四种格式都真能发、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度（超了拒、额度内照发）、不回退计划通道、发图也记账（#128） |
-| 72 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
-| 73 | `reply` | `check_wake_dossier.py` | 沉淀的群友画像必须到达唤醒行 / --list / --context（不是只挂在 MCP 的 chat_guidance 里）：命中才附、不串到别人身上、每人一行有硬顶且不挤正文额度、群级术语一次一块不跨群、引擎坏了照常唤醒（#163） |
-| 74 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
-| 75 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
-| 76 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
-| 77 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
-| 78 | `reply` | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
-| 79 | `reply` | `check_busboss.py` | 车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103） |
-| 80 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164） |
+| 54 | `storage` | `check_dossier_cadence.py` | 画像沉淀时机：连续 N 轮无人指名即触发，quiet_since 只写首轮、WAKE 与 --mark 清零、--no-digest 与 --probe 不计数、NO 行字段逐项正确（#162） |
+| 55 | `storage` | `check_pollution_scrub.py` | 跨群主档污染审计、清理与还原（#34） |
+| 56 | `storage` | `check_qr_login.py` | 每用户扫码登录：passport 双流、DPAPI、限流、隐私（#6） |
+| 57 | `storage` | `check_upgrade.py` | 升级用真实 SQLite/WAL 夹具 |
+| 58 | `storage` | `check_hot_reload.py` | 全栈热重载：闭包覆盖、target 映射、debounce、quarantine、不 spawn（#58） |
+| 59 | `reply` | `check_anti_habituation.py` | 反语癖固化与多样性提示词注入 |
+| 60 | `reply` | `check_plan_recovery.py` | stale 拒绝后的重规划（plan_id 为 None 也不崩） |
+| 61 | `reply` | `check_wake_ledger.py` | 已回判定：一条回复不得把后续 @ 洗成已回 |
+| 62 | `reply` | `check_forward_wake.py` | 合并转发里的 @ 与关键词参与唤醒（#9） |
+| 63 | `reply` | `check_followup.py` | 追问窗口：回复之后还能听见群里说什么 |
+| 64 | `reply` | `check_repeater.py` | 复读/接龙：三人不同 QQ 才跟、接龙四种格式跟下一号、指令/敏感词/本机名字/外链/超长/带 @ 带图一律不跟、一波只尝试一次且冷却跨重启（#155） |
+| 65 | `reply` | `check_pending_reply.py` | 待回时效：超时唤醒不再算待回 |
+| 66 | `reply` | `check_reply_context.py` | reply.py --context 回之前看得到群聊上下文 |
+| 67 | `reply` | `check_bubble_cap.py` | 单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131） |
+| 68 | `reply` | `check_reply_quote.py` | OneBot mention 与引用预检 |
+| 69 | `reply` | `check_reply_send_failure.py` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）；禁言到点必须复查，过期预测不许继续当此刻事实（#145） |
+| 70 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
+| 71 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
+| 72 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、四种格式都真能发、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度（超了拒、额度内照发）、不回退计划通道、发图也记账（#128） |
+| 73 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
+| 74 | `reply` | `check_wake_dossier.py` | 沉淀的群友画像必须到达唤醒行 / --list / --context（不是只挂在 MCP 的 chat_guidance 里）：命中才附、不串到别人身上、每人一行有硬顶且不挤正文额度、群级术语一次一块不跨群、引擎坏了照常唤醒（#163） |
+| 75 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
+| 76 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
+| 77 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
+| 78 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
+| 79 | `reply` | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
+| 80 | `reply` | `check_busboss.py` | 车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103） |
+| 81 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164） |
 
-共 80 个 CI 门禁，分 5 个分片（`static` 17、`runtime` 15、`mcp` 16、`storage` 9、`reply` 23）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
+共 81 个 CI 门禁，分 5 个分片（`static` 17、`runtime` 15、`mcp` 16、`storage` 10、`reply` 23）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
 <!-- gates:ci:end -->
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

@@ -780,6 +780,50 @@ def 同一天窗口不补日期():
 
 # ---------- 契约 13：漏收 @ 的时间戳带日期 ----------
 
+# 契约 13 的固定夹具（issue #153 起是两组）。**必须多组**：单组只能证明「这一种窗口
+# 形态下实现是对的」，而「按窗口是否跨天决定格式」的条件式实现在另一组上就退化了。
+#   跨天窗口 —— #151 的夹具，抓「借窗口/账本日期冒充消息日期」
+#   同日窗口 —— 生产里最常见的停机窗口（早上拉起、窗口 07:21–09:30），抓「跨天才
+#               补日期」这类照抄 `wg_clock.window()` 习惯的实现（#153 L）
+GAP_FIXTURES = (
+    ("跨天窗口", (2026, 10, 25, 22, 0, 0), (2026, 10, 27, 7, 21, 40),
+     (2026, 10, 26, 3, 5, 9)),
+    ("同日窗口", (2026, 10, 27, 7, 21, 40), (2026, 10, 27, 9, 30, 26),
+     (2026, 10, 27, 8, 2, 11)),
+)
+
+
+def _gap_line_ok(start, end, missed_at):
+    """一组夹具跑一遍：漏收行的时间戳字段必须**等于消息自己的** `stamp()`。
+
+    `computed_at` 取 `end + 60`（账本在窗口结束后算，早于 `window_end` 不合理）。
+    """
+    line = {"msg_id": "d", "time": int(missed_at), "sender": "乙", "body": "在吗"}
+    with temp_dir(prefix="wg-gap-") as home:
+        fixture_home(home)
+        restore = gap_at(home)
+        try:
+            wg_gap.record(fixed_record(end + 60, start, end, missing=1, at_me=1,
+                                      at_me_lines=[line]))
+            lines = wg_gap.at_me_lines()
+        finally:
+            restore()
+    if len(lines) != 1:
+        return False
+    text = lines[0]
+    msg_stamp = wg_clock.stamp(missed_at)
+    # 判据是**行首时间戳字段本身**，不是整行子串（#151 复核）：行尾补一句正确
+    # 时刻不该算通过。唤醒行是 `id=<正数> HH:MM:SS `，这里钉 `id=- msg_id=<id>
+    # YYYY-MM-DD HH:MM:SS `——两者第一眼就能分开。
+    # 注意**不要**在这里加「消息日期必须与窗口两端不同」的通用前提：同日窗口那
+    # 组（issue #153）消息必然落在窗口那一天，加了会让正确实现直接判红。那一类
+    # 前提只在跨天组有意义，写在 `漏收at的时间戳带日期` 的循环里。
+    m = STAMPED_GAP_LINE.match(text)
+    return (m is not None
+            and m.group(1) == "d"
+            and m.group(2) == msg_stamp
+            and "乙" in text and "在吗" in text)
+
 
 @case
 def 漏收at的时间戳带日期():
@@ -788,57 +832,88 @@ def 漏收at的时间戳带日期():
     `at_me_lines()` 用 `stamp()`（带日期），与唤醒行的 `clock()`（`HH:MM:SS`）
     不同形——两者同形时 Agent 分不清哪条是现刻待回、哪条是账本历史。
 
-    夹具的日期**刻意与窗口两端都不同**（窗口跨三天、消息落在中间那天，issue
-    #151）：早先窗口与消息同日时，「拿 `window_end` 的日期冒充消息日期」的坏
-    实现能骗过本用例——它输出「看起来带日期、但日期是错的」，比不带日期更
-    容易误导读者。日期分离后，任何**借用窗口或账本时刻日期**的实现都会红。
+    判据比对**行首时间戳字段本身**，不是在整行里找子串（#151 复核）：子串判据
+    挡不住「头字段日期错、行尾补一句正确时刻」的实现。
 
-    判据比对**行首时间戳字段本身**，不是在整行里找子串（复核补强）：子串判据
-    挡不住「头字段日期错、行尾补一句正确时刻」的实现，那种输出对读者而言与
-    坏实现同害，不该判绿。
+    **四组夹具缺一不可**（issue #153），它们各堵一个维度的条件式退化：
 
-    本用例覆盖不到的：把日期**硬编码**成夹具那一天的实现。固定夹具对它没有
-    判别力（要覆盖得用多组不同日期的夹具），这是本用例的已知边界，不是
-    「任何错日期都会红」——docstring 不这么声称。
+    1. 跨天窗口（固定日期）—— #151 的夹具，抓「借窗口/账本日期冒充消息日期」。
+    2. 同日窗口（固定日期）—— 生产里最常见的停机窗口（早上拉起、07:21–09:30）。
+       夹具一直跨天时，「按窗口是否跨天决定格式」的实现有现成模仿对象
+       `wg_clock.window()`（跨天才补日期），在同日窗口下它退回 `clock()`，输出
+       与唤醒行同形，issue #148 的 bug 原样回来。
+    3. 当天零点后（运行日构造）—— 消息落在「今天」但离 now 很远。抓「今天的
+       消息不带日期」这类条件式 stamp：固定日期抓它只是「机器今天恰好等于夹具
+       日」的巧合，换一天就漂移。
+    4. 相对 now（消息 60 秒前）—— 消息紧贴 now。抓「最近 N 小时内退回
+       `clock()`」这类**按消息新旧**判定的实现（理由通常是「反正就是刚才的」），
+       这类实现的消息可能距 now 只有几十秒、却仍属「今天」，第 3 组够不着。
+
+    第 3、4 组互补且不可互替：第 3 组的消息时刻是**固定**的（当天 00:01:01），
+    距 now 多远完全取决于运行时刻——只有在 00:01–01:01 之间跑时才恰好紧贴
+    now，其余时间它离 now 几小时到二十几小时；第 4 组的消息时刻是**相对 now
+    构造**的（`now - 60`），永远紧贴 now。`57b8ccc` 曾把第 4 组整个换成第 3 组，
+    结果 recency 类实现在 288 个时刻里 275 个假绿。
+
+    本用例仍覆盖不到的（都是固定夹具的已知边界，base 与本 PR 同假绿，非本 PR
+    引入，`#154` 复核逐条列出）：
+
+    - 把日期**硬编码**成某一组固定夹具那一天的实现。多组夹具提高了它的成本但
+      没根除（两组固定日期 + 两组运行日构造）。
+    - `missing == 0` 时省掉日期的实现。`at_me_lines()` 的契约是「漏收行必须带
+      日期」，与「本群是否真漏了消息」无关；夹具固定 `missing=1`，该分支不触发。
+    - 把未来时刻 `min(msg, now)` 夹到 now 的实现。夹具消息恒在过去或恰在 now
+      附近，夹取后与正确实现同形。
+
+    所以本用例的判据是「这四类条件式退化必红」，不是「任何错日期都会红」——
+    docstring 不这么声称。
     """
-    start = local_epoch(2026, 10, 25, 22, 0, 0)
-    end = local_epoch(2026, 10, 27, 7, 21, 40)
-    computed = local_epoch(2026, 10, 27, 7, 22, 5)
-    missed_at = local_epoch(2026, 10, 26, 3, 5, 9)
-    line = {"msg_id": "d", "time": int(missed_at), "sender": "乙", "body": "在吗"}
-    with temp_dir(prefix="wg-gap-") as home:
-        fixture_home(home)
-        restore = gap_at(home)
-        try:
-            wg_gap.record(fixed_record(computed, start, end, missing=1, at_me=1,
-                                      at_me_lines=[line]))
-            lines = wg_gap.at_me_lines()
-            # 唤醒行的时间戳口径（对照）：同一时刻只给时分秒
-            wake_stamp = wg_clock.clock(missed_at)
-        finally:
-            restore()
-    if len(lines) != 1:
+    for _name, s, e, missed in GAP_FIXTURES:
+        start, end, msg_at = local_epoch(*s), local_epoch(*e), local_epoch(*missed)
+        # 夹具前提（只对跨天组有意义）：消息日期必须与窗口两端都不同，否则「借
+        # 窗口日期冒充消息日期」的坏实现与正确实现同形，本组退回零判别力。同日
+        # 组里消息必然落在窗口那一天，这条不适用——所以按窗口形态判断，不能无
+        # 条件加。
+        if wg_clock.stamp(start)[:10] != wg_clock.stamp(end)[:10]:
+            if wg_clock.stamp(msg_at)[:10] in {wg_clock.stamp(start)[:10],
+                                               wg_clock.stamp(end)[:10]}:
+                return False
+        if not _gap_line_ok(start, end, msg_at):
+            return False
+    # 第 3 组（当天零点后，运行日构造）：专抓「今天的消息不带日期」这类条件式
+    # stamp（#153 J）。
+    #
+    # 为什么这组必须存在：J 的坏行为只在「消息日 == 实现读到的今天」时出现，固定
+    # 日期夹具只能靠「运行日恰好等于那个固定日」撞上，撞不上就假绿（`447ca55` 上
+    # J 今天恰好 `False` 就是这个巧合）。
+    #
+    # 窗口必须**落在同一个自然日**，否则「跨天才补日期」那类实现会走 `stamp()`
+    # 分支、输出恰好正确，这组就抓不住它。用固定偏移做不到（`now - 1800` 在
+    # 00:29 跑就跨天），所以取「运行日当天零点后 1 秒 → +120 秒」，消息落在
+    # 中间。三者必然同一天、必然都在「今天」，与运行时刻无关。
+    now = int(time.time())
+    day_start = int(time.mktime(tuple(time.localtime(now)[:3]) + (0, 0, 1, 0, 0, -1)))
+    win_start, win_end = day_start, day_start + 120
+    msg_at = day_start + 60
+    # 消息时间必须真的落在「今天」，否则这组抓不住 J（J 只在消息是今天时才退化）
+    if wg_clock.stamp(msg_at)[:10] != wg_clock.stamp(now)[:10]:
         return False
-    text = lines[0]
-    msg_stamp = wg_clock.stamp(missed_at)
-    # 夹具前提，不是对实现的断言：消息日期必须与窗口两端都不同，否则「借窗口
-    # 日期冒充消息日期」的坏实现与正确实现同形，本用例退回零判别力。写成显式
-    # 前置检查而不是塞进 return，是为了它红的时候一眼看得出是夹具被动过。
-    if msg_stamp[:10] in {wg_clock.stamp(start)[:10], wg_clock.stamp(end)[:10]}:
+    if not _gap_line_ok(win_start, win_end, msg_at):
         return False
-    # 「不同形」的判据是**时间戳字段的形态**，不是「串里有没有出现过时分秒」：
-    # 带日期的行里当然也含 `03:05:09`，只查子串会把修复版判红（假红）。这里钉
-    # `id=- msg_id=<id> YYYY-MM-DD HH:MM:SS ` 这个前缀，唤醒行则是
-    # `id=<正数> HH:MM:SS `——两者第一眼就能分开。
-    # issue #151 复核：日期还得**就是这个字段里的**值，所以比 `group(2)` 而不是
-    # `in text`——行尾补一句「（原时刻 2026-10-26 03:05:09）」不该算通过。
-    m = STAMPED_GAP_LINE.match(text)
-    return (m is not None
-            and m.group(1) == "d"
-            and m.group(2) == msg_stamp
-            and "乙" in text and "在吗" in text
-            # 对照：唤醒行口径的同一时刻确实只有时分秒（证明两种形态真的不同）
-            and wake_stamp == "03:05:09")
+
+    # 第 4 组（相对 now）：专抓「最近 N 小时内退回 `clock()`」这类**按消息新旧**
+    # 判定的实现（#153 复核 `recency-1h`）。第 3 组的消息离 now 最远可达 23 小时，
+    # 一个「1 小时内算刚漏的」实现完全可以在那组上走 `stamp()` 分支、输出正确，
+    # 却在真正紧贴 now 的消息上退回 `clock()`——而那正是生产里最常出现的情形。
+    #
+    # 偏移取 `now - 7200 → now`（消息 `now - 60`）而不是更小：窗口两端差 2 小时，
+    # 消息落在其中，仍属「今天」的概率高；窗口跨午夜时「跨天才补日期」类实现会
+    # 走 `stamp()` 分支输出正确，但那一类已被第 2 组（同日固定窗口）堵住，这里
+    # 只需保证 recency 维度被覆盖，不必也不该再要求「窗口同一天」（那会让 00:00
+    # 附近跑时这组直接失效，正是 `57b8ccc` 之前 `now-1800` 踩过的坑）。
+    if not _gap_line_ok(now - 7200, now, now - 60):
+        return False
+    return True
 
 
 def main():

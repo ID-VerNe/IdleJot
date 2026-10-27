@@ -16,6 +16,14 @@
 不唤醒、不续期，但游标照常推进（issue #70）。`wake_reason()` / `--list` / `--status`
 也共用这道闸门。
 
+第二条例外是**复读 / 接龙**（`repeater.py` + `plugins/repeater_plugin.py`，issue #155）：
+它判的恰恰是没有前缀的那些消息，所以走的是 `commands` 进程已经收到的全量 WS 事件
+（`_serve` 在 `should_handle` 之前派发 `group_message`）。它同样复用 `#` 前缀闸门——
+以指令开头的消息绝不跟读，否则「跟一句 `#帮助`」就是指令死循环。默认关
+（`plugins.repeater.enabled: false`），开了之后同群 `cooldown_seconds`（默认 600s）
+内最多跟一次。判定规则与安全闸门见 `repeater.py` 模块 docstring，门禁是
+`scripts/check_repeater.py`。
+
 ## 2. 数据流
 
 ```
@@ -106,6 +114,8 @@ QQ 群 ── NapCat WS 43001 ──┬─ 客户端① chatlocal 后端（现�
 | 别的群 / 私聊的 `#xxx` | 不理（只收 `groups` 里 `enabled: true` 的群） |
 | 机器人自己的消息 | 不理（`reportSelfMessage` 回灌过滤） |
 | 追问窗口里的 `#xxx` | 不算接话：不扣额度、不续期；游标照常推进（#70） |
+| 三人以上复读同一句 | 复读插件跟一次（开了 `plugins.repeater` 时；同群 10 分钟最多一次，#155） |
+| 群里按 `1.` / `+1` 接龙 | 复读插件跟下一号，格式照抄（同上） |
 | `reply.py --list` / `up.py --status` 里的 `#xxx` | 不列 [待回]（`wake_reason` 同一道闸门，#70） |
 
 已知限制：引用机器人**再**发 `#xxx`（reply 段 + `#` 文本）会被守护处理——事件里的

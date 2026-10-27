@@ -86,6 +86,19 @@
         "max_classes": 200,
         "max_lines": 8
       }
+    },
+    "repeater": {
+      "enabled": false,
+      "groups": [],
+      "options": {
+        "window_seconds": 120,
+        "window_messages": 12,
+        "min_repeats": 3,
+        "cooldown_seconds": 600,
+        "probability": 0.5,
+        "max_chars": 60,
+        "deny_words": []
+      }
     }
   },
   "groups": {

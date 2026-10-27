@@ -202,7 +202,7 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
 | | daemon 侧 | app 侧 |
 |---|---|---|
 | 目录 | `water-group/daemon/plugins/` | `chatlocal/app_plugins/` |
-| 现有插件 | `miyoushe_plugin.py` / `sixty_plugin.py` / `followup_plugin.py` | `language.py` / `reactions.py` |
+| 现有插件 | `miyoushe_plugin.py` / `sixty_plugin.py` / `followup_plugin.py` / `busboss_plugin.py` / `repeater_plugin.py` | `language.py` / `reactions.py` |
 | 静态面 | `plugins/__init__.py:55` 的 `LOADERS`、`:64` 的 `EVENT_LOADERS`（**显式清单，不扫目录**） | `spec.py:42` 的 `PLUGINS`（`REACTIONS` / `LANGUAGE` 两块）+ `loader.py:10` 的 `build()` |
 | 扩展点 | `Command`（指令型，走 `Registry.commands()` 合成表）+ `Hooks.on_event`（事件型，没有表） | `AppPlugin` 的方法族：工具 / 事件 / 生命周期 / 描述子 |
 | 开关 | `config.json` 的 `plugins.<名字>` 三态 + 群级覆盖 | `spec.policy` 文件名（文件/DB 数据态）或插件自判 |
@@ -218,6 +218,8 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
 **加一个 app 插件**要改三处：`spec.py` 加一块（`tools` / `scope` / `expression` / `policy`）、同目录加模块、`loader.py` 的 `build()` 元组加类。宿主里**不许出现插件名字面量**，`scripts/check_app_plugins.py` 钉住。
 
 **开关与兼容**：`Plugin.enabled()`（`plugins/base.py:137`）是三态——总开关 `plugins.<名字>.enabled` → `groups` 白名单 → 群级 `groups.<id>.plugins.<name>: false`；`group_id` 为空（`up.py --status` 那类全局查询）只判总开关，否则配了白名单的插件会在状态里显示停用。没迁完的老配置段用 `Plugin.legacy_section` 声明（只有 `followup` 有），宿主把它平铺读：`enabled` 进三态、其余键进 `options`。
+
+**事件流总闸**：`commands` 进程的总闸是 `slash_commands.enabled`，关掉整个不启动。靠这条 WS 事件流吃饭的插件（目前只有 `repeater`，声明 `Plugin.needs_event_loop`）会让 `commands.event_stream_needed()` 在指令关闭时单独把它拉起来——否则「复读没反应」在日志里只有一行「不启动」，与「插件坏了」无法区分。追问窗口不声明：它由 reply/watch/up 三个一次性 CLI 派发，不依赖这个进程。
 
 **两条派发路径（同一个 loader、同一个模块级 `PLUGIN`，不存在两份状态）**：
 
@@ -444,23 +446,24 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 59 | `reply` | `check_wake_ledger.py` | 已回判定：一条回复不得把后续 @ 洗成已回 |
 | 60 | `reply` | `check_forward_wake.py` | 合并转发里的 @ 与关键词参与唤醒（#9） |
 | 61 | `reply` | `check_followup.py` | 追问窗口：回复之后还能听见群里说什么 |
-| 62 | `reply` | `check_pending_reply.py` | 待回时效：超时唤醒不再算待回 |
-| 63 | `reply` | `check_reply_context.py` | reply.py --context 回之前看得到群聊上下文 |
-| 64 | `reply` | `check_bubble_cap.py` | 单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131） |
-| 65 | `reply` | `check_reply_quote.py` | OneBot mention 与引用预检 |
-| 66 | `reply` | `check_reply_send_failure.py` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）；禁言到点必须复查，过期预测不许继续当此刻事实（#145） |
-| 67 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
-| 68 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
-| 69 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、四种格式都真能发、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度（超了拒、额度内照发）、不回退计划通道、发图也记账（#128） |
-| 70 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
-| 71 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
-| 72 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
-| 73 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
-| 74 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
-| 75 | `reply` | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
-| 76 | `reply` | `check_busboss.py` | 车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103） |
+| 62 | `reply` | `check_repeater.py` | 复读/接龙：三人不同 QQ 才跟、接龙四种格式跟下一号、指令/敏感词/本机名字/外链/超长/带 @ 带图一律不跟、一波只尝试一次且冷却跨重启（#155） |
+| 63 | `reply` | `check_pending_reply.py` | 待回时效：超时唤醒不再算待回 |
+| 64 | `reply` | `check_reply_context.py` | reply.py --context 回之前看得到群聊上下文 |
+| 65 | `reply` | `check_bubble_cap.py` | 单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131） |
+| 66 | `reply` | `check_reply_quote.py` | OneBot mention 与引用预检 |
+| 67 | `reply` | `check_reply_send_failure.py` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）；禁言到点必须复查，过期预测不许继续当此刻事实（#145） |
+| 68 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
+| 69 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
+| 70 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、四种格式都真能发、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度（超了拒、额度内照发）、不回退计划通道、发图也记账（#128） |
+| 71 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
+| 72 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
+| 73 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
+| 74 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
+| 75 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
+| 76 | `reply` | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
+| 77 | `reply` | `check_busboss.py` | 车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103） |
 
-共 76 个 CI 门禁，分 5 个分片（`static` 16、`runtime` 15、`mcp` 16、`storage` 9、`reply` 20）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
+共 77 个 CI 门禁，分 5 个分片（`static` 16、`runtime` 15、`mcp` 16、`storage` 9、`reply` 21）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
 <!-- gates:ci:end -->
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

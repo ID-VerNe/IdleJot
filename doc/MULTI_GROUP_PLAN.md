@@ -196,7 +196,7 @@ up.py      --group <gid>                     # 报告/启动/停止限定到该�
 
 | 位置 | 问题 |
 |---|---|
-| `.agents/skills/water-group/SKILL.md:3,8` | 声称「支持单群/多群并发」；`invoke_subagent` 调用点已改为后台 subagent 派活（#83），描述行仍在 |
+| `.agents/skills/water-group/SKILL.md:3,8` | 声称「支持单群/多群并发」；`invoke_subagent` 调用点已改为「多群 = 用户开 N 个会话，一会话一群」（#160），描述行仍在 |
 | `.agents/skills/water-group/SKILL.md:26` | 写「默认 3 轮或 60 秒」，实际 `followup.py:38` 是 10 条 / 180 秒 |
 | `.agents/skills/water-group/SKILL.md:68` | 写读 `.env` 的 `REPLY_ONEBOT_URL`，实际读 `config.json` 的 `onebot_http_url`（`reply.py:197-206`） |
 | `.agents/skills/water-group/SKILL.md:73` | 说 `sync_groups.py` 已删；它还在，且被 `bootstrap.py:448-451` 调用 |

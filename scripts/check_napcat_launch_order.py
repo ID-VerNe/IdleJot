@@ -94,7 +94,10 @@ def stubbed(**overrides):
         # issue #50：登录态探针与等待。默认「已登录」，C7/C8 覆盖成登不上；
         # wait_napcat_login 保持真实现（配 NoSleep 虚拟钟，轮询到超时也是瞬间），
         # 这样钉的是真函数而不是又一层桩。
-        login_info=lambda: ("10001", "gate-bot"),
+        # 形状按真实现给（issue #156）：`login_info()` 返回 OneBot 的 `data` 字典，
+        # 元组只是修复前那段时间门禁自己造出来的假契约。消费方只判真值，形状换了
+        # 用例不变，但门禁从此不会再为一份不存在的返回类型背书。
+        login_info=lambda: {"user_id": "10001", "nickname": "gate-bot"},
         time=NoSleep(),
     )
     names.update(overrides)
@@ -138,7 +141,8 @@ def run_case(qq_exe, boot_ok=True, bat_exists=True, launcher=None,
             resolve_qq_exe=lambda: qq_exe,
             is_port_open=(lambda port: True) if ports_open else (lambda port: False),
             wait_napcat_ports=lambda seconds=12: boot_ok,
-            login_info=(lambda: None) if not logged_in else (lambda: ("10001", "gate-bot")),
+            login_info=(lambda: None) if not logged_in else (
+                lambda: {"user_id": "10001", "nickname": "gate-bot"}),
             launch_napcat_direct=lambda exe, account="": calls.append(("inject", exe)),
             start_process_detached=lambda cmd, **kw: calls.append(("bat", list(cmd))) or FakeProc(),
         ):

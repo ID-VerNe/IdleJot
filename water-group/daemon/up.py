@@ -91,6 +91,7 @@ from wg_up_wake import (  # noqa: E402,F401  (分节 PC：配置/账号/唤醒�
     heartbeat_time,
     is_command,
     ledger_started,
+    login_account,
     login_info,
     onebot_token,
     pending_reply_ttl,
@@ -143,16 +144,21 @@ def report(exclude_pids=None, resident_pid=None):
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
 
-    account, nickname = (None, None)
+    # issue #156：`login_info()` 返回的是 OneBot 的 `data` 字典，不是元组。这里以前
+    # 直接 `account, nickname = info`，dict 迭代出两个 key，NapCat 行于是永远印
+    # 「在线 (user_id nickname)」——一行看起来正常的字，把真账号盖了整整一个重构期。
+    # 解析口径只留一份（`wg_up_wake.login_account`），且「答了」与「报了账号」分开判：
+    # `{}` 掉进「无响应」那条话术，与 #142「状态行只说核实过的事」是同一类假话。
     info = login_info()
-    if info:
-        account, nickname = info
+    account, nickname = login_account(info)
 
     napcat = "离线"
     napcat_online = all(port_open(p) for p in NAPCAT_PORTS)
     if napcat_online:
-        if info:
-            napcat = f"在线 ({account} {nickname})"
+        if info is not None:
+            identity = " ".join(part for part in (account, nickname) if part)
+            napcat = (f"在线 ({identity})" if identity
+                      else "在线（OneBot 应答但未报账号信息）")
         else:
             # Ports bound but OneBot silent is the issue #45 outage signature:
             # QQ keeps delivering to NapCat while the bridge emits no events, so

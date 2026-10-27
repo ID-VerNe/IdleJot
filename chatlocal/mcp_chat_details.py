@@ -6,7 +6,8 @@ import time
 from . import reply_timing as timing
 from .mcp_chat_media import image_ref
 from .onebot import OneBotError
-from .onebot_segments import at as at_segment, reply as reply_segment
+from .onebot_segments import at as at_segment, card_summary, kind_of, label, reply as reply_segment, unsupported
+from .onebot_segments import UNSUPPORTED_TOTAL_CHARS
 
 MAX_NODES=100  # QQ 单条合并转发的上限，实测 get_forward_msg 一次全量返回（issue #8）
 MAX_TEXT=12000
@@ -53,7 +54,9 @@ def sanitize_nodes(value,depth=0,budget=None):
                 if raw_children is not None:ref['nodes']=children
                 if d.get('id'):ref['id']=str(d['id'])[:200]
                 segments.append(ref)
-            else:segments.append(dict(type=str(kind)[:24]))
+            # issue #165：白名单外的段不再只留一个中文标签当 type。节点内同样
+            # 保真降级（kind + 受限长度 raw），渲染侧才说得出「这是什么」。
+            else:segments.append(unsupported(kind,d,budget))
         result.append(dict(sender_id=str(sender.get('user_id',node.get('user_id','')))[:30],
                            sender=str(sender.get('card') or sender.get('nickname') or '')[:200],
                            # 节点自己的 message_id 是真实可用的（实测同一批节点各不相同），
@@ -284,8 +287,13 @@ class ChatDetails:
                 parts.append('@'+display)
                 result.append(dict(type='at',qq=qq,**({'name':str(seg['name'])} if seg.get('name') else {})))
             else:
-                label={'reply':'引用','record':'语音','video':'视频','file':'文件','face':'表情','at':'@'}.get(kind,'非文本消息')
-                parts.append('['+label+']');result.append(dict(type=label))
+                # issue #165：未知段说得出是什么，而不是只剩一句「非文本消息」。
+                # `unsupported` 段带 kind（和可能的 raw），历史行里的中文标签
+                # 归一成 unknown——那是「没记下类型」，不是一种类型。
+                body=card_summary(seg.get('raw')) if kind=='unsupported' else ''
+                label_text=label(seg.get('kind') if kind=='unsupported' else kind)
+                parts.append('['+label_text+('：'+body if body else '')+']')
+                result.append(dict(seg) if kind=='unsupported' else dict(type='unsupported',kind=kind_of(kind)))
         return dict(content=''.join(parts)[:MAX_TEXT],segments=result)
 
     def render_nodes(self,nodes,media,stamp,allow_images=True,quote_message_id=None):

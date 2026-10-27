@@ -22,6 +22,7 @@
     {"name": "check_tmp_hygiene.py", "shard": "static", "why": "私有目录巡检：tmp/ 禁脚本、bin 与 archive 须登记（#6）"},
     {"name": "check_sender_name.py", "shard": "static", "why": "发信人名形态：QQ 引用气泡文案不得进 sender 或 aliases（#39）"},
     {"name": "check_text_truncation.py", "shard": "static", "why": "长文本截断契约（#90）"},
+    {"name": "check_unsupported_segment.py", "shard": "static", "why": "白名单外的消息段必须保真：type 恒英文 unsupported、kind 与受限长度 raw 都留下来，中文标签不许回流成段类型（#165）"},
     {"name": "check_app_log_once.py", "shard": "static", "why": "app.log 一次后端启动只写一份横幅（#97）"},
     {"name": "check_log_encoding.py", "shard": "static", "why": "控制台与日志编码两层钉死（#4）"},
     {"name": "check_slash_commands.py", "shard": "static", "why": "# 指令守护纯逻辑：过滤、冷却、去重、帮助"},

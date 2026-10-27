@@ -21,7 +21,8 @@ from .mcp_chat_schemas import schemas  # noqa: F401  (issue #11 PC: facade re-ex
 from .mcp_chat_wait import ChatWaitMixin
 from .mcp_schemas import event_id, idempotency_key, session_id
 from .onebot_events import EventReceiver
-from .onebot_segments import at as at_segment, message_id, name as at_name, qq as qq_id, reply as reply_segment
+from .onebot_segments import at as at_segment, card_summary, label, message_id, name as at_name, qq as qq_id, reply as reply_segment
+from .onebot_segments import UNSUPPORTED_TOTAL_CHARS, unsupported
 from . import mcp_chat_prompts as prompts
 from .mcp_chat_turns import ChatTurns, TOOLS as TURN_TOOLS
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -402,6 +403,9 @@ class MCPChat(ChatWaitMixin):
         sender = event.get('sender') if isinstance(event.get('sender'),dict) else {}
         uid = str(event.get('user_id') or sender.get('user_id') or '')
         parts, segments, media, details, attachments = [], [], [], [], []
+        # 一条消息共享的原始体预算（issue #165）：逐段各自封顶的话，十条卡片就能
+        # 把整条消息的 segments 挤空，修好丢字段换一个丢消息。
+        raw_budget = dict(raw=UNSUPPORTED_TOTAL_CHARS)
         source = event.get('message')
         if isinstance(source,str):
             parts=[source[:12000]]  # CQ-looking text remains inert data.
@@ -437,11 +441,20 @@ class MCPChat(ChatWaitMixin):
                     parts.append({'record':'[语音]','video':'[视频]','file':'[文件]'}[kind])
                     segments.append(dict(type=kind,attachment_index=len(attachments)))
                     attachments.append(attachment_ref(kind,data))
+                elif kind in ('image','mface'):
+                    parts.append('[图片]')
+                    segments.append(dict(type='image',readable=False,state='image_limit' if grant['scope'].get('chat_images') else 'permission_denied'))
+                elif kind=='forward':
+                    parts.append('[合并转发]')
+                    segments.append(dict(type='forward',state='detail_limit'))
                 else:
-                    label={'image':'图片','record':'语音','video':'视频','file':'文件','face':'表情','forward':'合并转发'}.get(kind,'非文本消息')
-                    parts.append('['+label+']')
-                    segments.append(dict(type='image',readable=False,state='image_limit' if grant['scope'].get('chat_images') else 'permission_denied')
-                                    if kind in ('image','mface') else dict(type='forward',state='detail_limit') if kind=='forward' else dict(type=label))
+                    # issue #165：白名单外的段以前只剩 `[非文本消息]`，原始 kind 与
+                    # data 一起消失，type 还被写成中文标签。现在保真降级：type 恒为
+                    # `unsupported`，kind 与受限长度的 raw 都留下来，能解析的卡片
+                    # 另外把标题/摘要拼进 content（PB）。
+                    body=card_summary(data)
+                    parts.append('['+label(kind)+('：'+body if body else '')+']')
+                    segments.append(unsupported(kind,data,raw_budget))
         else:return
         content=''.join(parts)
         # issue #39: the upstream card/nickname can be QQ quote-bubble UI text

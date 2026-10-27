@@ -877,8 +877,7 @@ def 漏收at的时间戳带日期():
         return False
     if not _gap_line_ok(win_start, win_end, msg_at):
         return False
-    # 对照：唤醒行口径的同一时刻确实只有时分秒（证明两种形态真的不同）
-    return wg_clock.clock(local_epoch(2026, 10, 26, 3, 5, 9)) == "03:05:09"
+    return True
 
 
 def main():

@@ -114,15 +114,13 @@ def _load_daily():
 
 
 def _save_daily():
-    """原子写回：崩溃不留半个 JSON（与 user_store 同一手法）。"""
-    try:
-        DAILY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = DAILY_FILE.with_name(DAILY_FILE.name + ".tmp")
-        tmp.write_text(json.dumps({k: v for k, v in _DAILY.items() if v},
-                                  ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, DAILY_FILE)
-    except OSError:
-        pass
+    """原子写回：崩溃不留半个 JSON。
+
+    issue #169 PD：合流到 `wg_daemon.write_json`（唯一临时名 + os.replace）。
+    失败不抛，与原 `except OSError: pass` 一致。
+    """
+    import wg_daemon
+    wg_daemon.write_json(DAILY_FILE, {k: v for k, v in _DAILY.items() if v})
 
 
 def _daily_recent(qq, now):

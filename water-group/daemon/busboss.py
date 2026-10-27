@@ -177,10 +177,18 @@ def load_tokens(path=None):
 
 
 def save_tokens(record, path=None):
-    """原子写 + 0600。轮换后的 refresh_token 必须靠这里落盘。"""
+    """原子写 + 0600。轮换后的 refresh_token 必须靠这里落盘。
+
+    issue #169 PD：临时名改唯一（pid + 随机后缀），不再固定 `.tmp`——并发轮换
+    互不踩。仍保留 0600 与 `indent=1`：这是车盈网 refresh_token 的落盘文件，
+    属凭证，可读排版与权限位都该留（与 user_store 的 DPAPI 加密文件不同，
+    busboss token 是明文 JSON，靠文件权限兜底）。write_json 只管原子写，
+    chmod 与排版在它之外补。
+    """
     p = Path(path or TOKEN_FILE)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
+    import secrets
+    tmp = p.with_name(f"{p.name}.tmp.{os.getpid()}.{secrets.token_hex(4)}")
     tmp.write_text(json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
     try:
         os.chmod(tmp, 0o600)

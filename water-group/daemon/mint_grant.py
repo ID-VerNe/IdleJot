@@ -15,6 +15,7 @@ import httpx
 
 ROOT = Path(__file__).resolve().parents[2]
 from wg_paths import data_dir, state_dir
+import wg_text  # noqa: E402  (issue #169 PC：connect_ro 延迟导入门面)
 STATE_DIR = state_dir()
 TOKEN_FILE = STATE_DIR / "mcp_token.txt"
 DB = data_dir() / "mcp-access.sqlite3"
@@ -48,7 +49,7 @@ def last_scope():
     # grants.id is uuid4().hex -- random, not chronological. The mint time
     # lives in created_at, so "the last grant" must order by that; ordering by
     # id would copy a random older grant's scope every time.
-    db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    db = wg_text.connect_ro(DB, timeout=5)
     db.row_factory = sqlite3.Row
     row = db.execute(
         "SELECT scope FROM grants WHERE name=? ORDER BY created_at DESC LIMIT 1", (NAME,)

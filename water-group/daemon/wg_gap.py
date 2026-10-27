@@ -36,6 +36,7 @@ from pathlib import Path
 
 import wg_clock  # noqa: E402  (漏掉的 @ 的时间戳按同一份渲染口径)
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #4 PA0)
+import wg_text  # noqa: E402  (issue #169 PC：connect_ro 延迟导入门面)
 from wg_paths import data_dir, state_dir  # noqa: E402
 
 STATE = state_dir() / "wg_gap.json"
@@ -60,13 +61,15 @@ def _now():
 def _db():
     """只读连接 chat_inbox；库不存在或读坏时返回 None。
 
-    URI 形式用 `Path.as_uri()`（与 `reply.py:572` 同款）：Windows 反斜杠路径直接
-    拼接 `?mode=ro` 会被 sqlite 当成文件名的一部分，`unable to open database file`。
+    issue #169 PC：URI 形态（`Path.as_uri()` + `?mode=ro`）合流到
+    `chatlocal.sqlite_util.connect_ro`，经 `wg_text.connect_ro` 延迟导入。这条注释
+    原本就是「Windows 反斜杠直接拼 `?mode=ro` 会被 sqlite 当文件名的一部分」的
+    知识——现在知识进助手，注释退成指向。
     """
     if not DB.exists():
         return None
     try:
-        return sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        return wg_text.connect_ro(DB, timeout=5)
     except (sqlite3.Error, OSError):
         return None
 

@@ -62,13 +62,14 @@ def execute_projection(payload):
     """Only trusted fixed SQL reads main; the model SQL runs in separate memory."""
     from .retrieval import Plan,scope_sql
     from .config import ROOT
+    from .sqlite_util import connect_ro
     path=Path(payload['path']).resolve()
     if not path.is_relative_to(ROOT.resolve()):raise ValueError('数据库必须位于项目内')
     plan=Plan(**payload['plan']);where,args=scope_sql(plan)
     started=time.monotonic();db=sqlite3.connect(':memory:');src=None
     try:
         db.execute('PRAGMA temp_store=MEMORY')
-        src=sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,timeout=.5)
+        src=connect_ro(path,timeout=.5)
         src.execute('PRAGMA query_only=ON');src.execute('BEGIN')
         src.set_progress_handler(lambda:int(time.monotonic()-started>4),2000)
         db.executescript('''

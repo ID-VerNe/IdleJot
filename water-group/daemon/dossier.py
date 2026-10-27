@@ -113,8 +113,14 @@ def settings():
 
 
 def connect():
-    """Read-only connection; the backend owns every write."""
-    return sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+    """Read-only connection; the backend owns every write.
+
+    issue #169 PC：`?mode=ro` 的 URI 形态合流到 `chatlocal.sqlite_util.connect_ro`，
+    经 `wg_text.connect_ro` 延迟导入（chatlocal/config.py 在 import 期建数据目录，
+    daemon 不能模块级 import chatlocal）。
+    """
+    import wg_text
+    return wg_text.connect_ro(DB, timeout=5)
 
 
 def active_session():

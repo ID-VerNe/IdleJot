@@ -71,12 +71,44 @@ def onebot_token():
 
 
 def login_info():
-    """(account, nickname) from OneBot, or None when NapCat is not answering.
+    """OneBot `get_login_info` 的 `data` 字典，NapCat 不答时 None。
+
+    返回的是 OneBot 11 的原始形状 ``{'user_id': ..., 'nickname': ...}``——**不是**
+    元组。这句话以前写成 ``(account, nickname) from OneBot``，于是 ``--status`` 那边
+    按元组解包，dict 迭代出两个 key，NapCat 行永远印成「在线 (user_id nickname)」
+    （issue #156）。要账号文本请走 `login_account()`，别在这里再解一次。
 
     Port open is not enough: the port stays bound while the renderer behind it is
     already wedged, so only an HTTP answer proves the bridge is alive.
     """
     return _onebot_call("get_login_info", {})
+
+
+def _field_text(value):
+    """OneBot 字段归一成可打印文本；`None`/空白/无法表达 → None。
+
+    QQ 号在 OneBot 11 里是数字，昵称是字符串；两者都要进同一行，所以统一成
+    str。布尔是 int 的子类，但它在账号字段里只可能是坏数据，不当数字放行。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return value.strip() or None
+    return None
+
+
+def login_account(info):
+    """把 `login_info()` 的 `data` 解析成 `(account, nickname)`，缺失的一侧为 None。
+
+    解析只放这一处：`--status` 与以后任何要印账号的入口共用，避免各自再解一次
+    （issue #156 就是两处口径不一致）。`None` / 非 dict / 空字典一律 `(None, None)`
+    ——「答了但没报账号」与「没答」是两件事，由调用方按 `info is None` 区分。
+    """
+    if not isinstance(info, dict):
+        return (None, None)
+    return (_field_text(info.get("user_id")), _field_text(info.get("nickname")))
 
 
 def group_msg_history(group_id, count=HISTORY_COUNT):

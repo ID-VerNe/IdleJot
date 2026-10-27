@@ -3,7 +3,6 @@ import asyncio
 import base64
 from copy import deepcopy
 import hashlib
-from http.server import ThreadingHTTPServer
 import io
 import json
 from pathlib import Path
@@ -18,6 +17,7 @@ from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from check_fixture_support import isolated_env
+from fixture_server import fixture_server
 from check_mcp_reactions import ReactionBot, Events, eventually, ROOT
 from chatlocal.mcp_routes import install_mcp_routes
 from chatlocal.store import Store
@@ -563,301 +563,301 @@ def main():
     # Windows OpenSSL needs its first initialization before the fixture clears env.
     ssl.create_default_context()
     events=Events();DetailBot.sent=[];DetailBot.writes=[];DetailBot.history={};DetailBot.intercept=None
-    upstream=ThreadingHTTPServer(('127.0.0.1',0),DetailBot)
-    threading.Thread(target=upstream.serve_forever,daemon=True).start()
     out=io.BytesIO();Image.new('RGB',(64,48),'blue').save(out,'PNG');raw=out.getvalue()
-    try:
-        with tempfile.TemporaryDirectory(prefix='tulpa-enrichment-') as tmp,patch.dict('os.environ',isolated_env(),clear=True):
-            folder=Path(tmp);store=Store(folder/'chats.sqlite3')
-            (folder/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{upstream.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n','utf-8')
-            cache=folder/'trusted';cache.mkdir()
-            (folder/'mcp-chat-media-policy.json').write_text(json.dumps(dict(local_roots={'111':[str(cache)]})),'utf-8')
-            (folder/'mcp-chat-policy.json').write_text(json.dumps(dict(quiet_seconds=.1,reply_cooldown_seconds=0)),'utf-8')
-            with patch('chatlocal.onebot.ROOT',folder),patch('chatlocal.message_sender.ROOT',folder):
-                app=FastAPI();service=install_mcp_routes(app,store);access=service.access;tools=service.tools
-                with TestClient(app):
-                    with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
-                    access.configure(True,port);service.start()
-                    g=access.create(dict(name='enrichment',platforms=['qq'],conversations=[['qq','111:group:222'],['qq','111:group:223']],send=True,chat=True,chat_images=True))
-                    grant=access.authorize(g['token'],source=False)
-                    serial=0
-                    def call(name,**args):
-                        r=tools.call(g['token'],name,args,threading.Event())
-                        assert not r.isError,(name,r)
-                        return r.structuredContent
-                    start=call('start_chat_session',conversation_id='111:group:222',persona='简短自然聊天',idempotency_key='enrichment-start')
-                    sid=start['session']['id'];eventually(lambda:tools.chat.receiver.status()['state']=='connected')
-                    def add(segments=None,uid=333,**extra):
-                        nonlocal serial
-                        serial+=1;mid=90000+serial
-                        event=dict(post_type='message',message_type='group',self_id=111,group_id=222,message_id=mid,
-                            message_seq=mid,user_id=uid,sender={'user_id':uid,'nickname':'Fixture'},time=time.time(),message=segments or [text('fixture')])|extra
-                        DetailBot.history[str(mid)]=deepcopy(event);tools.chat.receive(event)
-                        with access.connect() as db:eid=db.execute('SELECT id FROM chat_inbox WHERE session_id=? AND message_id=?',(sid,str(mid))).fetchone()[0]
-                        return eid,mid
-                    def packet():return call('get_chat_session',session_id=sid)
-                    def message(p,eid):return next(m for m in p['context']['messages'] if m['id']==eid)
-                    def quote_plan(target):
-                        p=packet();time.sleep(.12)
-                        return call('plan_chat_reply',session_id=sid,batch_id=p['input_batch']['id'],target_event_id=target,
-                            expressions=['text'],intent='fixture reply',action='reply')
+    with fixture_server(DetailBot) as upstream:
+        try:
+            with tempfile.TemporaryDirectory(prefix='tulpa-enrichment-') as tmp,patch.dict('os.environ',isolated_env(),clear=True):
+                folder=Path(tmp);store=Store(folder/'chats.sqlite3')
+                (folder/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{upstream.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n','utf-8')
+                cache=folder/'trusted';cache.mkdir()
+                (folder/'mcp-chat-media-policy.json').write_text(json.dumps(dict(local_roots={'111':[str(cache)]})),'utf-8')
+                (folder/'mcp-chat-policy.json').write_text(json.dumps(dict(quiet_seconds=.1,reply_cooldown_seconds=0)),'utf-8')
+                with patch('chatlocal.onebot.ROOT',folder),patch('chatlocal.message_sender.ROOT',folder):
+                    app=FastAPI();service=install_mcp_routes(app,store);access=service.access;tools=service.tools
+                    with TestClient(app):
+                        with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
+                        access.configure(True,port);service.start()
+                        g=access.create(dict(name='enrichment',platforms=['qq'],conversations=[['qq','111:group:222'],['qq','111:group:223']],send=True,chat=True,chat_images=True))
+                        grant=access.authorize(g['token'],source=False)
+                        serial=0
+                        def call(name,**args):
+                            r=tools.call(g['token'],name,args,threading.Event())
+                            assert not r.isError,(name,r)
+                            return r.structuredContent
+                        start=call('start_chat_session',conversation_id='111:group:222',persona='简短自然聊天',idempotency_key='enrichment-start')
+                        sid=start['session']['id'];eventually(lambda:tools.chat.receiver.status()['state']=='connected')
+                        def add(segments=None,uid=333,**extra):
+                            nonlocal serial
+                            serial+=1;mid=90000+serial
+                            event=dict(post_type='message',message_type='group',self_id=111,group_id=222,message_id=mid,
+                                message_seq=mid,user_id=uid,sender={'user_id':uid,'nickname':'Fixture'},time=time.time(),message=segments or [text('fixture')])|extra
+                            DetailBot.history[str(mid)]=deepcopy(event);tools.chat.receive(event)
+                            with access.connect() as db:eid=db.execute('SELECT id FROM chat_inbox WHERE session_id=? AND message_id=?',(sid,str(mid))).fetchone()[0]
+                            return eid,mid
+                        def packet():return call('get_chat_session',session_id=sid)
+                        def message(p,eid):return next(m for m in p['context']['messages'] if m['id']==eid)
+                        def quote_plan(target):
+                            p=packet();time.sleep(.12)
+                            return call('plan_chat_reply',session_id=sid,batch_id=p['input_batch']['id'],target_event_id=target,
+                                expressions=['text'],intent='fixture reply',action='reply')
 
-                    target,_=add()
-                    assert quote_plan(target)['quote_guidance']['messages_after_target']==0
-                    add(uid=111);add(virtual=True);add();add()
-                    q=quote_plan(target)['quote_guidance'];assert q['messages_after_target']==2 and not q['quote_recommended'],q
-                    last,mid=add();tools.chat.receive(deepcopy(DetailBot.history[str(mid)]))
-                    q=quote_plan(target)['quote_guidance'];assert q['messages_after_target']==3 and q['quote_recommended'] and q['threshold']==3,q
-                    tools.chat.recall(dict(self_id=111,group_id=222,message_id=mid))
-                    assert quote_plan(target)['quote_guidance']['messages_after_target']==2
-                    print('PASS: quote threshold 0/2/3, self/system/recall/duplicate exclusions; suggestion in existing plan result')
+                        target,_=add()
+                        assert quote_plan(target)['quote_guidance']['messages_after_target']==0
+                        add(uid=111);add(virtual=True);add();add()
+                        q=quote_plan(target)['quote_guidance'];assert q['messages_after_target']==2 and not q['quote_recommended'],q
+                        last,mid=add();tools.chat.receive(deepcopy(DetailBot.history[str(mid)]))
+                        q=quote_plan(target)['quote_guidance'];assert q['messages_after_target']==3 and q['quote_recommended'] and q['threshold']==3,q
+                        tools.chat.recall(dict(self_id=111,group_id=222,message_id=mid))
+                        assert quote_plan(target)['quote_guidance']['messages_after_target']==2
+                        print('PASS: quote threshold 0/2/3, self/system/recall/duplicate exclusions; suggestion in existing plan result')
 
-                    quoted,mid=add([text('original wording')]);cached_parent,_=add([dict(type='reply',data={'id':str(mid)}),text('agree')])
-                    with patch.object(tools.chat.details,'query',side_effect=AssertionError('cached quote queried OneBot')):
-                        d=message(packet(),cached_parent)['referenced_messages'][0]
-                    assert d['source']=='inbox' and d['content']=='original wording',d
-                    remote=81001
-                    DetailBot.history[str(remote)]=dict(message_id=remote,group_id=222,message_type='group',user_id=444,time=time.time(),sender={'nickname':'Remote'},message=[text('remote original')])
-                    parent,_=add([dict(type='reply',data={'id':str(remote)})])
-                    assert message(packet(),parent)['referenced_messages'][0]['content']=='remote original'
-                    with patch.object(tools.chat.details,'query',side_effect=AssertionError('remote quote cache missed')):packet()
-                    foreign=81002;DetailBot.history[str(foreign)]={**DetailBot.history[str(remote)],'message_id':foreign,'group_id':999}
-                    bad,_=add([dict(type='reply',data={'id':str(foreign)})])
-                    assert message(packet(),bad)['referenced_messages'][0]['state']=='unverified'
-                    tools.chat.recall(dict(self_id=111,group_id=222,message_id=mid))
-                    assert message(packet(),cached_parent)['referenced_messages'][0]['state']=='recalled'
-                    tools.chat.recall(dict(self_id=111,group_id=222,message_id=remote))
-                    tools.chat.recall(dict(self_id=111,group_id=222,message_id=foreign))
-                    assert message(packet(),parent)['referenced_messages'][0]['state']=='recalled'
-                    print('PASS: local/remote quote originals, scoped identity check and cache reuse')
+                        quoted,mid=add([text('original wording')]);cached_parent,_=add([dict(type='reply',data={'id':str(mid)}),text('agree')])
+                        with patch.object(tools.chat.details,'query',side_effect=AssertionError('cached quote queried OneBot')):
+                            d=message(packet(),cached_parent)['referenced_messages'][0]
+                        assert d['source']=='inbox' and d['content']=='original wording',d
+                        remote=81001
+                        DetailBot.history[str(remote)]=dict(message_id=remote,group_id=222,message_type='group',user_id=444,time=time.time(),sender={'nickname':'Remote'},message=[text('remote original')])
+                        parent,_=add([dict(type='reply',data={'id':str(remote)})])
+                        assert message(packet(),parent)['referenced_messages'][0]['content']=='remote original'
+                        with patch.object(tools.chat.details,'query',side_effect=AssertionError('remote quote cache missed')):packet()
+                        foreign=81002;DetailBot.history[str(foreign)]={**DetailBot.history[str(remote)],'message_id':foreign,'group_id':999}
+                        bad,_=add([dict(type='reply',data={'id':str(foreign)})])
+                        assert message(packet(),bad)['referenced_messages'][0]['state']=='unverified'
+                        tools.chat.recall(dict(self_id=111,group_id=222,message_id=mid))
+                        assert message(packet(),cached_parent)['referenced_messages'][0]['state']=='recalled'
+                        tools.chat.recall(dict(self_id=111,group_id=222,message_id=remote))
+                        tools.chat.recall(dict(self_id=111,group_id=222,message_id=foreign))
+                        assert message(packet(),parent)['referenced_messages'][0]['state']=='recalled'
+                        print('PASS: local/remote quote originals, scoped identity check and cache reuse')
 
-                    nodes=[dict(sender={'user_id':444,'nickname':'ForwardAuthor'},time=1,content=[text(f'node {i}')]) for i in range(25)]
-                    # One image in the merge is scoped to its received parent event.
-                    nodes[0]['content'].append(dict(type='image',data={'base64':base64.b64encode(raw).decode()}))
-                    nodes[20]['content'].append(dict(type='image',data={'base64':base64.b64encode(raw).decode(),'file':'second-page-fixture'}))
-                    forward,_=add([dict(type='forward',data={'messages':nodes})])
-                    with patch('chatlocal.mcp_chat_media.download',side_effect=AssertionError('unexpected remote download')):
-                        d=message(packet(),forward)['referenced_messages'][0]
-                        assert len(d['nodes'])==25 and not d['has_more'] and d['nodes'][0]['sender']=='ForwardAuthor'
-                        more=call('read_chat_forward',session_id=sid,event_id=forward,offset=20)
-                        assert len(more['nodes'])==5 and not more['has_more'] and more['nodes'][0]['content']=='node 20[图片]'
-                        image_index=d['nodes'][0]['segments'][1]['image_index']
-                        assert call('read_chat_image',session_id=sid,event_id=forward,index=image_index)['dimensions']==[64,48]
-                        asyncio.run(wire(service,g['token'],sid,forward))
-                        asyncio.run(wire_pages(service,g['token'],sid,forward,tools.chat,grant))
-                    DetailBot.forwards['bundle']={'messages':nodes}
-                    remote_fwd,_=add([dict(type='forward',data={'id':'bundle'})])
-                    assert message(packet(),remote_fwd)['referenced_messages'][0]['total_nodes']==25
-                    count=len(DetailBot.queries);packet();assert len(DetailBot.queries)==count
-                    failed,_=add([dict(type='forward',data={'id':'missing'})])
-                    assert message(packet(),failed)['referenced_messages'][0]['state']=='unavailable'
-                    assert tools.call(g['token'],'read_chat_forward',dict(session_id=sid,event_id=999999),threading.Event()).isError
-                    from chatlocal.mcp_chat_details import sanitize_nodes
-                    nested={'messages':[dict(content=[dict(type='forward',data={'id':'opaque nested'})])]}
-                    assert sanitize_nodes(nested)[0]['segments'][0]['truncated']
-                    print('PASS: inline/remote forward, sender/order, paging, parent-scoped image pixels, cache and unavailable states')
+                        nodes=[dict(sender={'user_id':444,'nickname':'ForwardAuthor'},time=1,content=[text(f'node {i}')]) for i in range(25)]
+                        # One image in the merge is scoped to its received parent event.
+                        nodes[0]['content'].append(dict(type='image',data={'base64':base64.b64encode(raw).decode()}))
+                        nodes[20]['content'].append(dict(type='image',data={'base64':base64.b64encode(raw).decode(),'file':'second-page-fixture'}))
+                        forward,_=add([dict(type='forward',data={'messages':nodes})])
+                        with patch('chatlocal.mcp_chat_media.download',side_effect=AssertionError('unexpected remote download')):
+                            d=message(packet(),forward)['referenced_messages'][0]
+                            assert len(d['nodes'])==25 and not d['has_more'] and d['nodes'][0]['sender']=='ForwardAuthor'
+                            more=call('read_chat_forward',session_id=sid,event_id=forward,offset=20)
+                            assert len(more['nodes'])==5 and not more['has_more'] and more['nodes'][0]['content']=='node 20[图片]'
+                            image_index=d['nodes'][0]['segments'][1]['image_index']
+                            assert call('read_chat_image',session_id=sid,event_id=forward,index=image_index)['dimensions']==[64,48]
+                            asyncio.run(wire(service,g['token'],sid,forward))
+                            asyncio.run(wire_pages(service,g['token'],sid,forward,tools.chat,grant))
+                        DetailBot.forwards['bundle']={'messages':nodes}
+                        remote_fwd,_=add([dict(type='forward',data={'id':'bundle'})])
+                        assert message(packet(),remote_fwd)['referenced_messages'][0]['total_nodes']==25
+                        count=len(DetailBot.queries);packet();assert len(DetailBot.queries)==count
+                        failed,_=add([dict(type='forward',data={'id':'missing'})])
+                        assert message(packet(),failed)['referenced_messages'][0]['state']=='unavailable'
+                        assert tools.call(g['token'],'read_chat_forward',dict(session_id=sid,event_id=999999),threading.Event()).isError
+                        from chatlocal.mcp_chat_details import sanitize_nodes
+                        nested={'messages':[dict(content=[dict(type='forward',data={'id':'opaque nested'})])]}
+                        assert sanitize_nodes(nested)[0]['segments'][0]['truncated']
+                        print('PASS: inline/remote forward, sender/order, paging, parent-scoped image pixels, cache and unavailable states')
 
-                    # Local and remote quotes reuse the same forward/rendering
-                    # path; the returned parent-relative positions are executable.
-                    with access.connect() as db:local_mid=db.execute('SELECT message_id FROM chat_inbox WHERE id=?',(forward,)).fetchone()[0]
-                    quoted_forward,_=add([dict(type='reply',data={'id':local_mid})])
-                    quoted=message(packet(),quoted_forward)['referenced_messages'][0]['segments'][0]
-                    assert len(quoted['nodes'])==25 and quoted['reply_index']==0 and quoted['forward_index']==0
-                    asyncio.run(wire_quote(service,g['token'],sid,quoted_forward,quoted))
-                    quote_mid=82001
-                    DetailBot.history[str(quote_mid)]=dict(message_id=quote_mid,group_id=222,message_type='group',self_id=111,
-                        user_id=444,time=time.time(),sender={'nickname':'Remote'},message=[text('quoted lead'),dict(type='forward',data={'id':'bundle'})])
-                    remote_quote,_=add([dict(type='reply',data={'id':str(quote_mid)})])
-                    unread=tools.call(g['token'],'read_chat_forward',dict(session_id=sid,event_id=remote_quote,reply_index=0,forward_index=1),threading.Event())
-                    assert unread.isError,'unoffered quote was readable'
-                    quoted=message(packet(),remote_quote)['referenced_messages'][0]['segments'][1]
-                    assert quoted['forward_index']==1 and len(quoted['nodes'])==25
-                    asyncio.run(wire_quote(service,g['token'],sid,remote_quote,quoted))
-                    count=len(DetailBot.queries);packet()
-                    assert not any(body.get('id')=='bundle' for _,body in DetailBot.queries[count:]),'forward cache missed'
-                    with access.connect() as db:
-                        assert tools.chat.row(sid)['cursor']==0,'quoted material advanced confirmation'
-                    tools.chat.recall(dict(self_id=111,group_id=222,message_id=quote_mid))
-                    recalled=call('read_chat_forward',session_id=sid,event_id=remote_quote,reply_index=0,forward_index=1)
-                    assert recalled['state']=='recalled' and not recalled['nodes']
-                    unavailable_mid=82002
-                    DetailBot.history[str(unavailable_mid)]=dict(DetailBot.history[str(quote_mid)],message_id=unavailable_mid,
-                        message=[text('lead'),dict(type='forward',data={'id':'later-available'})])
-                    retry_parent,_=add([dict(type='reply',data={'id':str(unavailable_mid)})])
-                    missing=message(packet(),retry_parent)['referenced_messages'][0]['segments'][1]
-                    assert missing['state']=='unavailable' and missing['read_call']['arguments']['forward_index']==1
-                    DetailBot.forwards['later-available']={'messages':nodes}
-                    link=missing['read_call'];retried=call(link['tool'],**link['arguments'])
-                    assert retried['state']=='available' and len(retried['nodes'])==25 and not retried['has_more']
-                    assert 'next_call' not in retried
-                    for source_mid,changes,expected in ((82003,dict(self_id=999),'unverified'),
-                                                        (82004,dict(time=time.time()-172800),'outside_scope')):
-                        DetailBot.history[str(source_mid)]=dict(DetailBot.history[str(quote_mid)],message_id=source_mid,**changes)
-                        denied_parent,_=add([dict(type='reply',data={'id':str(source_mid)})])
+                        # Local and remote quotes reuse the same forward/rendering
+                        # path; the returned parent-relative positions are executable.
+                        with access.connect() as db:local_mid=db.execute('SELECT message_id FROM chat_inbox WHERE id=?',(forward,)).fetchone()[0]
+                        quoted_forward,_=add([dict(type='reply',data={'id':local_mid})])
+                        quoted=message(packet(),quoted_forward)['referenced_messages'][0]['segments'][0]
+                        assert len(quoted['nodes'])==25 and quoted['reply_index']==0 and quoted['forward_index']==0
+                        asyncio.run(wire_quote(service,g['token'],sid,quoted_forward,quoted))
+                        quote_mid=82001
+                        DetailBot.history[str(quote_mid)]=dict(message_id=quote_mid,group_id=222,message_type='group',self_id=111,
+                            user_id=444,time=time.time(),sender={'nickname':'Remote'},message=[text('quoted lead'),dict(type='forward',data={'id':'bundle'})])
+                        remote_quote,_=add([dict(type='reply',data={'id':str(quote_mid)})])
+                        unread=tools.call(g['token'],'read_chat_forward',dict(session_id=sid,event_id=remote_quote,reply_index=0,forward_index=1),threading.Event())
+                        assert unread.isError,'unoffered quote was readable'
+                        quoted=message(packet(),remote_quote)['referenced_messages'][0]['segments'][1]
+                        assert quoted['forward_index']==1 and len(quoted['nodes'])==25
+                        asyncio.run(wire_quote(service,g['token'],sid,remote_quote,quoted))
+                        count=len(DetailBot.queries);packet()
+                        assert not any(body.get('id')=='bundle' for _,body in DetailBot.queries[count:]),'forward cache missed'
                         with access.connect() as db:
-                            saved=db.execute('SELECT scope FROM grants WHERE id=?',(grant['id'],)).fetchone()[0]
-                            scoped=json.loads(saved);scoped['start']=time.strftime('%Y-%m-%d')
+                            assert tools.chat.row(sid)['cursor']==0,'quoted material advanced confirmation'
+                        tools.chat.recall(dict(self_id=111,group_id=222,message_id=quote_mid))
+                        recalled=call('read_chat_forward',session_id=sid,event_id=remote_quote,reply_index=0,forward_index=1)
+                        assert recalled['state']=='recalled' and not recalled['nodes']
+                        unavailable_mid=82002
+                        DetailBot.history[str(unavailable_mid)]=dict(DetailBot.history[str(quote_mid)],message_id=unavailable_mid,
+                            message=[text('lead'),dict(type='forward',data={'id':'later-available'})])
+                        retry_parent,_=add([dict(type='reply',data={'id':str(unavailable_mid)})])
+                        missing=message(packet(),retry_parent)['referenced_messages'][0]['segments'][1]
+                        assert missing['state']=='unavailable' and missing['read_call']['arguments']['forward_index']==1
+                        DetailBot.forwards['later-available']={'messages':nodes}
+                        link=missing['read_call'];retried=call(link['tool'],**link['arguments'])
+                        assert retried['state']=='available' and len(retried['nodes'])==25 and not retried['has_more']
+                        assert 'next_call' not in retried
+                        for source_mid,changes,expected in ((82003,dict(self_id=999),'unverified'),
+                                                            (82004,dict(time=time.time()-172800),'outside_scope')):
+                            DetailBot.history[str(source_mid)]=dict(DetailBot.history[str(quote_mid)],message_id=source_mid,**changes)
+                            denied_parent,_=add([dict(type='reply',data={'id':str(source_mid)})])
+                            with access.connect() as db:
+                                saved=db.execute('SELECT scope FROM grants WHERE id=?',(grant['id'],)).fetchone()[0]
+                                scoped=json.loads(saved);scoped['start']=time.strftime('%Y-%m-%d')
+                                db.execute('UPDATE grants SET scope=? WHERE id=?',(json.dumps(scoped),grant['id']))
+                            try:
+                                packet();denied=call('read_chat_forward',session_id=sid,event_id=denied_parent,reply_index=0,forward_index=1)
+                                assert denied['state']==expected and not denied['nodes'],denied
+                            finally:
+                                with access.connect() as db:db.execute('UPDATE grants SET scope=? WHERE id=?',(saved,grant['id']))
+                        with access.connect() as db:
+                            scoped=json.loads(saved);scoped['chat_images']=False
                             db.execute('UPDATE grants SET scope=? WHERE id=?',(json.dumps(scoped),grant['id']))
                         try:
-                            packet();denied=call('read_chat_forward',session_id=sid,event_id=denied_parent,reply_index=0,forward_index=1)
-                            assert denied['state']==expected and not denied['nodes'],denied
+                            limited=call('read_chat_forward',session_id=sid,event_id=retry_parent,reply_index=0,forward_index=1)
+                            image=limited['nodes'][0]['segments'][1]
+                            assert not image['readable'] and image['state']=='permission_denied' and 'image_index' not in image
                         finally:
                             with access.connect() as db:db.execute('UPDATE grants SET scope=? WHERE id=?',(saved,grant['id']))
-                    with access.connect() as db:
-                        scoped=json.loads(saved);scoped['chat_images']=False
-                        db.execute('UPDATE grants SET scope=? WHERE id=?',(json.dumps(scoped),grant['id']))
-                    try:
-                        limited=call('read_chat_forward',session_id=sid,event_id=retry_parent,reply_index=0,forward_index=1)
-                        image=limited['nodes'][0]['segments'][1]
-                        assert not image['readable'] and image['state']=='permission_denied' and 'image_index' not in image
-                    finally:
-                        with access.connect() as db:db.execute('UPDATE grants SET scope=? WHERE id=?',(saved,grant['id']))
-                    # Hard limits never advertise an endless continuation past
-                    # the retained content; supported inline nested content stays.
-                    oversized,_=add([dict(type='forward',data={'messages':nodes*3})])
-                    packet();page=call('read_chat_forward',session_id=sid,event_id=oversized)
-                    assert len(page['nodes'])==50 and not page['has_more']
-                    small=call('read_chat_forward',session_id=sid,event_id=oversized,limit=20)
-                    assert small['unrecoverable_truncation'] and small['has_more'] and small['next_call']['arguments']['limit']==20
-                    retained=[]
-                    while True:
-                        retained.extend(page['nodes'])
-                        assert page['unrecoverable_truncation'] and page['limit_reason']=='processing_limit'
-                        if not page['has_more']:break
-                        link=page['next_call'];page=call(link['tool'],**link['arguments'])
-                    assert len(retained)==50 and 'next_call' not in page and not page['continuation_supported']
-                    nested_event,_=add([dict(type='forward',data={'messages':[dict(content=[dict(type='forward',data={'messages':nodes[:2]})])]})])
-                    inner=message(packet(),nested_event)['referenced_messages'][0]['nodes'][0]['segments'][0]
-                    assert len(inner['nodes'])==2 and inner['state']=='available' and not inner['truncated']
-                    opaque,_=add([dict(type='forward',data=nested)])
-                    inner=message(packet(),opaque)['referenced_messages'][0]['nodes'][0]['segments'][0]
-                    assert inner['state']=='unavailable' and inner['continuation_supported'] and inner['read_call']['tool']=='read_chat_forward'
-                    assert 'id' not in inner and 'next_call' not in inner
-                    print('PASS: quoted local/remote forward paging, parent pixels, recall, cached resolution, hard-limit continuation and inline nesting')
-                    # The added pixel cases have their own quota assertions;
-                    # leave the original local-source fixtures a fresh budget.
-                    with access.connect() as db:db.execute("DELETE FROM calls WHERE tool IN ('read_chat_image','read_chat_sticker')")
+                        # Hard limits never advertise an endless continuation past
+                        # the retained content; supported inline nested content stays.
+                        oversized,_=add([dict(type='forward',data={'messages':nodes*3})])
+                        packet();page=call('read_chat_forward',session_id=sid,event_id=oversized)
+                        assert len(page['nodes'])==50 and not page['has_more']
+                        small=call('read_chat_forward',session_id=sid,event_id=oversized,limit=20)
+                        assert small['unrecoverable_truncation'] and small['has_more'] and small['next_call']['arguments']['limit']==20
+                        retained=[]
+                        while True:
+                            retained.extend(page['nodes'])
+                            assert page['unrecoverable_truncation'] and page['limit_reason']=='processing_limit'
+                            if not page['has_more']:break
+                            link=page['next_call'];page=call(link['tool'],**link['arguments'])
+                        assert len(retained)==50 and 'next_call' not in page and not page['continuation_supported']
+                        nested_event,_=add([dict(type='forward',data={'messages':[dict(content=[dict(type='forward',data={'messages':nodes[:2]})])]})])
+                        inner=message(packet(),nested_event)['referenced_messages'][0]['nodes'][0]['segments'][0]
+                        assert len(inner['nodes'])==2 and inner['state']=='available' and not inner['truncated']
+                        opaque,_=add([dict(type='forward',data=nested)])
+                        inner=message(packet(),opaque)['referenced_messages'][0]['nodes'][0]['segments'][0]
+                        assert inner['state']=='unavailable' and inner['continuation_supported'] and inner['read_call']['tool']=='read_chat_forward'
+                        assert 'id' not in inner and 'next_call' not in inner
+                        print('PASS: quoted local/remote forward paging, parent pixels, recall, cached resolution, hard-limit continuation and inline nesting')
+                        # The added pixel cases have their own quota assertions;
+                        # leave the original local-source fixtures a fresh budget.
+                        with access.connect() as db:db.execute("DELETE FROM calls WHERE tool IN ('read_chat_image','read_chat_sticker')")
 
-                    # Use the actual Client contract, with controlled read-only transport failures.
-                    row=tools.chat.row(sid);cancel=threading.Event()
-                    nested_limits(tools.chat,row)
-                    for failure in ('timeout','wrong-account','empty'):
-                        queries=[]
-                        def fail(request):
-                            queries.append(request.url.path)
-                            if failure=='timeout':raise httpx.ReadTimeout('fixture')
-                            data={'user_id':999 if failure=='wrong-account' else 111} if request.url.path=='/get_login_info' else None
-                            return httpx.Response(200,json={'status':'ok','retcode':0,'data':data})
-                        with patch.object(tools.chat.actions,'client_factory',lambda:Client({'url':'http://127.0.0.1'},transport=httpx.MockTransport(fail))):
-                            assert tools.chat.details.forward(row,{'id':'failure-'+failure},time.monotonic()+3,cancel)['state']=='unavailable'
-                        assert queries.count('/get_forward_msg')==(1 if failure=='empty' else 0),queries
-                    with patch.object(tools.chat.actions,'client_factory',side_effect=AssertionError('expired/cancelled request')):
-                        assert tools.chat.details.query(row,'get_msg',{},time.monotonic()-1,cancel) is None
-                        assert tools.chat.details.forward(row,{'id':'expired'},time.monotonic()-1,cancel)['state']=='budget_exhausted'
-                        cancel.set();assert tools.chat.details.query(row,'get_msg',{},time.monotonic()+3,cancel) is None
-                    budget_event,_=add([dict(type='forward',data={'id':'budget-a'}),dict(type='forward',data={'id':'budget-b'})])
-                    with access.connect() as db:
-                        budget_row=db.execute('SELECT * FROM chat_inbox WHERE id=?',(budget_event,)).fetchone()
-                    deadlines=[]
-                    def budget_query(row,action,args,deadline,cancel):
-                        deadlines.append(deadline);return None
-                    with patch.object(tools.chat.details,'query',side_effect=budget_query):
-                        tools.chat.details.enrich(grant,row,tools.chat.messages([budget_row]))
-                    assert len(deadlines)==2 and deadlines[0]==deadlines[1]
-                    print('PASS: timeout, account mismatch and empty response never retry parameter aliases; deadline/cancellation stop I/O')
+                        # Use the actual Client contract, with controlled read-only transport failures.
+                        row=tools.chat.row(sid);cancel=threading.Event()
+                        nested_limits(tools.chat,row)
+                        for failure in ('timeout','wrong-account','empty'):
+                            queries=[]
+                            def fail(request):
+                                queries.append(request.url.path)
+                                if failure=='timeout':raise httpx.ReadTimeout('fixture')
+                                data={'user_id':999 if failure=='wrong-account' else 111} if request.url.path=='/get_login_info' else None
+                                return httpx.Response(200,json={'status':'ok','retcode':0,'data':data})
+                            with patch.object(tools.chat.actions,'client_factory',lambda:Client({'url':'http://127.0.0.1'},transport=httpx.MockTransport(fail))):
+                                assert tools.chat.details.forward(row,{'id':'failure-'+failure},time.monotonic()+3,cancel)['state']=='unavailable'
+                            assert queries.count('/get_forward_msg')==(1 if failure=='empty' else 0),queries
+                        with patch.object(tools.chat.actions,'client_factory',side_effect=AssertionError('expired/cancelled request')):
+                            assert tools.chat.details.query(row,'get_msg',{},time.monotonic()-1,cancel) is None
+                            assert tools.chat.details.forward(row,{'id':'expired'},time.monotonic()-1,cancel)['state']=='budget_exhausted'
+                            cancel.set();assert tools.chat.details.query(row,'get_msg',{},time.monotonic()+3,cancel) is None
+                        budget_event,_=add([dict(type='forward',data={'id':'budget-a'}),dict(type='forward',data={'id':'budget-b'})])
+                        with access.connect() as db:
+                            budget_row=db.execute('SELECT * FROM chat_inbox WHERE id=?',(budget_event,)).fetchone()
+                        deadlines=[]
+                        def budget_query(row,action,args,deadline,cancel):
+                            deadlines.append(deadline);return None
+                        with patch.object(tools.chat.details,'query',side_effect=budget_query):
+                            tools.chat.details.enrich(grant,row,tools.chat.messages([budget_row]))
+                        assert len(deadlines)==2 and deadlines[0]==deadlines[1]
+                        print('PASS: timeout, account mismatch and empty response never retry parameter aliases; deadline/cancellation stop I/O')
 
-                    parallel,_=add([dict(type='forward',data={'id':'parallel'})])
-                    second=call('start_chat_session',conversation_id='111:group:223',persona='fixture',idempotency_key='parallel-group')['session']['id']
-                    assert tools.call(g['token'],'read_chat_forward',dict(session_id=second,event_id=quoted_forward,reply_index=0,forward_index=0),threading.Event()).isError
-                    tools.chat.receive(dict(post_type='message',message_type='group',self_id=111,group_id=223,message_id=777777,
-                        user_id=444,time=time.time(),message=[dict(type='forward',data={'id':'other-group'})]))
-                    with access.connect() as db:
-                        a=db.execute('SELECT * FROM chat_inbox WHERE id=?',(parallel,)).fetchone()
-                        b=db.execute('SELECT * FROM chat_inbox WHERE session_id=?',(second,)).fetchone()
-                    concurrent_details(tools.chat,grant,row,[tools.chat.messages([a])[0],(tools.chat.row(second),tools.chat.messages([b])[0])],raw)
-                    call('stop_chat_session',session_id=second)
+                        parallel,_=add([dict(type='forward',data={'id':'parallel'})])
+                        second=call('start_chat_session',conversation_id='111:group:223',persona='fixture',idempotency_key='parallel-group')['session']['id']
+                        assert tools.call(g['token'],'read_chat_forward',dict(session_id=second,event_id=quoted_forward,reply_index=0,forward_index=0),threading.Event()).isError
+                        tools.chat.receive(dict(post_type='message',message_type='group',self_id=111,group_id=223,message_id=777777,
+                            user_id=444,time=time.time(),message=[dict(type='forward',data={'id':'other-group'})]))
+                        with access.connect() as db:
+                            a=db.execute('SELECT * FROM chat_inbox WHERE id=?',(parallel,)).fetchone()
+                            b=db.execute('SELECT * FROM chat_inbox WHERE session_id=?',(second,)).fetchone()
+                        concurrent_details(tools.chat,grant,row,[tools.chat.messages([a])[0],(tools.chat.row(second),tools.chat.messages([b])[0])],raw)
+                        call('stop_chat_session',session_id=second)
 
-                    # The old persisted format remains readable; only obsolete successful quote caches expire.
-                    legacy,_=add([dict(type='forward',data={'id':'legacy'})])
-                    old_nodes=[dict(sender_id='444',sender='OldAuthor',timestamp=1,segments=[
-                        dict(type='text',data={'text':'old cache'}),dict(type='image',data={'base64':base64.b64encode(raw).decode()})])]
-                    with access.connect() as db:
-                        db.execute('UPDATE chat_inbox SET details=? WHERE id=?',(json.dumps([dict(type='forward',nodes=old_nodes)]),legacy))
-                    old=message(packet(),legacy)['referenced_messages'][0]
-                    assert old['nodes'][0]['content']=='old cache[图片]' and old['nodes'][0]['sender']=='OldAuthor'
-                    assert call('read_chat_image',session_id=sid,event_id=legacy,index=old['nodes'][0]['segments'][1]['image_index'])['dimensions']==[64,48]
-                    tools.chat.details.store(sid,'reply:old-format',dict(state='available',raw_segments=[]))
-                    from chatlocal.mcp_chat_details import ChatDetails
-                    restored=ChatDetails(tools.chat)
-                    assert restored.cached(sid,'reply:old-format') is None and restored.cached(sid,'reply:race')['state']=='recalled'
-                    quoted_image,image_mid=add([dict(type='image',data={'base64':base64.b64encode(raw).decode()})])
-                    quoted_parent,_=add([dict(type='reply',data={'id':str(image_mid)})])
-                    detail=message(packet(),quoted_parent)['referenced_messages'][0]
-                    assert call('read_chat_image',session_id=sid,event_id=quoted_parent,index=detail['segments'][0]['image_index'])['dimensions']==[64,48]
-                    tools.chat.recall(dict(self_id=111,group_id=222,message_id=image_mid))
-                    assert tools.call(g['token'],'read_chat_image',dict(session_id=sid,event_id=quoted_parent,index=detail['segments'][0]['image_index']),threading.Event()).isError
-                    limited=[];restored.render([dict(type='image',image={'file':str(i)}) for i in range(10)],limited,1)
-                    assert len(limited)==8
-                    print('PASS: persisted forward nodes and recall markers survive format cleanup; quoted image scope/recall and eight-image limit preserved')
+                        # The old persisted format remains readable; only obsolete successful quote caches expire.
+                        legacy,_=add([dict(type='forward',data={'id':'legacy'})])
+                        old_nodes=[dict(sender_id='444',sender='OldAuthor',timestamp=1,segments=[
+                            dict(type='text',data={'text':'old cache'}),dict(type='image',data={'base64':base64.b64encode(raw).decode()})])]
+                        with access.connect() as db:
+                            db.execute('UPDATE chat_inbox SET details=? WHERE id=?',(json.dumps([dict(type='forward',nodes=old_nodes)]),legacy))
+                        old=message(packet(),legacy)['referenced_messages'][0]
+                        assert old['nodes'][0]['content']=='old cache[图片]' and old['nodes'][0]['sender']=='OldAuthor'
+                        assert call('read_chat_image',session_id=sid,event_id=legacy,index=old['nodes'][0]['segments'][1]['image_index'])['dimensions']==[64,48]
+                        tools.chat.details.store(sid,'reply:old-format',dict(state='available',raw_segments=[]))
+                        from chatlocal.mcp_chat_details import ChatDetails
+                        restored=ChatDetails(tools.chat)
+                        assert restored.cached(sid,'reply:old-format') is None and restored.cached(sid,'reply:race')['state']=='recalled'
+                        quoted_image,image_mid=add([dict(type='image',data={'base64':base64.b64encode(raw).decode()})])
+                        quoted_parent,_=add([dict(type='reply',data={'id':str(image_mid)})])
+                        detail=message(packet(),quoted_parent)['referenced_messages'][0]
+                        assert call('read_chat_image',session_id=sid,event_id=quoted_parent,index=detail['segments'][0]['image_index'])['dimensions']==[64,48]
+                        tools.chat.recall(dict(self_id=111,group_id=222,message_id=image_mid))
+                        assert tools.call(g['token'],'read_chat_image',dict(session_id=sid,event_id=quoted_parent,index=detail['segments'][0]['image_index']),threading.Event()).isError
+                        limited=[];restored.render([dict(type='image',image={'file':str(i)}) for i in range(10)],limited,1)
+                        assert len(limited)==8
+                        print('PASS: persisted forward nodes and recall markers survive format cleanup; quoted image scope/recall and eight-image limit preserved')
 
-                    native=cache/'Pic'/time.strftime('%Y-%m')/'Ori';native.mkdir(parents=True)
-                    digest=hashlib.md5(raw).hexdigest();(native/(digest+'.png')).write_bytes(raw)
-                    local,_=add([dict(type='image',data={'file':digest.upper()+'.png','url':'https://gchat.qpic.cn/not-needed'})])
-                    with patch('chatlocal.mcp_chat_media.download',side_effect=AssertionError('local cache contacted remote')),patch.object(tools.chat.media,'client',side_effect=AssertionError('local hit queried adapter')):
-                        assert call('read_chat_image',session_id=sid,event_id=local)['dimensions']==[64,48]
-                    assert read_path(str(folder/'chats.sqlite3'),[cache.resolve()]) is None
-                    shared=folder/'shared-cache';thumb=shared/'Pic'/time.strftime('%Y-%m')/'Thumb';thumb.mkdir(parents=True)
-                    shared_hash='a'*32;(thumb/(shared_hash+'_0.png')).write_bytes(raw)
-                    (folder/'mcp-chat-media-policy.json').write_text(json.dumps(dict(local_roots={'111':[str(cache)]},hash_cache_roots={'111':[str(shared)]})),'utf-8')
-                    thumbnail,_=add([dict(type='image',data={'file':shared_hash+'.png','url':'https://gchat.qpic.cn/not-needed'})])
-                    with patch('chatlocal.mcp_chat_media.download',side_effect=AssertionError('hash cache contacted remote')):
-                        first=call('read_chat_image',session_id=sid,event_id=thumbnail)
-                        again=call('read_chat_image',session_id=sid,event_id=thumbnail)
-                        assert first['thumbnail'] and again['thumbnail']
-                    from chatlocal.mcp_chat_local_media import roots, reference_bytes
-                    assert reference_bytes({'file':str(thumb/(shared_hash+'_0.png'))},roots(folder,'111')) is None
-                    policy=folder/'mcp-chat-media-policy.json';saved=policy.read_bytes()
-                    try:
-                        for invalid in ([],{'local_roots':[]},{'local_roots':{'111':'private-path'}},{'local_roots':{'111':[42]}}):
-                            policy.write_text(json.dumps(invalid),'utf-8')
+                        native=cache/'Pic'/time.strftime('%Y-%m')/'Ori';native.mkdir(parents=True)
+                        digest=hashlib.md5(raw).hexdigest();(native/(digest+'.png')).write_bytes(raw)
+                        local,_=add([dict(type='image',data={'file':digest.upper()+'.png','url':'https://gchat.qpic.cn/not-needed'})])
+                        with patch('chatlocal.mcp_chat_media.download',side_effect=AssertionError('local cache contacted remote')),patch.object(tools.chat.media,'client',side_effect=AssertionError('local hit queried adapter')):
+                            assert call('read_chat_image',session_id=sid,event_id=local)['dimensions']==[64,48]
+                        assert read_path(str(folder/'chats.sqlite3'),[cache.resolve()]) is None
+                        shared=folder/'shared-cache';thumb=shared/'Pic'/time.strftime('%Y-%m')/'Thumb';thumb.mkdir(parents=True)
+                        shared_hash='a'*32;(thumb/(shared_hash+'_0.png')).write_bytes(raw)
+                        (folder/'mcp-chat-media-policy.json').write_text(json.dumps(dict(local_roots={'111':[str(cache)]},hash_cache_roots={'111':[str(shared)]})),'utf-8')
+                        thumbnail,_=add([dict(type='image',data={'file':shared_hash+'.png','url':'https://gchat.qpic.cn/not-needed'})])
+                        with patch('chatlocal.mcp_chat_media.download',side_effect=AssertionError('hash cache contacted remote')):
+                            first=call('read_chat_image',session_id=sid,event_id=thumbnail)
+                            again=call('read_chat_image',session_id=sid,event_id=thumbnail)
+                            assert first['thumbnail'] and again['thumbnail']
+                        from chatlocal.mcp_chat_local_media import roots, reference_bytes
+                        assert reference_bytes({'file':str(thumb/(shared_hash+'_0.png'))},roots(folder,'111')) is None
+                        policy=folder/'mcp-chat-media-policy.json';saved=policy.read_bytes()
+                        try:
+                            for invalid in ([],{'local_roots':[]},{'local_roots':{'111':'private-path'}},{'local_roots':{'111':[42]}}):
+                                policy.write_text(json.dumps(invalid),'utf-8')
+                                with warnings.catch_warnings(record=True) as notices:
+                                    warnings.simplefilter('always');roots(folder,'111')
+                                assert len(notices)==1 and 'private-path' not in str(notices[0].message)
+                            policy.unlink()
                             with warnings.catch_warnings(record=True) as notices:
-                                warnings.simplefilter('always');roots(folder,'111')
-                            assert len(notices)==1 and 'private-path' not in str(notices[0].message)
-                        policy.unlink()
-                        with warnings.catch_warnings(record=True) as notices:
-                            roots(folder,'111')
-                        assert not notices
-                    finally:policy.write_bytes(saved)
-                    local_path=cache/'adapter.png';local_path.write_bytes(raw);DetailBot.image={'file':str(local_path)}
-                    adapter,_=add([dict(type='image',data={'file':'adapter-id','url':'https://gchat.qpic.cn/not-needed'})])
-                    with patch('chatlocal.mcp_chat_media.download',side_effect=AssertionError('adapter local bytes contacted remote')):
-                        assert call('read_chat_image',session_id=sid,event_id=adapter)['dimensions']==[64,48]
-                    DetailBot.image={'file':str(folder/'chats.sqlite3')}
-                    fallback,_=add([dict(type='image',data={'file':'bad-path','url':'https://gchat.qpic.cn/fallback'})])
-                    with patch('chatlocal.mcp_chat_media.download',return_value=raw) as download:
-                        call('read_chat_image',session_id=sid,event_id=fallback);assert download.call_count==1
-                    print('PASS: real local QQ layout, adapter local bytes, forbidden path rejection and network fallback')
+                                roots(folder,'111')
+                            assert not notices
+                        finally:policy.write_bytes(saved)
+                        local_path=cache/'adapter.png';local_path.write_bytes(raw);DetailBot.image={'file':str(local_path)}
+                        adapter,_=add([dict(type='image',data={'file':'adapter-id','url':'https://gchat.qpic.cn/not-needed'})])
+                        with patch('chatlocal.mcp_chat_media.download',side_effect=AssertionError('adapter local bytes contacted remote')):
+                            assert call('read_chat_image',session_id=sid,event_id=adapter)['dimensions']==[64,48]
+                        DetailBot.image={'file':str(folder/'chats.sqlite3')}
+                        fallback,_=add([dict(type='image',data={'file':'bad-path','url':'https://gchat.qpic.cn/fallback'})])
+                        with patch('chatlocal.mcp_chat_media.download',return_value=raw) as download:
+                            call('read_chat_image',session_id=sid,event_id=fallback);assert download.call_count==1
+                        print('PASS: real local QQ layout, adapter local bytes, forbidden path rejection and network fallback')
 
-                    version=packet()['session']['prompt_version']
-                    compact=call('get_chat_session',session_id=sid,response_format='compact',known_prompt_version=version)
-                    assert not compact['prompt_changed'] and 'persona' not in compact['session'] and 'instructions' not in compact
-                    assert compact['context']['messages'] and compact['input_batch']['plan_call'] and 'recent_operations' in compact
-                    refresh=call('get_chat_session',session_id=sid,response_format='compact',known_prompt_version='old')
-                    assert refresh['prompt_changed'] and refresh['chat_prompt']['persona']=='简短自然聊天' and 'behavior' in refresh['chat_prompt']
-                    with patch.object(tools.chat.details,'query',return_value=None):
-                        for _ in range(55):add()
-                        paged=call('get_chat_session',session_id=sid,response_format='compact',known_prompt_version=version)
-                    assert paged['context']['has_more'] and paged['next_call']['tool']=='wait_chat_messages'
-                    assert paged['next_call']['arguments']['acknowledge_through_id']==paged['context']['messages'][-1]['id']
-                    assert not DetailBot.sent,'Real reply not needed for enrichment acceptance'
-                    # This separate HTTP scenario has its own media allowance, after the many legacy image regressions above.
-                    with access.connect() as db:db.execute('DELETE FROM calls WHERE grant_id=?',(grant['id'],))
-                    asyncio.run(wire_page_guards(service,raw))
-                    asyncio.run(wire_nested(service,g['token'],raw))
-                    asyncio.run(wire_materials(service,g['token'],tools.chat,grant,raw))
-                    call('stop_chat_session',session_id=sid)
-                    print('PASS: compact recovery, full prompt refresh, preserved cursors/audit and pending pagination; no real QQ writes')
-    finally:upstream.shutdown();upstream.server_close();events.close()
+                        version=packet()['session']['prompt_version']
+                        compact=call('get_chat_session',session_id=sid,response_format='compact',known_prompt_version=version)
+                        assert not compact['prompt_changed'] and 'persona' not in compact['session'] and 'instructions' not in compact
+                        assert compact['context']['messages'] and compact['input_batch']['plan_call'] and 'recent_operations' in compact
+                        refresh=call('get_chat_session',session_id=sid,response_format='compact',known_prompt_version='old')
+                        assert refresh['prompt_changed'] and refresh['chat_prompt']['persona']=='简短自然聊天' and 'behavior' in refresh['chat_prompt']
+                        with patch.object(tools.chat.details,'query',return_value=None):
+                            for _ in range(55):add()
+                            paged=call('get_chat_session',session_id=sid,response_format='compact',known_prompt_version=version)
+                        assert paged['context']['has_more'] and paged['next_call']['tool']=='wait_chat_messages'
+                        assert paged['next_call']['arguments']['acknowledge_through_id']==paged['context']['messages'][-1]['id']
+                        assert not DetailBot.sent,'Real reply not needed for enrichment acceptance'
+                        # This separate HTTP scenario has its own media allowance, after the many legacy image regressions above.
+                        with access.connect() as db:db.execute('DELETE FROM calls WHERE grant_id=?',(grant['id'],))
+                        asyncio.run(wire_page_guards(service,raw))
+                        asyncio.run(wire_nested(service,g['token'],raw))
+                        asyncio.run(wire_materials(service,g['token'],tools.chat,grant,raw))
+                        call('stop_chat_session',session_id=sid)
+                        print('PASS: compact recovery, full prompt refresh, preserved cursors/audit and pending pagination; no real QQ writes')
+        finally:
+            events.close()
 
 
 if __name__=='__main__':main()

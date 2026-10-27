@@ -5,7 +5,6 @@ or manually chooses a learning stage. A fake clock drives batch/retry deadlines.
 All network targets are loopback fixtures; model results are deterministic.
 """
 from concurrent.futures import ThreadPoolExecutor
-from http.server import ThreadingHTTPServer
 import asyncio
 import base64
 import io
@@ -26,6 +25,7 @@ from PIL import Image
 sys.path.insert(0,str(Path(__file__).parent))
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from check_fixture_support import isolated_env, network_guard
+from fixture_server import fixture_server
 from check_mcp_reactions import ReactionBot,Events,ROOT
 from check_mcp_chat_enrichment import DetailBot, text
 from check_mcp_chat_media import fixture_image
@@ -321,137 +321,138 @@ def main():
     assert Path(__import__('chatlocal.mcp_language_learning',fromlist=['ChatLearning']).__file__).resolve()==ROOT/'chatlocal/mcp_language_learning.py'
     migration()
     events=Events();ReactionBot.sent=[];ReactionBot.writes=[];ReactionBot.intercept=None
-    upstream=ThreadingHTTPServer(('127.0.0.1',0),LearningBot)
-    threading.Thread(target=upstream.serve_forever,daemon=True).start()
-    ports={events.port,upstream.server_port};restrict,_=network_guard(ports)
-    try:
-        with tempfile.TemporaryDirectory() as tmp,patch.dict('os.environ',isolated_env(),clear=True),patch('socket.create_connection',restrict):
-            root=Path(tmp);data=Store(root/'chats.sqlite3')
-            (root/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{upstream.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n','utf-8')
-            with patch('chatlocal.onebot.ROOT',root),patch('chatlocal.message_sender.ROOT',root):
-                app=FastAPI();service=install_mcp_routes(app,data);tools=service.tools;access=service.access;chat=tools.chat
-                with TestClient(app) as ui:
-                    with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
-                    ports.add(port);access.configure(True,port);service.start()
-                    timer=[time.time()];chat.learning.store.clock=lambda:timer[0]
-                    cfg=dict(name='auto-fixture',platforms=['qq'],chat=True,send=True,conversations=[['qq','111:group:222']])
-                    g=access.create(cfg);headers={'X-ChatWeave-UI':'1'};serial=0
-                    def call(name,**args):return tools.call(g['token'],name,args,threading.Event()).structuredContent
-                    def key():
-                        nonlocal serial
-                        serial+=1;return f'fixture-{serial:04}'
-                    body=dict(connection_id=g['id'],conversation_id='111:group:222',persona_preset='little_whale_v2',idempotency_key=key())
-                    assert ui.post('/api/mcp/chats/start',json=body).status_code==403
-                    click=ui.post('/api/mcp/chats/start',json=body,headers=headers).json();sid=click['session_id']
-                    overview=ui.get('/api/mcp/chat-overview').json()['groups'][0]
-                    assert overview['learning_state']=='等待 Agent',overview
-                    # Usual host entrance resumes the UI session, without any learning command.
-                    start=call('start_chat_session',conversation_id='111:group:222',persona_preset='little_whale_v2',idempotency_key=key())
-                    assert start['session']['id']==sid and call('get_chat_learning',session_id=sid)['enabled']
-                    def receive(n,base=100):
-                        for i in range(n):chat.receive(dict(post_type='message',message_type='group',self_id=111,group_id=222,message_id=-base-i,user_id=333,
-                            time=int(time.time()),sender={'user_id':333},message=[dict(type='text',data={'text':f'合成表达 云朵开机 {i}'})]))
-                    def follow(link):
-                        args=dict(link['arguments'])
-                        if link['tool']=='wait_chat_messages':args.update(timeout_seconds=1,quiet_seconds=0)
-                        return call(link['tool'],**args)
-                    def silence(packet):
-                        assert packet['event']=='messages'
-                        decision=call('plan_chat_reply',session_id=sid,batch_id=packet['input_batch']['id'],idempotency_key=key(),action='silence',intent='合成场景潜水',expressions=[])
-                        assert decision['state']=='SILENT' and decision['next_call']['tool']=='wait_chat_messages',decision
-                        return decision['next_call']
-                    receive(10)
-                    packet=call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0)
-                    link=silence(packet);timer[0]+=29
-                    assert follow(link)['event']=='idle'
-                    # Clock, not claim or an eleventh message, seals the batch.
-                    timer[0]+=1;chat.learning.tick()
-                    with chat.learning.store.db() as db:assert db.execute('SELECT count(*) FROM batches').fetchone()[0]==1
-                    began=time.perf_counter();wake=follow(link);wake_ms=(time.perf_counter()-began)*1000
-                    assert wake['event']=='learning_ready' and wake['continue_waiting']
-                    # Chat arriving between wake and claim must win, without claiming or discarding a stage.
-                    receive(1,490)
-                    yielded=follow(wake['next_call'])
-                    assert yielded['state']=='no_task' and yielded['reason']=='chat_pending' and 'task' not in yielded
-                    assert yielded['next_call']==yielded['updated_chat']['next_call'] and yielded['next_call']['tool']=='plan_chat_reply'
-                    link=silence(yielded['updated_chat']);wake=follow(link)
-                    t=follow(wake['next_call'])['task'];assert t['stage']=='extract'
-                    assert follow(wake['next_call'])['state']=='no_task'
-                    began=time.perf_counter();busy=follow(link);lease_ms=(time.perf_counter()-began)*1000
-                    assert busy['event']=='idle' and lease_ms>=900
-                    # Model works on one stage while a fresh message arrives.
-                    receive(1,500)
-                    ids=[m['source_id'] for m in t['material']['messages']]
-                    result=dict(expressions=[expression_fixture(t['material']['messages'][i],'情境'+str(i),'方式'+str(i)) for i in range(3)])
-                    submitted=call('submit_chat_learning',**t['submit_call']['arguments'],invocation_id=key(),result=result)
-                    assert call('claim_chat_learning',session_id=sid)['reason']=='chat_pending'
-                    assert submitted['next_call']==submitted['updated_chat']['next_call'] and submitted['next_call']['tool']=='plan_chat_reply'
-                    packet=submitted['updated_chat'];assert packet['event']=='messages'
-                    link=silence(packet);wake=follow(link);assert wake['event']=='learning_ready'
-                    tj=follow(wake['next_call'])['task'];assert tj['stage']=='extract_jargon'
-                    sj=call('submit_chat_learning',**tj['submit_call']['arguments'],invocation_id=key(),result=jargon_fixture(tj))
-                    wake=follow(sj['next_call']);assert wake['event']=='learning_ready'
-                    t2=follow(wake['next_call'])['task'];assert t2['stage']=='review'
-                    checked=review_fixture(t2)
-                    final=call('submit_chat_learning',**t2['submit_call']['arguments'],invocation_id=key(),result=checked)
-                    assert call('submit_chat_learning',**t2['submit_call']['arguments'],invocation_id=key(),result=checked)['state']=='already_completed'
-                    assert final['state']=='completed';idle=follow(final['next_call']);assert idle['event']=='idle'
-                    # Empty wait is bounded, no immediate no-task spin.
-                    began=time.perf_counter();idle=follow(final['next_call']);idle_ms=(time.perf_counter()-began)*1000
-                    assert idle['event']=='idle' and 900<=idle_ms<2500,(idle['event'],round(idle_ms,2))
-                    library=ui.get('/api/mcp/chat-library',params={'conversation_id':'111:group:222'}).json()
-                    assert library['library']['checked_expressions']==3 and not library['library']['expressions_in_use']
-                    assert library['library']['known_jargon']==0 and library['library']['observing_jargon']==1
-                    assert library['run']['completed_batches']==1 and library['library']['last_completed_at']
-                    # Budget cannot be reset by reconnecting/new grant.
-                    budget_change=dict(conversation_id='111:group:222',change=dict(hourly_calls=2))
-                    assert ui.post('/api/mcp/chat-library',json=budget_change,headers=headers).json()['hourly_call_budget']==2
-                    timer[0]+=31;receive(10,600)
-                    packet=follow(final['next_call']);link=silence(packet)
-                    began=time.perf_counter();idle=follow(link);budget_ms=(time.perf_counter()-began)*1000
-                    assert idle['event']=='idle' and budget_ms>=900
-                    assert ui.get('/api/mcp/chat-overview').json()['groups'][0]['learning_state']=='预算暂停'
-                    budget_change['change']['hourly_calls']=8
-                    assert ui.post('/api/mcp/chat-library',json=budget_change,headers=headers).json()['hourly_call_budget']==8
-                    wake=follow(link);t=follow(wake['next_call'])['task']
-                    failed=call('submit_chat_learning',**t['submit_call']['arguments'],invocation_id=key(),failure='timeout')
-                    # A cooling expression task must not block jargon work.
-                    jwake=follow(failed['next_call']);assert jwake['event']=='learning_ready'
-                    jt=follow(jwake['next_call'])['task'];assert jt['stage']=='extract_jargon'
-                    jf=call('submit_chat_learning',**jt['submit_call']['arguments'],invocation_id=key(),result=dict(jargon=[]))
-                    began=time.perf_counter();cool=follow(failed['next_call']);cooldown_ms=(time.perf_counter()-began)*1000
-                    assert cool['event']=='idle' and cooldown_ms>=900
-                    timer[0]+=15;wake=follow(failed['next_call']);t=follow(wake['next_call'])['task']
-                    call('stop_chat_session',session_id=sid)
-                    assert call('submit_chat_learning',**t['submit_call']['arguments'],invocation_id=key(),result=result).get('state')!='completed'
-                    chat.receiver.stop()
-                    retained=ui.get('/api/mcp/chat-library',params={'conversation_id':'111:group:222'}).json()
-                    assert retained['expression_count']==3 and retained['jargon_count']==1
-                    assert ui.get('/api/mcp/chat-overview').json()['groups'][0]['learning_state']=='积累已保留'
-                    access.revoke(g['id']);old=g;g=access.create(cfg)
-                    start=call('start_chat_session',conversation_id='111:group:222',persona_preset='little_whale_v2',idempotency_key=key());sid=start['session']['id']
-                    current=call('get_chat_learning',session_id=sid)
-                    assert current['enabled'] and current['expression_count']==3 and current['jargon_count']==1 and current['run']['completed_batches']==0
-                    assert current['hourly_call_budget']==8
-                    from chatlocal.mcp_access import AccessDenied
-                    try:tools.call(old['token'],'get_chat_learning',dict(session_id=sid),threading.Event())
-                    except AccessDenied:pass
-                    else:raise AssertionError('revoked token regained access')
-                    # UI pause persists; same-account new grants cannot undo it.
-                    change=dict(conversation_id='111:group:222',change=dict(enabled=False))
-                    assert ui.post('/api/mcp/chat-library',json=change,headers=headers).json()['enabled'] is False
-                    call('stop_chat_session',session_id=sid);g=access.create(cfg)
-                    sid=call('start_chat_session',conversation_id='111:group:222',persona_preset='little_whale_v2',idempotency_key=key())['session']['id']
-                    assert not call('get_chat_learning',session_id=sid)['enabled']
-                    assert not ReactionBot.sent and not ReactionBot.writes
-                    cost=dict(wake_ms=round(wake_ms,2),empty_wait_ms=round(idle_ms,2),budget_wait_ms=round(budget_ms,2),lease_wait_ms=round(lease_ms,2),cooldown_wait_ms=round(cooldown_ms,2),completed_model_stages=3,
-                              expression_count=3,jargon_candidates=1,new_model_services=0,qq_writes=0,
-                              host_boundary='one in-flight stage; lease 120s, host generation cannot be interrupted')
-                    print('PASS start→silence→timer→wait→one stage→new chat first→review→persist→stop/revoke/new grant')
-                    print(json.dumps(cost,ensure_ascii=False))
-                    asyncio.run(handoff_wire(service))
-                    asyncio.run(receipt_guards(service))
-    finally:upstream.shutdown();events.close()
+    allowed_ports={events.port}
+    with fixture_server(LearningBot, ports=allowed_ports) as upstream:
+        restrict,_=network_guard(allowed_ports)
+        try:
+            with tempfile.TemporaryDirectory() as tmp,patch.dict('os.environ',isolated_env(),clear=True),patch('socket.create_connection',restrict):
+                root=Path(tmp);data=Store(root/'chats.sqlite3')
+                (root/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{upstream.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n','utf-8')
+                with patch('chatlocal.onebot.ROOT',root),patch('chatlocal.message_sender.ROOT',root):
+                    app=FastAPI();service=install_mcp_routes(app,data);tools=service.tools;access=service.access;chat=tools.chat
+                    with TestClient(app) as ui:
+                        with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
+                        allowed_ports.add(port);access.configure(True,port);service.start()
+                        timer=[time.time()];chat.learning.store.clock=lambda:timer[0]
+                        cfg=dict(name='auto-fixture',platforms=['qq'],chat=True,send=True,conversations=[['qq','111:group:222']])
+                        g=access.create(cfg);headers={'X-ChatWeave-UI':'1'};serial=0
+                        def call(name,**args):return tools.call(g['token'],name,args,threading.Event()).structuredContent
+                        def key():
+                            nonlocal serial
+                            serial+=1;return f'fixture-{serial:04}'
+                        body=dict(connection_id=g['id'],conversation_id='111:group:222',persona_preset='little_whale_v2',idempotency_key=key())
+                        assert ui.post('/api/mcp/chats/start',json=body).status_code==403
+                        click=ui.post('/api/mcp/chats/start',json=body,headers=headers).json();sid=click['session_id']
+                        overview=ui.get('/api/mcp/chat-overview').json()['groups'][0]
+                        assert overview['learning_state']=='等待 Agent',overview
+                        # Usual host entrance resumes the UI session, without any learning command.
+                        start=call('start_chat_session',conversation_id='111:group:222',persona_preset='little_whale_v2',idempotency_key=key())
+                        assert start['session']['id']==sid and call('get_chat_learning',session_id=sid)['enabled']
+                        def receive(n,base=100):
+                            for i in range(n):chat.receive(dict(post_type='message',message_type='group',self_id=111,group_id=222,message_id=-base-i,user_id=333,
+                                time=int(time.time()),sender={'user_id':333},message=[dict(type='text',data={'text':f'合成表达 云朵开机 {i}'})]))
+                        def follow(link):
+                            args=dict(link['arguments'])
+                            if link['tool']=='wait_chat_messages':args.update(timeout_seconds=1,quiet_seconds=0)
+                            return call(link['tool'],**args)
+                        def silence(packet):
+                            assert packet['event']=='messages'
+                            decision=call('plan_chat_reply',session_id=sid,batch_id=packet['input_batch']['id'],idempotency_key=key(),action='silence',intent='合成场景潜水',expressions=[])
+                            assert decision['state']=='SILENT' and decision['next_call']['tool']=='wait_chat_messages',decision
+                            return decision['next_call']
+                        receive(10)
+                        packet=call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0)
+                        link=silence(packet);timer[0]+=29
+                        assert follow(link)['event']=='idle'
+                        # Clock, not claim or an eleventh message, seals the batch.
+                        timer[0]+=1;chat.learning.tick()
+                        with chat.learning.store.db() as db:assert db.execute('SELECT count(*) FROM batches').fetchone()[0]==1
+                        began=time.perf_counter();wake=follow(link);wake_ms=(time.perf_counter()-began)*1000
+                        assert wake['event']=='learning_ready' and wake['continue_waiting']
+                        # Chat arriving between wake and claim must win, without claiming or discarding a stage.
+                        receive(1,490)
+                        yielded=follow(wake['next_call'])
+                        assert yielded['state']=='no_task' and yielded['reason']=='chat_pending' and 'task' not in yielded
+                        assert yielded['next_call']==yielded['updated_chat']['next_call'] and yielded['next_call']['tool']=='plan_chat_reply'
+                        link=silence(yielded['updated_chat']);wake=follow(link)
+                        t=follow(wake['next_call'])['task'];assert t['stage']=='extract'
+                        assert follow(wake['next_call'])['state']=='no_task'
+                        began=time.perf_counter();busy=follow(link);lease_ms=(time.perf_counter()-began)*1000
+                        assert busy['event']=='idle' and lease_ms>=900
+                        # Model works on one stage while a fresh message arrives.
+                        receive(1,500)
+                        ids=[m['source_id'] for m in t['material']['messages']]
+                        result=dict(expressions=[expression_fixture(t['material']['messages'][i],'情境'+str(i),'方式'+str(i)) for i in range(3)])
+                        submitted=call('submit_chat_learning',**t['submit_call']['arguments'],invocation_id=key(),result=result)
+                        assert call('claim_chat_learning',session_id=sid)['reason']=='chat_pending'
+                        assert submitted['next_call']==submitted['updated_chat']['next_call'] and submitted['next_call']['tool']=='plan_chat_reply'
+                        packet=submitted['updated_chat'];assert packet['event']=='messages'
+                        link=silence(packet);wake=follow(link);assert wake['event']=='learning_ready'
+                        tj=follow(wake['next_call'])['task'];assert tj['stage']=='extract_jargon'
+                        sj=call('submit_chat_learning',**tj['submit_call']['arguments'],invocation_id=key(),result=jargon_fixture(tj))
+                        wake=follow(sj['next_call']);assert wake['event']=='learning_ready'
+                        t2=follow(wake['next_call'])['task'];assert t2['stage']=='review'
+                        checked=review_fixture(t2)
+                        final=call('submit_chat_learning',**t2['submit_call']['arguments'],invocation_id=key(),result=checked)
+                        assert call('submit_chat_learning',**t2['submit_call']['arguments'],invocation_id=key(),result=checked)['state']=='already_completed'
+                        assert final['state']=='completed';idle=follow(final['next_call']);assert idle['event']=='idle'
+                        # Empty wait is bounded, no immediate no-task spin.
+                        began=time.perf_counter();idle=follow(final['next_call']);idle_ms=(time.perf_counter()-began)*1000
+                        assert idle['event']=='idle' and 900<=idle_ms<2500,(idle['event'],round(idle_ms,2))
+                        library=ui.get('/api/mcp/chat-library',params={'conversation_id':'111:group:222'}).json()
+                        assert library['library']['checked_expressions']==3 and not library['library']['expressions_in_use']
+                        assert library['library']['known_jargon']==0 and library['library']['observing_jargon']==1
+                        assert library['run']['completed_batches']==1 and library['library']['last_completed_at']
+                        # Budget cannot be reset by reconnecting/new grant.
+                        budget_change=dict(conversation_id='111:group:222',change=dict(hourly_calls=2))
+                        assert ui.post('/api/mcp/chat-library',json=budget_change,headers=headers).json()['hourly_call_budget']==2
+                        timer[0]+=31;receive(10,600)
+                        packet=follow(final['next_call']);link=silence(packet)
+                        began=time.perf_counter();idle=follow(link);budget_ms=(time.perf_counter()-began)*1000
+                        assert idle['event']=='idle' and budget_ms>=900
+                        assert ui.get('/api/mcp/chat-overview').json()['groups'][0]['learning_state']=='预算暂停'
+                        budget_change['change']['hourly_calls']=8
+                        assert ui.post('/api/mcp/chat-library',json=budget_change,headers=headers).json()['hourly_call_budget']==8
+                        wake=follow(link);t=follow(wake['next_call'])['task']
+                        failed=call('submit_chat_learning',**t['submit_call']['arguments'],invocation_id=key(),failure='timeout')
+                        # A cooling expression task must not block jargon work.
+                        jwake=follow(failed['next_call']);assert jwake['event']=='learning_ready'
+                        jt=follow(jwake['next_call'])['task'];assert jt['stage']=='extract_jargon'
+                        jf=call('submit_chat_learning',**jt['submit_call']['arguments'],invocation_id=key(),result=dict(jargon=[]))
+                        began=time.perf_counter();cool=follow(failed['next_call']);cooldown_ms=(time.perf_counter()-began)*1000
+                        assert cool['event']=='idle' and cooldown_ms>=900
+                        timer[0]+=15;wake=follow(failed['next_call']);t=follow(wake['next_call'])['task']
+                        call('stop_chat_session',session_id=sid)
+                        assert call('submit_chat_learning',**t['submit_call']['arguments'],invocation_id=key(),result=result).get('state')!='completed'
+                        chat.receiver.stop()
+                        retained=ui.get('/api/mcp/chat-library',params={'conversation_id':'111:group:222'}).json()
+                        assert retained['expression_count']==3 and retained['jargon_count']==1
+                        assert ui.get('/api/mcp/chat-overview').json()['groups'][0]['learning_state']=='积累已保留'
+                        access.revoke(g['id']);old=g;g=access.create(cfg)
+                        start=call('start_chat_session',conversation_id='111:group:222',persona_preset='little_whale_v2',idempotency_key=key());sid=start['session']['id']
+                        current=call('get_chat_learning',session_id=sid)
+                        assert current['enabled'] and current['expression_count']==3 and current['jargon_count']==1 and current['run']['completed_batches']==0
+                        assert current['hourly_call_budget']==8
+                        from chatlocal.mcp_access import AccessDenied
+                        try:tools.call(old['token'],'get_chat_learning',dict(session_id=sid),threading.Event())
+                        except AccessDenied:pass
+                        else:raise AssertionError('revoked token regained access')
+                        # UI pause persists; same-account new grants cannot undo it.
+                        change=dict(conversation_id='111:group:222',change=dict(enabled=False))
+                        assert ui.post('/api/mcp/chat-library',json=change,headers=headers).json()['enabled'] is False
+                        call('stop_chat_session',session_id=sid);g=access.create(cfg)
+                        sid=call('start_chat_session',conversation_id='111:group:222',persona_preset='little_whale_v2',idempotency_key=key())['session']['id']
+                        assert not call('get_chat_learning',session_id=sid)['enabled']
+                        assert not ReactionBot.sent and not ReactionBot.writes
+                        cost=dict(wake_ms=round(wake_ms,2),empty_wait_ms=round(idle_ms,2),budget_wait_ms=round(budget_ms,2),lease_wait_ms=round(lease_ms,2),cooldown_wait_ms=round(cooldown_ms,2),completed_model_stages=3,
+                                  expression_count=3,jargon_candidates=1,new_model_services=0,qq_writes=0,
+                                  host_boundary='one in-flight stage; lease 120s, host generation cannot be interrupted')
+                        print('PASS start→silence→timer→wait→one stage→new chat first→review→persist→stop/revoke/new grant')
+                        print(json.dumps(cost,ensure_ascii=False))
+                        asyncio.run(handoff_wire(service))
+                        asyncio.run(receipt_guards(service))
+        finally:
+            events.close()
 
 
 if __name__=='__main__':main()

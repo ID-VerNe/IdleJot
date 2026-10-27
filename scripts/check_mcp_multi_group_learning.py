@@ -5,7 +5,6 @@ runtime with temporary state, using the same fixtures as the existing MCP suite.
 """
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from http.server import ThreadingHTTPServer
 import json
 from pathlib import Path
 import socket
@@ -17,6 +16,7 @@ from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from check_fixture_support import isolated_env, network_guard
+from fixture_server import fixture_server
 from check_mcp_language_learning import Clock,ROOT,expression_fixture,review_fixture,jargon_fixture
 from check_mcp_reactions import ReactionBot,Events
 from chatlocal.mcp_language_store import LanguageStore,LearningError,digest
@@ -114,68 +114,69 @@ async def wire(service,token):
 
 def integration():
     events=Events();ReactionBot.sent=[];ReactionBot.writes=[];ReactionBot.intercept=None
-    server=ThreadingHTTPServer(('127.0.0.1',0),ReactionBot)
-    threading.Thread(target=server.serve_forever,daemon=True).start()
-    ports={events.port,server.server_port};restrict,_=network_guard(ports)
-    try:
-        with tempfile.TemporaryDirectory(prefix='tulpa-multigroup-mcp-') as tmp,patch.dict('os.environ',isolated_env(),clear=True),patch('socket.create_connection',restrict):
-            root=Path(tmp);history=Store(root/'chats.sqlite3')
-            (root/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{server.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n','utf-8')
-            with patch('chatlocal.onebot.ROOT',root),patch('chatlocal.message_sender.ROOT',root):
-                service=install_mcp_routes(app:=FastAPI(),history);tools=service.tools;chat=tools.chat;access=service.access
-                with TestClient(app) as ui:
-                    with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
-                    ports.add(port);access.configure(True,port);service.start()
-                    cfg=dict(name='shared-connection',platforms=['qq'],chat=True,send=True,conversations=[['qq',f'111:group:{g}'] for g in (222,223)])
-                    credential=access.create(cfg);serial=0
-                    def call(name,**args):return tools.call(credential['token'],name,args,threading.Event()).structuredContent
-                    def key():
-                        nonlocal serial
-                        serial+=1;return f'multi-fixture-{serial}'
-                    assert call('get_chat_learning',conversation_id='111:group:222')['expression_count']==0
-                    assert not chat.listed()
-                    assert call('get_chat_learning')['error_code']=='invalid_learning_target'
-                    sessions={g:call('start_chat_session',conversation_id=f'111:group:{g}',persona_preset='little_whale_v2',idempotency_key=key())['session']['id'] for g in (222,223)}
-                    timer=[time.time()];chat.learning.store.clock=lambda:timer[0]
-                    with patch.object(history,'connect',side_effect=AssertionError('history accessed')):
-                        for group in sessions:
-                            for i in range(10):chat.receive(dict(post_type='message',message_type='group',self_id=111,group_id=group,message_id=-100-i,user_id=333,
-                                time=int(time.time()),sender={'user_id':333},message=[dict(type='text',data={'text':f'云朵开机 合成群{group} {i}'})]))
-                        timer[0]+=31;chat.learning.tick()
-                        for group,sid in sessions.items():
-                            packet=call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0)
-                            decision=call('plan_chat_reply',session_id=sid,batch_id=packet['input_batch']['id'],action='silence',intent='只观察合成群友',expressions=[],idempotency_key=key())
-                            assert decision['state']=='SILENT'
-                            args=dict(decision['next_call']['arguments'],timeout_seconds=1,quiet_seconds=0)
-                            for expected in ('extract','extract_jargon','review'):
-                                wake=call('wait_chat_messages',**args);assert wake['event']=='learning_ready',wake
-                                task=call('claim_chat_learning',**wake['next_call']['arguments'],context_id='one-host-context')['task']
-                                assert task['stage']==expected and task['library_key']==f'qq:111:group:{group}'
-                                if expected=='extract':result=dict(expressions=[expression_fixture(m,'合成场景'+str(i),'表达'+str(i)) for i,m in enumerate(task['material']['messages'][:3])])
-                                elif expected=='extract_jargon':result=jargon_fixture(task)
-                                else:result=review_fixture(task)
-                                foreign=call('submit_chat_learning',session_id=sessions[223 if group==222 else 222],job_id=task['job_id'],lease=task['lease'],invocation_id=key(),result=result)
-                                assert foreign['error_code']=='task_unavailable'
-                                completed=call('submit_chat_learning',**task['submit_call']['arguments'],invocation_id=key(),result=result)
-                                assert completed['state'] in ('stage_completed','completed')
-                    groups=ui.get('/api/mcp/chat-overview').json()['groups']
-                    assert len(groups)==2 and all(g['learning']['expression_count']==3 and not g.get('error') for g in groups)
-                    asyncio.run(wire(service,credential['token']))
-                    assert call('get_chat_learning',conversation_id='999:group:222').get('expression_count') is None
-                    assert call('get_chat_learning',conversation_id='111:group:999').get('expression_count') is None
-                    assert call('get_chat_learning',session_id=sessions[222],conversation_id='111:group:222')['error_code']=='invalid_learning_target'
-                    for sid in sessions.values():call('stop_chat_session',session_id=sid)
-                    chat.receiver.stop()
-                    saved=call('get_chat_learning',conversation_id='111:group:222',records=True)
-                    old=credential;access.revoke(old['id']);credential=access.create(cfg)
-                    assert call('get_chat_learning',conversation_id='111:group:222',records=True)['expressions']==saved['expressions']
-                    try:tools.call(old['token'],'get_chat_learning',dict(conversation_id='111:group:222'),threading.Event())
-                    except AccessDenied:pass
-                    else:raise AssertionError('revoked credential regained access')
-                    assert not ReactionBot.sent and not ReactionBot.writes
-                    print(json.dumps(dict(status='passed',groups=2,shared_grants=1,synthetic_peer_messages=20,model_stages=6,
-                        historical_reads=0,qq_writes=0,mcp_http='passed',local_overview='both libraries visible',offline_read='passed',revoke='denied'),ensure_ascii=False))
-    finally:server.shutdown();events.close()
+    allowed_ports={events.port}
+    with fixture_server(ReactionBot, ports=allowed_ports) as server:
+        restrict,_=network_guard(allowed_ports)
+        try:
+            with tempfile.TemporaryDirectory(prefix='tulpa-multigroup-mcp-') as tmp,patch.dict('os.environ',isolated_env(),clear=True),patch('socket.create_connection',restrict):
+                root=Path(tmp);history=Store(root/'chats.sqlite3')
+                (root/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{server.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n','utf-8')
+                with patch('chatlocal.onebot.ROOT',root),patch('chatlocal.message_sender.ROOT',root):
+                    service=install_mcp_routes(app:=FastAPI(),history);tools=service.tools;chat=tools.chat;access=service.access
+                    with TestClient(app) as ui:
+                        with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
+                        allowed_ports.add(port);access.configure(True,port);service.start()
+                        cfg=dict(name='shared-connection',platforms=['qq'],chat=True,send=True,conversations=[['qq',f'111:group:{g}'] for g in (222,223)])
+                        credential=access.create(cfg);serial=0
+                        def call(name,**args):return tools.call(credential['token'],name,args,threading.Event()).structuredContent
+                        def key():
+                            nonlocal serial
+                            serial+=1;return f'multi-fixture-{serial}'
+                        assert call('get_chat_learning',conversation_id='111:group:222')['expression_count']==0
+                        assert not chat.listed()
+                        assert call('get_chat_learning')['error_code']=='invalid_learning_target'
+                        sessions={g:call('start_chat_session',conversation_id=f'111:group:{g}',persona_preset='little_whale_v2',idempotency_key=key())['session']['id'] for g in (222,223)}
+                        timer=[time.time()];chat.learning.store.clock=lambda:timer[0]
+                        with patch.object(history,'connect',side_effect=AssertionError('history accessed')):
+                            for group in sessions:
+                                for i in range(10):chat.receive(dict(post_type='message',message_type='group',self_id=111,group_id=group,message_id=-100-i,user_id=333,
+                                    time=int(time.time()),sender={'user_id':333},message=[dict(type='text',data={'text':f'云朵开机 合成群{group} {i}'})]))
+                            timer[0]+=31;chat.learning.tick()
+                            for group,sid in sessions.items():
+                                packet=call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0)
+                                decision=call('plan_chat_reply',session_id=sid,batch_id=packet['input_batch']['id'],action='silence',intent='只观察合成群友',expressions=[],idempotency_key=key())
+                                assert decision['state']=='SILENT'
+                                args=dict(decision['next_call']['arguments'],timeout_seconds=1,quiet_seconds=0)
+                                for expected in ('extract','extract_jargon','review'):
+                                    wake=call('wait_chat_messages',**args);assert wake['event']=='learning_ready',wake
+                                    task=call('claim_chat_learning',**wake['next_call']['arguments'],context_id='one-host-context')['task']
+                                    assert task['stage']==expected and task['library_key']==f'qq:111:group:{group}'
+                                    if expected=='extract':result=dict(expressions=[expression_fixture(m,'合成场景'+str(i),'表达'+str(i)) for i,m in enumerate(task['material']['messages'][:3])])
+                                    elif expected=='extract_jargon':result=jargon_fixture(task)
+                                    else:result=review_fixture(task)
+                                    foreign=call('submit_chat_learning',session_id=sessions[223 if group==222 else 222],job_id=task['job_id'],lease=task['lease'],invocation_id=key(),result=result)
+                                    assert foreign['error_code']=='task_unavailable'
+                                    completed=call('submit_chat_learning',**task['submit_call']['arguments'],invocation_id=key(),result=result)
+                                    assert completed['state'] in ('stage_completed','completed')
+                        groups=ui.get('/api/mcp/chat-overview').json()['groups']
+                        assert len(groups)==2 and all(g['learning']['expression_count']==3 and not g.get('error') for g in groups)
+                        asyncio.run(wire(service,credential['token']))
+                        assert call('get_chat_learning',conversation_id='999:group:222').get('expression_count') is None
+                        assert call('get_chat_learning',conversation_id='111:group:999').get('expression_count') is None
+                        assert call('get_chat_learning',session_id=sessions[222],conversation_id='111:group:222')['error_code']=='invalid_learning_target'
+                        for sid in sessions.values():call('stop_chat_session',session_id=sid)
+                        chat.receiver.stop()
+                        saved=call('get_chat_learning',conversation_id='111:group:222',records=True)
+                        old=credential;access.revoke(old['id']);credential=access.create(cfg)
+                        assert call('get_chat_learning',conversation_id='111:group:222',records=True)['expressions']==saved['expressions']
+                        try:tools.call(old['token'],'get_chat_learning',dict(conversation_id='111:group:222'),threading.Event())
+                        except AccessDenied:pass
+                        else:raise AssertionError('revoked credential regained access')
+                        assert not ReactionBot.sent and not ReactionBot.writes
+                        print(json.dumps(dict(status='passed',groups=2,shared_grants=1,synthetic_peer_messages=20,model_stages=6,
+                            historical_reads=0,qq_writes=0,mcp_http='passed',local_overview='both libraries visible',offline_read='passed',revoke='denied'),ensure_ascii=False))
+        finally:
+            events.close()
 
 
 if __name__=='__main__':

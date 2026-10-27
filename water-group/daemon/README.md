@@ -44,6 +44,7 @@
 | `wg_heartbeat` | 采集器最后一次完成循环的时间，供总监护判活 |
 | `wg_session.txt` | 当前会话 id |
 | `mcp_token.txt` | 当前授权 token |
+| `wg_send_failure.json` | 上一次发送失败的账本（真实 retcode / 禁言时刻 / 是否已恢复，issue #132）。禁言时刻是**失败那一刻的预测**，所以 `reply.py --list` 打表头前会复查一次（`mute_until` 到点且 `recovered` 未定时现查 `shut_up_timestamp`，issue #145）：实测解禁就写 `recovered_at` 并改口说「实测解禁」，查不动就降级成「未复查 / 复查未能确认」——不再拿过期预测当此刻的事实 |
 
 ## 时间基准
 

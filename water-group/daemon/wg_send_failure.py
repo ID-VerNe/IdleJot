@@ -43,6 +43,8 @@ from wg_paths import state_dir  # noqa: E402
 LEDGER = state_dir() / "wg_send_failure.json"
 # 解禁后多等几秒：QQ 的禁言判定与本地时钟都有秒级抖动，卡在边界上会白等一轮。
 UNMUTE_MARGIN = 5
+# 只读入口的复查最短间隔（issue #145）：同一分钟内被反复叫起时不再重复打接口。
+RECHECK_AFTER = 60
 # 打桩点：`--wait-unmute` 的睡眠由这里走，门禁按调用记录判定「预算内不硬等」。
 SLEEP = time.sleep
 
@@ -209,14 +211,26 @@ def record(group_id, failure, mute=None, mute_until=None, recovered=None, now=No
              "retcode": (failure or {}).get("retcode"),
              "reason": describe(failure),
              "mute_until": int(mute_until) if mute_until else None,
-             "recovered": recovered}
+             "recovered": recovered,
+             # 复查三件套（issue #145）：`recovered_at` 是「实测解禁」的时刻，
+             # `rechecked_at` 是最后一次复查尝试（成功与否都写，用来限流），
+             # `group_shut` 是复查时读到的 group_all_shut。新失败从零开始记。
+             "recovered_at": None,
+             "rechecked_at": None,
+             "group_shut": None}
+    _write(entry)
+
+
+def _write(entry):
+    """原子替换账本；写不进返回 False（调用方不许因此崩）。"""
     try:
         LEDGER.parent.mkdir(parents=True, exist_ok=True)
         tmp = LEDGER.with_name(LEDGER.name + ".tmp")
         tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, LEDGER)
     except OSError:
-        pass
+        return False
+    return True
 
 
 def read():
@@ -236,19 +250,23 @@ def clear():
         pass
 
 
-def last_line():
+def last_line(now=None):
     """`reply.py --list` 表头的一行：上一次为什么没发出去（没有记录时返回空串）。
 
     空串=不造假事实：与 `wg_gap.describe()` 同口径，恒加注脚的实现红在「一次都没
     失败过也报一句」上。
+
+    禁言尾巴按**现在**分档（issue #145）：`mute_until` 是失败那一刻冻结的预测，
+    过期之后继续打「禁言至 HH:MM:SS」等于把一小时前的推断当成此刻的事实。四档
+    互不冒充：仍在禁言（未来时刻）/ 实测解禁（`recovered_at`）/ 到点未复查 /
+    复查未能确认。
     """
+    moment = time.time() if now is None else float(now)
     rec = read()
     if not rec:
         return ""
-    tail = ""
-    if rec.get("mute_until"):
-        tail = f"；禁言至 {wg_clock.clock(rec.get('mute_until'))}"
-    if rec.get("recovered") is True:
+    tail = _mute_tail(rec, moment)
+    if rec.get("recovered") is True and not rec.get("recovered_at"):
         tail += "，本次调用内已补发成功"
     elif rec.get("recovered") is False:
         tail += "，补发未成功"
@@ -256,8 +274,112 @@ def last_line():
             f"group={rec.get('group_id') or '?'} {rec.get('reason') or '原因未记录'}{tail}")
 
 
+def _mute_tail(rec, moment):
+    """禁言那一段的话术：只在拿得到事实时下结论，拿不到就说「未确认」。"""
+    until = rec.get("mute_until")
+    try:
+        until = int(until) if until else 0
+    except (TypeError, ValueError):
+        until = 0
+    recovered_at = rec.get("recovered_at")
+    rechecked_at = rec.get("rechecked_at")
+    if recovered_at:
+        return (f"；禁言已于 {wg_clock.clock(recovered_at)} 实测解禁"
+                + (f"（原判 {wg_clock.clock(until)}）" if until else ""))
+    if rec.get("recovered") is True:
+        # 补发成功本身就是「禁言不再是障碍」的最强证据，禁言尾巴这时只剩噪音。
+        return ""
+    if until > moment:
+        return f"；禁言至 {wg_clock.clock(until)}（还剩 {int(until - moment)} 秒）"
+    if rec.get("group_shut") is True:
+        when = f"（{wg_clock.clock(rechecked_at)} 复查）" if rechecked_at else ""
+        return f"；全员禁言，解禁时刻未知{when}"
+    if until and rechecked_at:
+        return (f"；禁言应已于 {wg_clock.clock(until)} 解除，"
+                f"{wg_clock.clock(rechecked_at)} 复查未能确认")
+    if until:
+        return f"；禁言应已于 {wg_clock.clock(until)} 解除（未复查）"
+    return ""
+
+
+def recheck(post=None, now=None):
+    """账本说禁言到点了，就现查一次 OneBot 并把结论写回账本（issue #145）。
+
+    issue #145 的现场：账本把禁言时刻冻结在失败那一刻，管理员提前解禁后**没有任何
+    入口**会重新探测；`reply.py --list` 继续报「禁言至 11:18:29」，Agent 据此放弃
+    回待回的唤醒，而此刻 `send_group_msg` 完全能发出去。`recovered` 字段从 #132
+    起就写着「供以后核对」，却只有读、没有写。
+
+    只在**确实需要**时才发请求（四个前置全满足）：账本存在、`mute_until` 已到点、
+    `recovered` 还没有结论、距上次复查超过 `RECHECK_AFTER` 秒。未过期不打扰
+    OneBot——「还在禁言」不需要复查，账本那一刻的预测仍然成立。
+
+    三档结论互不冒充，沿用 #132 的纪律（假事实比没有输出更坏）：
+      - 现查 `shut_up_timestamp` 仍在未来 → 以现查到的时刻为准（管理员又禁了一次）；
+      - 现查为 0 且 `group_all_shut` 明确为 False → 写 `recovered=True` +
+        `recovered_at`，这是**实测**解禁，不是推断；
+      - 探测失败 / `group_all_shut` 读不到 / 全员禁言 → 只留 `rechecked_at`，
+        措辞降级成「复查未能确认」，不冒充解禁。
+
+    返回是否改写了账本；任何异常都吞掉——只读入口不许因为一次探测失败整条崩。
+    """
+    moment = time.time() if now is None else float(now)
+    rec = read()
+    if not rec or rec.get("recovered") is not None:
+        return False
+    try:
+        until = int(rec.get("mute_until") or 0)
+    except (TypeError, ValueError):
+        return False
+    if not until or until > moment:
+        return False
+    last_try = rec.get("rechecked_at")
+    try:
+        if last_try and moment - float(last_try) < RECHECK_AFTER:
+            return False
+    except (TypeError, ValueError):
+        pass
+    group_id = str(rec.get("group_id") or "")
+    account = str(wg_config.config().get("self_account") or "")
+    if not group_id or not account:
+        return False
+    try:
+        gid, uid = int(group_id), int(account)
+    except (TypeError, ValueError):
+        return False
+    post = post or _post
+    fresh = dict(rec)
+    fresh["rechecked_at"] = int(moment)
+    try:
+        member = post("get_group_member_info",
+                      {"group_id": gid, "user_id": uid, "no_cache": True})
+    except Exception:  # noqa: BLE001  复查失败只留时间戳，措辞降级成「未能确认」
+        return _write(fresh)
+    try:
+        shut = int(member.get("shut_up_timestamp") or 0)
+    except (TypeError, ValueError):
+        shut = 0
+    scope = _all_shut(post, gid)
+    fresh["group_shut"] = scope
+    if shut > moment:
+        # 现查比账本更新：以现查为准，别拿过期时刻继续骗自己。
+        fresh["mute_until"] = shut
+    elif scope is False:
+        fresh["recovered"] = True
+        fresh["recovered_at"] = int(moment)
+    return _write(fresh)
+
+
 def print_last():
-    """`reply.py --list` 抬头调一次：有失败记录才出声，没有就一句不说。"""
+    """`reply.py --list` 抬头调一次：有失败记录才出声，没有就一句不说。
+
+    issue #145：账本里的禁言时刻是失败那一刻冻结的预测，管理员提前解禁后没有任何
+    入口会重探——只读表头于是继续报「禁言至 未来时刻」，把 Agent 挡在能发的消息
+    外面。复查放在这里而不是 `reply.py` 的调用点，是因为 `reply.py` 已经贴着
+    `check_module_size.py` 的 1000 行红线（issue #11）：这个模块是失败账本的唯一
+    归属地，复查属于「账本怎么读」的一部分，写在别处只是把行数搬家。
+    """
+    recheck()
     line = last_line()
     if line:
         print(line)

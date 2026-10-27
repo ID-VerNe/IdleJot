@@ -281,13 +281,17 @@ dossier.py --check              # 该提炼了吗（exit 0 = 该，3 = 还不用
 dossier.py --dump 60            # 取一批素材，最早的优先
 dossier.py --digest             # 规则版消化：纯关键词，不调模型
 dossier.py --mark --through <id> # 推游标
+dossier.py --notes              # 看本群术语表（黑话 / 店名 / 约定）
+dossier.py --notes-apply 术语.json  # 写术语：[{"term": "...", "value": "..."}]
 ```
 
 触发条件在 `config.json` 的 `dossier` 段：攒够 `burst_messages`（默认 80）直接触发；或者闲置超过 `idle_minutes`（默认 20）且攒了 `min_messages`（默认 25）。
 
 两层：`--digest` 走关键词打标，零成本，每次超时都该跑；`--dump` → 提炼 → `consolidate_chat_memory` → `--mark` 是模型版，质量高但贵，只在 `--check` 说该做时才做。
 
-群友记忆只通过 MCP 工具维护（`query_member_dossier` / `update_member_dossier` / `consolidate_chat_memory`），**不要直连 SQLite**。
+画像沉淀下来是要用的：唤醒行、`reply.py --list` / `--context` 会附上命中的那几个人（发送者 + 正文点名的，最多两个）的一行画像——外号、XP、最近一条记忆、本群八卦；唤醒块末尾另有一行本群术语。只在命中时附，截断到 60 字/人，不占正文额度；要看某个人的完整卡用 `reply.py --who <花名>`。这一层是只读的，口径唯一出处在 `water-group/daemon/wg_dossiers.py`。
+
+写侧有两条路：MCP 工具（`query_member_dossier` / `update_member_dossier` / `consolidate_chat_memory`）与 daemon 侧的 `dossier.py`（`--apply` 写画像、`--notes-apply` 写群级术语、`--ingest` 写群级事件）。**不要直连 SQLite**。
 
 ### 人格卡
 

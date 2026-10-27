@@ -67,13 +67,14 @@ import wg_send_failure  # noqa: E402  (发送失败的原文 / 禁言诊断 / �
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
 
 ROOT = HERE.parents[1]
-from wg_paths import data_dir, state_dir
+from wg_paths import state_dir
 STATE = state_dir()
 SID_FILE = STATE / "wg_session.txt"
 STATE_FILE = STATE / "wg_state.json"
 EVENTS = STATE / "wg_events.jsonl"
 REPLIED = STATE / "wg_replied.jsonl"
-DB = Path(os.environ.get("IDLEJOT_WG_DB") or os.environ.get("TULPA_WG_DB", data_dir() / "mcp-access.sqlite3"))
+# 会话库的只读路径在 wg_context 里（`--context` 与 `--show` 的读链都归它），
+# 这里不再留一份同义常量：两份路径会各自漂移（issue #163 拆分时清掉）。
 
 RETRY_SLEEP = 3
 SOURCE_WAIT = 30

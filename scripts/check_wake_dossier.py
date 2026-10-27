@@ -84,6 +84,8 @@ def build():
                         context="又破戒了")
     engine.save_profile("10002", "群友乙", aliases=["乙总"], tone_style="稳重",
                         interests=["炒股"], key_memories=["亏了三千"])
+    # 己：第三个人。正文同时点名甲乙己时，`MAX_PEOPLE` 必须咬住（契约 2c）。
+    engine.save_profile("10004", "群友己", aliases=["己哥"], interests=["健身"])
     engine.upsert_group_notes(GROUP, [{"term": "遥遥领先", "value": "自嘲用法"}])
     # 别的群的术语：契约 5 的跨群隔离对照。
     engine.upsert_group_notes(OTHER_GROUP, [{"term": "别群黑话", "value": "不该出现"}])
@@ -221,6 +223,14 @@ def 同一个人只出一张卡():
     code, out = watch_out()
     line = line_with(out, "id=13 ")
     return code == 0 and line.count("画像 群友甲") == 1
+
+
+@case
+def 最多两个人():
+    """正文一次点三个有档案的人：只出 `MAX_PEOPLE` 张卡（唤醒行不是档案流）。"""
+    cards = wg_dossiers.render_for_event("路人丙", "老甲 乙总 己哥 都在", GROUP)
+    named = sum(("群友甲" in c or "群友乙" in c or "群友己" in c) for c in cards)
+    return len(cards) == named == wg_dossiers.MAX_PEOPLE
 
 
 # ---------- 契约 3：认不出就不附 ----------
@@ -370,6 +380,27 @@ def notes_dry_run_不落库():
         code = dossier.cmd_notes(str(payload), GROUP, dry_run=True)
     notes = get_memory_engine().query_group_notes(GROUP)
     return code == 0 and "只预演" not in [n["term"] for n in notes]
+
+
+@case
+def notes_命令行可用():
+    """从命令行真跑一次：`--notes` 是写侧入口能对上 argv 的唯一证据。"""
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "water-group" / "daemon" / "dossier.py"),
+         "--notes", "--group", GROUP, "--json"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=dict(os.environ), timeout=120)
+    return (proc.returncode == 0 and "老王" in proc.stdout
+            and proc.stderr.strip() == "")
+
+
+@case
+def who_给得下完整卡():
+    """`--who` 是专门问一个人：额度比唤醒行宽，但仍是一行、仍有顶。"""
+    card = wg_dossiers.who_card("10001", GROUP)
+    wake = wg_dossiers.card_for("10001", GROUP)
+    return (card.startswith(wake[:10]) and "\n" not in card
+            and len(card) <= wg_dossiers.WHO_CARD_CHARS + 1)
 
 
 # ---------- 契约 9：判据完整性（恒空 / 恒满都要翻转） ----------

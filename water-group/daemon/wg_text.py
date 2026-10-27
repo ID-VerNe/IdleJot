@@ -132,6 +132,56 @@ def render_body(text, limit, event_id=None):
     return f"{result.text}…{hint}", True, original_length
 
 
+def render_handler_reply(text, limit, event_id=None):
+    """资讯 handler 的回复正文截断（issue #169 PB）：唯一归宿，三份 `_clip` 合流到此。
+
+    `render_body` 是「Agent 读消息」的渲染口径（唤醒行/列表/上下文），它剥段占位、
+    带 `--show <id>` 读全文指引。资讯 handler 的输出不是某条群消息的正文——是简报、
+    热搜、班次这类**生成的**多行文本——没有段占位可剥，也没有「按 id 读全文」的库
+    行可指，只求「超长就截、截了就标」。所以这里走 `clip()` 的硬切（不剥占位、不回落
+    句末），尾部只挂 `…（已截断）`，不挂 `--show` 指引。
+
+    三份旧实现（`sixty._clip` / `miyoushe._clip` / `busboss._clip`）的写法是
+    `text[:limit] + " …（已截断）"`（先切到上限再加 7 字尾巴，净超 7）与
+    `text[:limit - 1] + "…"`。两者都让输出超过自己声明的 `REPLY_CLIP`——正是
+    #169 复现 B。这里必须守住 `limit`：先给尾巴让出 7 字（`…（已截断）` 的长度），
+    再用 `clip()` 切剩下的额度，最后拼尾巴——净输出恰好 `limit`，不再超上限。
+
+    `event_id` 保留参数位与 `render_body` 同构，但资讯回复不挂 `--show`——
+    留它是为了将来若要给资讯结果也加「展开全文」，调用点不用再改签名。
+    """
+    if limit <= 0:
+        raise ValueError("render_handler_reply() needs a positive limit")
+    marker = "…（已截断）"
+    # 尾巴的长度先从额度里扣掉，clip() 再切剩下的，净输出 = limit。
+    # limit 装不下「正文 + 完整尾巴」时（极短上限），把尾巴截到能装下的长度——
+    # 这种上限本身不该用于资讯回复（REPLY_CLIP 都是几百字），但守住「不超 limit」
+    # 比守「尾巴完整」更重要：超上限就是 #169 复现 B 的原症状。
+    if limit <= len(marker):
+        return marker[:limit]
+    result = clip()(text, limit - len(marker))
+    if not result.truncated:
+        return result.text
+    return f"{result.text}{marker}"
+
+
+def bounded_handler(fn, *, limit, need_ck=True):
+    """资讯 handler 的注册装饰器（issue #169 PB）：截断 + 凭证标记的唯一归宿。
+
+    `sixty._bounded` 与 `miyoushe._bounded` 原是同一段包装器复制两次，唯一差别是
+    `need_ck` 默认值（60s 全 False、米游社默认 True）与 `limit`（各自 `REPLY_CLIP`）。
+    合流后共享逻辑（包一层截断 + 落 `need_ck` 属性）只在此处；各模块的 `_bounded`
+    退成一行闭包，绑定自己的 `limit` 与默认 `need_ck`——那是模块业务上限，不是重复实现。
+
+    `commands.run_handler` 与插件层（`sixty_plugin` / `miyoushe_plugin`）都按
+    `getattr(fn, "need_ck", ...)` 读这个属性，所以装饰器必须真把属性贴在 wrapped 上。
+    """
+    def wrapped(args, ctx):
+        return render_handler_reply(fn(args, ctx), limit)
+    wrapped.need_ck = need_ck
+    return wrapped
+
+
 def _read_events():
     rows = []
     try:

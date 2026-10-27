@@ -30,6 +30,7 @@ from pathlib import Path
 
 from wg_daemon import logger
 from wg_paths import logs_dir
+import wg_text  # issue #169 PB: _clip 合流到 wg_text.render_handler_reply
 
 BASE_URL = ""
 TIMEOUT = 6
@@ -217,7 +218,14 @@ def _items(cfg, key, default):
 
 
 def _clip(text, limit=REPLY_CLIP):
-    return text if len(text) <= limit else text[:limit] + " …（已截断）"
+    """issue #169 PB：截断的唯一归宿是 wg_text.render_handler_reply。
+
+    保留这个薄壳是为了 14 个调用点（含 `_bounded` 注册表）的改动最小化——它们都
+    `_clip("\n".join(lines))` / `_clip(fn(args, ctx))`，换函数名要逐处改且容易漏。
+    实现只剩一行委托，墓碑判据（check_text_truncation）不再命中：没有裸切片、
+    没有自拼尾巴。三份 `_clip` 合流后净输出不再超过 REPLY_CLIP（#169 复现 B 的修绿）。
+    """
+    return wg_text.render_handler_reply(text, limit)
 
 
 def _heat(value):
@@ -677,13 +685,12 @@ def answer(args, ctx):
 def _bounded(fn):
     """包一层截断，并标记免登录（commands.run_handler 的绑定检查只看 need_ck）。
 
-    米游社那边 need_ck 默认 True 是刻意的「忘了标宁可被拦住」；60s 全部指令
-    都不碰凭证，所以这里显式 False，一个都不漏。
+    issue #169 PB：与 miyoushe._bounded 同一段包装器复制两份，合流到
+    wg_text.bounded_handler。本模块业务上限 REPLY_CLIP=1200、全部指令免凭证（need_ck
+    固定 False），闭包只绑这两个数；need_ck 默认值差异（米游社 True / 60s False）
+    是各模块的隐私策略，留在各自的 `_bounded` 默认里，不在共享装饰器里写死。
     """
-    def wrapped(args, ctx):
-        return _clip(fn(args, ctx))
-    wrapped.need_ck = False
-    return wrapped
+    return wg_text.bounded_handler(fn, limit=REPLY_CLIP, need_ck=False)
 
 
 HANDLERS = {

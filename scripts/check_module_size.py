@@ -29,18 +29,29 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-SCAN_DIRS = ('chatlocal', 'water-group', 'water_group')
+SCAN_DIRS = ('chatlocal', 'water-group', 'water_group', 'scripts')
 MAX_FILE_LINES = 1000
 MAX_CLASS_SPAN = 800
 ADVISORY_FILE_LINES = 700
 
-# Violators pinned at gate creation, each removed by one issue #11 section.
+# Violators pinned at gate creation, each removed by one issue that splits it.
 # Keep this list honest: a stale entry hides real growth.
 #
-# Empty since issue #37: up.py (the last entry, "crossed via #9") is a facade now --
-# probing / wake-config / start-stop moved to wg_up_probe / wg_up_wake / wg_up_stack.
+# Empty between issue #37 and issue #169: up.py (the last entry, "crossed via #9")
+# became a facade -- probing / wake-config / start-stop moved to wg_up_probe /
+# wg_up_wake / wg_up_stack.
 # An exemption must be added back with the issue that will remove it, never "for now".
-EXEMPTIONS = {}
+#
+# issue #169 PA: `scripts` entered SCAN_DIRS, and `scripts/check_listener_rehang.py`
+# (2220 lines / 43 contracts) immediately went red. It is split into a package by
+# issue #169 section PF -- exit_hint / budget / ledger / watch -- keeping the 43
+# contract numbers globally unique and un-reordered. That split removes this entry;
+# until then it is the only scripts/ file above MAX_FILE_LINES.
+EXEMPTIONS = {
+    'scripts/check_listener_rehang.py':
+        'issue #169 PF: split into scripts/check_listener_rehang/ package '
+        '(exit_hint/budget/ledger/watch); 43 contract numbers stay unique, un-reordered',
+}
 
 
 def iter_sources(root):

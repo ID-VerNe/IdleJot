@@ -24,6 +24,7 @@ import urllib.request
 from pathlib import Path
 
 from wg_paths import state_dir
+import wg_text  # issue #169 PB: _clip 合流到 wg_text.render_handler_reply
 
 SALT_CN = "xV8v4Qu54lUKrEYFZkJhB8cuOh9Asafs"
 APP_VERSION = "2.40.1"
@@ -461,7 +462,8 @@ def _dur(seconds):
 
 
 def _clip(text, limit=REPLY_CLIP):
-    return text if len(text) <= limit else text[:limit] + " …（已截断）"
+    """issue #169 PB：截断的唯一归宿是 wg_text.render_handler_reply（见 sixty._clip 注释）。"""
+    return wg_text.render_handler_reply(text, limit)
 
 
 def _parse_authkey(text):
@@ -769,14 +771,12 @@ def seven_saints(args, ctx):
 def _bounded(fn, need_ck=True):
     """包一层截断，并标记该 handler 是否需要本人凭证（issue #41-A）。
 
-    `need_ck` 只在这里落属性、不改 HANDLERS 元组形状：commands.py 与测试里
-    有 6 处按 `v[1]` 解包，加一列会连带改一圈。默认 True 是**刻意的**——
-    新加的 handler 忘了标，宁可被绑定检查拦住，也不能悄悄绕过隐私拦截。
+    issue #169 PB：与 sixty._bounded 合流到 wg_text.bounded_handler。本模块业务上限
+    REPLY_CLIP=480，`need_ck` 默认 True 是**刻意的**——新加的 handler 忘了标，宁可
+    被绑定检查拦住，也不能悄悄绕过隐私拦截。`need_ck` 只在这里落属性、不改 HANDLERS
+    元组形状：commands.py 与测试里有 6 处按 `v[1]` 解包，加一列会连带改一圈。
     """
-    def wrapped(args, ctx):
-        return _clip(fn(args, ctx))
-    wrapped.need_ck = need_ck
-    return wrapped
+    return wg_text.bounded_handler(fn, limit=REPLY_CLIP, need_ck=need_ck)
 
 
 def _news_handler(kind):

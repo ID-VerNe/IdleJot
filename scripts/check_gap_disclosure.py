@@ -88,7 +88,11 @@ GROUP = "123"
 
 # 漏收行的形态（契约 13）：`id=- msg_id=<id> YYYY-MM-DD HH:MM:SS [漏] <人>: <正文>`。
 # 唤醒行是 `id=<正数> HH:MM:SS ...`——带日期是两者的分界线，不靠「有没有时分秒」判。
-STAMPED_GAP_LINE = re.compile(r"^id=- msg_id=\S+ \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[漏\] ")
+# 两个捕获组（issue #151 复核）：`(\\S+)` 是消息 id、`(...)` 是行首那个时间戳字段。
+# 判据必须比对**捕获到的那个字段**，不能在整行里找子串——子串在行尾也能命中，
+# 「头字段日期是错的、行尾补一句正确时刻」的实现在子串判据下是绿的。
+STAMPED_GAP_LINE = re.compile(
+    r"^id=- msg_id=(\S+) (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[漏\] ")
 
 
 def fixture_home(home):
@@ -788,6 +792,10 @@ def 漏收at的时间戳带日期():
     #151）：早先窗口与消息同日时，「拿 `window_end` 的日期冒充消息日期」的坏
     实现能骗过本用例——它输出「看起来带日期、但日期是错的」，比不带日期更
     容易误导读者。日期分离后，任何借用窗口日期的实现都会红。
+
+    判据比对**行首时间戳字段本身**，不是在整行里找子串（复核补强）：子串判据
+    挡不住「头字段日期错、行尾补一句正确时刻」的实现，那种输出对读者而言与
+    坏实现同害，不该判绿。
     """
     start = local_epoch(2026, 10, 25, 22, 0, 0)
     end = local_epoch(2026, 10, 27, 7, 21, 40)
@@ -803,22 +811,27 @@ def 漏收at的时间戳带日期():
             lines = wg_gap.at_me_lines()
             # 唤醒行的时间戳口径（对照）：同一时刻只给时分秒
             wake_stamp = wg_clock.clock(missed_at)
-            # 窗口两端的日期（反例判据）：漏收行的日期不许等于其中任何一个
-            window_dates = {wg_clock.stamp(start)[:10], wg_clock.stamp(end)[:10]}
         finally:
             restore()
     if len(lines) != 1:
         return False
     text = lines[0]
+    msg_stamp = wg_clock.stamp(missed_at)
+    # 夹具前提，不是对实现的断言：消息日期必须与窗口两端都不同，否则「借窗口
+    # 日期冒充消息日期」的坏实现与正确实现同形，本用例退回零判别力。写成显式
+    # 前置检查而不是塞进 return，是为了它红的时候一眼看得出是夹具被动过。
+    if msg_stamp[:10] in {wg_clock.stamp(start)[:10], wg_clock.stamp(end)[:10]}:
+        return False
     # 「不同形」的判据是**时间戳字段的形态**，不是「串里有没有出现过时分秒」：
     # 带日期的行里当然也含 `03:05:09`，只查子串会把修复版判红（假红）。这里钉
     # `id=- msg_id=<id> YYYY-MM-DD HH:MM:SS ` 这个前缀，唤醒行则是
     # `id=<正数> HH:MM:SS `——两者第一眼就能分开。
-    # issue #151：日期还必须是**消息自己的**，不许借用窗口任一端的日期。
-    return (STAMPED_GAP_LINE.match(text) is not None
-            and "2026-10-26 03:05:09" in text
-            and "2026-10-26" not in window_dates
-            and "id=-" in text and "msg_id=d" in text
+    # issue #151 复核：日期还得**就是这个字段里的**值，所以比 `group(2)` 而不是
+    # `in text`——行尾补一句「（原时刻 2026-10-26 03:05:09）」不该算通过。
+    m = STAMPED_GAP_LINE.match(text)
+    return (m is not None
+            and m.group(1) == "d"
+            and m.group(2) == msg_stamp
             and "乙" in text and "在吗" in text
             # 对照：唤醒行口径的同一时刻确实只有时分秒（证明两种形态真的不同）
             and wake_stamp == "03:05:09")

@@ -41,6 +41,7 @@ from pathlib import Path
 
 from wg_daemon import logger
 from wg_paths import logs_dir, state_dir
+import wg_text  # issue #169 PB: _clip 合流到 wg_text.render_handler_reply
 
 BASE = "https://sale-api-public.dz.busboss.cn"
 AUTH_URL = "https://sale-auth.dz.busboss.cn/connect/token"
@@ -532,7 +533,8 @@ def _lines_budget(cfg):
 
 
 def _clip(text, limit=REPLY_CLIP):
-    return text if len(text) <= limit else text[:limit - 1] + "…"
+    """issue #169 PB：截断的唯一归宿是 wg_text.render_handler_reply（见 sixty._clip 注释）。"""
+    return wg_text.render_handler_reply(text, limit)
 
 
 def render_summary(origin, dest, class_date, items, total, cfg=None):

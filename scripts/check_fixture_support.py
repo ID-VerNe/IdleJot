@@ -5,11 +5,14 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import sys
 import tempfile
 import threading
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
+SCRIPTS = Path(__file__).resolve().parent
+DAEMON = ROOT / "water-group" / "daemon"
 LOOPBACK = frozenset({'127.0.0.1', 'localhost', '::1'})
 _SCRATCH_HOME = None
 
@@ -80,6 +83,73 @@ def _scratch_home():
     return _SCRATCH_HOME
 
 
+def bootstrap_paths(*, daemon=True, scripts=True, root=True):
+    """One-time ``sys.path`` setup for a check script (issue #169 PE).
+
+    Every ``scripts/check_*.py`` opened with the same three ``sys.path.insert``
+    calls -- this directory (so it can ``import check_fixture_support``), the
+    repo root (so it can ``import chatlocal`` / ``import water_group``), and
+    ``water-group/daemon`` (so it can ``import reply`` / ``import wg_text``).
+    The three were inlined 154 times across 85 files; this is the single home.
+
+    Returns ``ROOT`` so the caller does not redefine it. ``scripts`` is on
+    ``sys.path[0]`` already when a check runs as its own process
+    (``python scripts/check_x.py``), so the ``scripts`` insert is a safety net
+    for in-process imports (``check_mcp_chat`` is imported by siblings, and a
+    sibling's process may have a different ``sys.path[0]``); keep it on by
+    default. Pass ``daemon=False`` for suites that only touch ``chatlocal/``.
+    """
+    if scripts and str(SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS))
+    if root and str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    if daemon and str(DAEMON) not in sys.path:
+        sys.path.insert(0, str(DAEMON))
+    return ROOT
+
+
+def run_cases(cases, *, setup=None, prefix=True, catch=True):
+    """Run a list of self-test callables, print one line each, return exit code.
+
+    The ``check_*.py`` suites collected cases into ``CASES`` and looped them
+    with one of three near-identical ``main()`` bodies (issue #169 PE). The
+    only real differences are whether failures are caught, the pass/fail
+    marker wording, and a per-suite ``setup()`` call before the loop. Those
+    three are the parameters; the loop is this function.
+
+    Each case returns truthy = pass, falsy = fail. With ``catch=True`` a case
+    that raises is recorded as a failure (with the exception) instead of
+    aborting the suite -- a broken gate must count as red, not silently skip
+    the rest (issue #62). ``prefix=True`` prints ``pass_marker``/``fail_marker``
+    in the ``checkmark`` style (``✓``/``✗``) used by the gates that report in
+    Chinese; ``prefix=False`` uses the ``PASS``/``FAIL`` English wording.
+    """
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if setup is not None:
+        setup()
+    pass_marker = "✓ " if prefix else "PASS "
+    fail_marker = "✗ " if prefix else "FAIL "
+    tail_ok = "全部通过" if prefix else "OK"
+    bad = 0
+    for fn in cases:
+        try:
+            ok = fn()
+        except Exception as exc:  # noqa: BLE001  门禁自己坏了也算红
+            if not catch:
+                raise
+            print(f"{fail_marker}{fn.__name__}: {type(exc).__name__}: {exc}")
+            bad += 1
+            continue
+        if ok:
+            print(f"{pass_marker}{fn.__name__}")
+        else:
+            print(f"{fail_marker}{fn.__name__}")
+            bad += 1
+    print(tail_ok if not bad else f"{bad} 项失败" if prefix else f"{bad} case(s) failed")
+    return 1 if bad else 0
+
+
 @contextmanager
 def temp_dir(prefix='tulpa-test-'):
     """Scratch directory for fixtures, isolated from the working tree."""
@@ -110,23 +180,3 @@ def network_guard(ports):
         return real_connect(address, *args, **kwargs)
 
     return restrict, calls
-
-
-@contextmanager
-def management_http(app):
-    import uvicorn
-    sock = socket.socket(); sock.bind(('127.0.0.1', 0))
-    port = sock.getsockname()[1]
-    # TestClient owns application startup/shutdown in the caller.
-    server = uvicorn.Server(uvicorn.Config(app, log_level='error', lifespan='off'))
-    thread = threading.Thread(target=lambda: server.run(sockets=[sock]), daemon=True)
-    thread.start()
-    try:
-        deadline = time.monotonic()+5
-        while not server.started and time.monotonic() < deadline: time.sleep(.02)
-        if not server.started: raise AssertionError('Management HTTP did not start')
-        yield f'http://127.0.0.1:{port}'
-    finally:
-        server.should_exit = True
-        thread.join(5); sock.close()
-        if thread.is_alive(): raise AssertionError('Management HTTP did not stop')

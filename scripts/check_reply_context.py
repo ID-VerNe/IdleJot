@@ -26,7 +26,8 @@ SID = "session-fixture"
 os.environ["TULPA_WG_DB"] = str(DB)
 os.environ["TULPA_WG_STATE"] = TMP  # 空的，up.events() 读不到唤醒文件
 
-sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
+import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
+fs.bootstrap_paths(scripts=False, root=False)
 
 import reply  # noqa: E402
 
@@ -206,17 +207,7 @@ def 中途失败不回退不重发():
 
 
 def main():
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-
-    build()
-    bad = 0
-    for fn in CASES:
-        got = fn()
-        print(("✓ " if got else "✗ ") + fn.__name__)
-        bad += 0 if got else 1
-    print("全部通过" if not bad else f"{bad} 项失败")
-    return 1 if bad else 0
+    return fs.run_cases(CASES, setup=build, catch=False)
 
 
 if __name__ == "__main__":

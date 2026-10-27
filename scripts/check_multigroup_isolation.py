@@ -47,11 +47,10 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import check_fixture_support  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
+import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
+fs.bootstrap_paths(scripts=False, root=False)
 
 DAEMON = ROOT / "water-group" / "daemon"
-sys.path.insert(0, str(DAEMON))
 
 # 数据根 / 状态目录 / 配置 / 库全部钉进临时目录，且在 import 任何 daemon 模块
 # **之前**完成：`wg_paths.state_dir()` / `wg_config.CONFIG` 都是 import 期求值。

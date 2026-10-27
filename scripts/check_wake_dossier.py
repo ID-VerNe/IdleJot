@@ -38,8 +38,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import check_fixture_support  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
+import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
 
 TMP = Path(tempfile.mkdtemp(prefix="wg_dossier_"))
 HOME = TMP / "home"
@@ -55,8 +54,7 @@ os.environ["IDLEJOT_WG_STATE"] = str(STATE)
 os.environ["TULPA_WG_DB"] = str(TMP / "chats.sqlite3")
 os.environ["IDLEJOT_WG_DB"] = str(TMP / "chats.sqlite3")
 
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
+fs.bootstrap_paths(scripts=False)
 
 import wg_dossiers  # noqa: E402
 import wg_text  # noqa: E402
@@ -434,20 +432,7 @@ def _no_card_for_stranger():
 
 
 def main():
-    build()
-    failed = 0
-    for fn in CASES:
-        try:
-            ok = fn()
-        except Exception as exc:  # noqa: BLE001
-            print(f"FAIL {fn.__name__}: {type(exc).__name__}: {exc}")
-            failed += 1
-            continue
-        print(f"{'PASS' if ok else 'FAIL'} {fn.__name__}")
-        if not ok:
-            failed += 1
-    print("OK" if not failed else f"{failed} case(s) failed")
-    return 0 if not failed else 1
+    return fs.run_cases(CASES, setup=build, prefix=False)
 
 
 if __name__ == "__main__":

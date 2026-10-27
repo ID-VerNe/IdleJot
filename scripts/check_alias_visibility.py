@@ -24,12 +24,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import check_fixture_support  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
+import check_fixture_support as fs  # noqa: E402  (先钉数据根，见 issue #79/#89)
+ROOT = fs.bootstrap_paths()
 
 # 记忆库必须在 import 任何 daemon 模块之前钉走：memory_store 的路径是 import
 # 期求值的（与 check_sixty 同一理由）。
@@ -235,22 +231,7 @@ def context_端到端单字锚():
 
 
 def main():
-    build()
-    failed = 0
-    for fn in CASES:
-        try:
-            ok = fn()
-        except Exception as exc:  # noqa: BLE001
-            print(f"FAIL {fn.__name__}: {type(exc).__name__}: {exc}")
-            failed += 1
-            continue
-        if ok:
-            print(f"PASS {fn.__name__}")
-        else:
-            print(f"FAIL {fn.__name__}")
-            failed += 1
-    print("OK" if not failed else f"{failed} case(s) failed")
-    return 0 if not failed else 1
+    return fs.run_cases(CASES, setup=build, prefix=False)
 
 
 if __name__ == "__main__":

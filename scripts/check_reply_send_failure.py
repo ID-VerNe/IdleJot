@@ -36,11 +36,8 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import check_fixture_support  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-
-sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
-sys.path.insert(0, str(ROOT))
+import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
+fs.bootstrap_paths(scripts=False)
 
 # 数据根 / 配置 / 库全部钉进临时目录，import 任何 daemon 模块之前完成：
 # memory_store 与 wg_paths 的常量是 import 期求值的（与 check_alias_visibility 同款）。

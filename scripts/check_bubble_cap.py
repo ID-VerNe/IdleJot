@@ -21,9 +21,8 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
+import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
+ROOT = fs.bootstrap_paths(scripts=False)
 
 import wg_bubbles  # noqa: E402
 import wg_budget  # noqa: E402
@@ -289,20 +288,7 @@ def 计划通道装不下要提前说清():
 
 
 def main():
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-    bad = 0
-    for fn in CASES:
-        try:
-            ok = bool(fn())
-        except Exception as exc:  # noqa: BLE001 —— 门禁自己坏了也要算红，别静默跳过
-            print(f"✗ {fn.__name__} ({type(exc).__name__}: {exc})")
-            bad += 1
-            continue
-        print(("✓ " if ok else "✗ ") + fn.__name__)
-        bad += 0 if ok else 1
-    print("全部通过" if not bad else f"{bad} 项失败")
-    return 1 if bad else 0
+    return fs.run_cases(CASES)
 
 
 if __name__ == "__main__":

@@ -11,11 +11,14 @@
 这条门禁钉七组契约，任一处退回旧行为都红：
 
 1. **生产者形状**（issue #159）：只桩最底层的 `wg_up_wake._onebot_call`，让真
-   `login_info()` 走完整条路，断言它返回 dict、打的 action 是 `get_login_info`，
-   且 `up.py` 用的正是这一个函数。以前 `napcat_body()` 第一件事就是换掉
-   `up.login_info`，生产者整个被替身顶掉——「返回什么类型」这个维度零断言，
-   退化成元组时六组全绿。对照组：元组形状必须被同一判据判红，且渲染路径确实
-   降级成「未报账号」，否则第 3 组的绿只是碰巧。
+   `login_info()` 走完整条路，断言它返回 dict、打的 action 是 `get_login_info`、
+   「没答」时返回 `None` 而不是 `{}`，且 `up.py` 用的正是这一个函数。以前
+   `napcat_body()` 第一件事就是换掉 `up.login_info`，生产者整个被替身顶掉——
+   「返回什么类型」这个维度零断言，退化成元组时六组全绿。对照组：元组形状必须
+   被同一判据判红，且渲染路径确实降级成「未报账号」，否则第 3 组的绿只是碰巧。
+   `None` 与 `{}` 在 `report()` 里分属「无响应」与「应答但未报账号」两个分支，
+   形状判据对两者都放行，所以那条单独钉——中间层把 `None` 吞成 `{}` 就是把
+   「没答」说成「答了」，而第 6 组桩的是 `up.login_info`，盖不到这一层。
 2. **解析口径**（`login_account`）：int 账号归一成 str、首尾空白裁掉、`None`/空串
    留 `None`、`{}` 与非 dict 一律 `(None, None)`。布尔是 `int` 的子类，但它只可能是
    坏数据，不当数字放行。
@@ -190,6 +193,17 @@ def test_producer_shape():
     assert seen == [("get_login_info", {})], (
         f"login_info() 打的不是 get_login_info：{seen!r}——形状对了、问的却是别的"
         f"接口，只钉返回值的门禁会假绿")
+    # 「没答」必须是 None，不能是 {}：两者在 `report()` 里分属两个分支（「无响应」/
+    # 「应答但未报账号」），而形状判据对两者都放行。契约 6 桩的是 `up.login_info`，
+    # 盖不到「中间那层把 None 吞成 {}」——那正是把「没答」说成「答了」的假话。
+    wg_up_wake._onebot_call = lambda action, params: None
+    try:
+        silent = wg_up_wake.login_info()
+    finally:
+        wg_up_wake._onebot_call = saved
+    assert silent is None, (
+        f"OneBot 没答时 login_info() 返回 {silent!r}，应为 None——它会被渲染成"
+        f"「应答但未报账号信息」，把「没答」说成「答了」")
     # 对照组：元组（退化生产者）必须被同一判据判红，且渲染路径确实降级成
     # 「未报账号」——否则第 3 组的绿只是碰巧，判据根本没在判形状。
     degenerate = (ACCOUNT, NICK)

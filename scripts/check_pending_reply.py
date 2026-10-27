@@ -28,7 +28,8 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
+import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
+fs.bootstrap_paths(scripts=False, root=False)
 
 # state 目录必须在 import reply 之前钉走：`wg_send_failure.LEDGER` 是 import 期
 # 求值的（`state_dir() / "wg_send_failure.json"`），而 issue #145 之后
@@ -258,25 +259,7 @@ def 不在事件流里的id不误伤():
 
 
 def main():
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-
-    bad = 0
-    for fn in CASES:
-        try:
-            got = fn()
-        except Exception as exc:  # noqa: BLE001
-            got = False
-            print(f"✗ {fn.__name__}: {type(exc).__name__}: {exc}")
-            bad += 1
-            continue
-        if got:
-            print(f"✓ {fn.__name__}")
-        else:
-            bad += 1
-            print(f"✗ {fn.__name__}")
-    print("全部通过" if not bad else f"{bad} 项失败")
-    return 1 if bad else 0
+    return fs.run_cases(CASES)
 
 
 if __name__ == "__main__":

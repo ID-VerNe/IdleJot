@@ -159,7 +159,6 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # `import check_fixture_support` 之前先把 env 里的数据根**记下来**：那模块在 import 期
 # 会把它钉成临时目录，事后只剩夹具目录。这里记的是「import 之前真实的那些值」，
@@ -194,11 +193,11 @@ def _live_private_home(env=None):
 
 PRIVATE_HOME = _live_private_home()
 
-import check_fixture_support  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
+import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
 from check_fixture_support import temp_dir  # noqa: E402
+fs.bootstrap_paths(scripts=False)
 
 DAEMON = ROOT / "water-group" / "daemon"
-sys.path.insert(0, str(DAEMON))
 
 import listen  # noqa: E402
 import reply  # noqa: E402
@@ -2195,25 +2194,7 @@ def 坏槽不拖垮账本只读入口():
 
 
 def main():
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-
-    bad = 0
-    for fn in CASES:
-        try:
-            got = fn()
-        except Exception as exc:  # noqa: BLE001
-            got = False
-            print(f"✗ {fn.__name__}: {type(exc).__name__}: {exc}")
-            bad += 1
-            continue
-        if got:
-            print(f"✓ {fn.__name__}")
-        else:
-            bad += 1
-            print(f"✗ {fn.__name__}")
-    print("全部通过" if not bad else f"{bad} 项失败")
-    return 1 if bad else 0
+    return fs.run_cases(CASES)
 
 
 if __name__ == "__main__":

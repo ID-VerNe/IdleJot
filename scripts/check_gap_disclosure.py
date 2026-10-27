@@ -59,10 +59,10 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import check_fixture_support  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
+import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
 from check_fixture_support import temp_dir  # noqa: E402
+fs.bootstrap_paths(scripts=False)
 
 # issue #145：本门禁有两处 `reply.list_wakes()`，而它现在会顺手复查发送失败账本
 # （`wg_send_failure.LEDGER` 是 import 期求值的 `state_dir() / ...`）。不钉
@@ -72,9 +72,6 @@ from check_fixture_support import temp_dir  # noqa: E402
 # 只靠 `check_fixture_support` 的 `WATER_GROUP_HOME` 钉不住它。
 os.environ["IDLEJOT_WG_STATE"] = str(
     Path(tempfile.mkdtemp(prefix="wg_gap_state_")) / "state")
-
-DAEMON = ROOT / "water-group" / "daemon"
-sys.path.insert(0, str(DAEMON))
 
 import up  # noqa: E402
 import wg_clock  # noqa: E402
@@ -917,27 +914,10 @@ def 漏收at的时间戳带日期():
 
 
 def main():
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
     print("=" * 72)
     print("        [测试] issue #114 停机窗口缺口披露：漏了什么事后说得出来")
     print("=" * 72)
-    bad = 0
-    for fn in CASES:
-        try:
-            got = fn()
-        except Exception as exc:  # noqa: BLE001
-            got = False
-            print(f"✗ {fn.__name__}: {type(exc).__name__}: {exc}")
-            bad += 1
-            continue
-        if got:
-            print(f"✓ {fn.__name__}")
-        else:
-            bad += 1
-            print(f"✗ {fn.__name__}")
-    print("全部通过" if not bad else f"{bad} 项失败")
-    return 1 if bad else 0
+    return fs.run_cases(CASES)
 
 
 if __name__ == "__main__":

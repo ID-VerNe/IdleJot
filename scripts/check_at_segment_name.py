@@ -36,11 +36,8 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import check_fixture_support  # noqa: F401,E402  先钉数据根（#79/#89 同类）
-
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
+import check_fixture_support as fs  # noqa: F401,E402  先钉数据根（#79/#89 同类）
+fs.bootstrap_paths(scripts=False)
 
 # 记忆库路径 import 期求值，必须在 import daemon/chatlocal 模块之前钉走。
 _SCRATCH = Path(tempfile.mkdtemp(prefix="wg_at_name_"))

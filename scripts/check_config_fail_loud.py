@@ -37,11 +37,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import check_fixture_support  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-
-sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
+import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
+fs.bootstrap_paths(scripts=False)
 
 from water_group import bootstrap  # noqa: E402
 

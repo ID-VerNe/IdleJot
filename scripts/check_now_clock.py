@@ -58,7 +58,8 @@ FIXTURE_CONFIG.write_text(json.dumps({"self_account": "10001",
                                      ensure_ascii=False), encoding="utf-8")
 os.environ["IDLEJOT_WG_CONFIG"] = str(FIXTURE_CONFIG)
 
-sys.path.insert(0, str(DAEMON))
+import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
+fs.bootstrap_paths(scripts=False, root=False)
 
 import followup  # noqa: E402
 import reply  # noqa: E402
@@ -268,27 +269,7 @@ def watch_唤醒块先给现在():
 
 
 def main():
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-
-    build_db()
-
-    bad = 0
-    for fn in CASES:
-        try:
-            got = fn()
-        except Exception as exc:  # noqa: BLE001
-            got = False
-            print(f"✗ {fn.__name__}: {type(exc).__name__}: {exc}")
-            bad += 1
-            continue
-        if got:
-            print(f"✓ {fn.__name__}")
-        else:
-            bad += 1
-            print(f"✗ {fn.__name__}")
-    print("全部通过" if not bad else f"{bad} 项失败")
-    return 1 if bad else 0
+    return fs.run_cases(CASES, setup=build_db)
 
 
 if __name__ == "__main__":

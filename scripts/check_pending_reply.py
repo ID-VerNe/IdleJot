@@ -30,6 +30,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
+# state 目录必须在 import reply 之前钉走：`wg_send_failure.LEDGER` 是 import 期
+# 求值的（`state_dir() / "wg_send_failure.json"`），而 issue #145 之后
+# `reply.list_wakes()` 会顺手复查那份账本——不钉的话，本机恰好有一条过期禁言记录时
+# 这个门禁会去问**实机** OneBot 并把结论写回实机账本（测试写生产状态）。
+_PINNED_STATE = Path(tempfile.mkdtemp(prefix="wg_pending_state_"))
+os.environ["IDLEJOT_WG_STATE"] = str(_PINNED_STATE)
+
 import up  # noqa: E402  (门面；补丁见下，issue #37 起要打到 wg_up_wake)
 import wg_up_wake  # noqa: E402  (issue #37 PC: 唤醒判定的真实调用点)
 

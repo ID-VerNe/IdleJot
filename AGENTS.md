@@ -447,7 +447,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 62 | `reply` | `check_reply_context.py` | reply.py --context 回之前看得到群聊上下文 |
 | 63 | `reply` | `check_bubble_cap.py` | 单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131） |
 | 64 | `reply` | `check_reply_quote.py` | OneBot mention 与引用预检 |
-| 65 | `reply` | `check_reply_send_failure.py` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132） |
+| 65 | `reply` | `check_reply_send_failure.py` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）；禁言到点必须复查，过期预测不许继续当此刻事实（#145） |
 | 66 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
 | 67 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
 | 68 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、四种格式都真能发、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度（超了拒、额度内照发）、不回退计划通道、发图也记账（#128） |

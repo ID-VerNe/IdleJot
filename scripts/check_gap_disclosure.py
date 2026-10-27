@@ -50,6 +50,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_fixture_support  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
 from check_fixture_support import temp_dir  # noqa: E402
 
+# issue #145：本门禁有两处 `reply.list_wakes()`，而它现在会顺手复查发送失败账本
+# （`wg_send_failure.LEDGER` 是 import 期求值的 `state_dir() / ...`）。不钉
+# `IDLEJOT_WG_STATE` 的话，外部环境带着它跑时这里会**写实机账本**
+# （`rechecked_at` / `recheck_result`），还会吃掉 60 秒复查窗口，让真正的
+# `reply.py --list` 跳过复查。`state_dir()` 的优先级是 IDLEJOT 先于 TULPA，
+# 只靠 `check_fixture_support` 的 `WATER_GROUP_HOME` 钉不住它。
+os.environ["IDLEJOT_WG_STATE"] = str(
+    Path(tempfile.mkdtemp(prefix="wg_gap_state_")) / "state")
+
 DAEMON = ROOT / "water-group" / "daemon"
 sys.path.insert(0, str(DAEMON))
 

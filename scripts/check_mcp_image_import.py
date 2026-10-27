@@ -3,7 +3,6 @@ import asyncio
 import base64
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
-from http.server import ThreadingHTTPServer
 import io
 import json
 import os
@@ -19,6 +18,7 @@ SUBPROCESS_ENV={k:os.environ[k] for k in ('SYSTEMROOT','WINDIR') if k in os.envi
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_fixture_support import isolated_env
+from fixture_server import fixture_server
 from check_mcp_chat_media import StickerBot, fixture_image
 from check_mcp_chat import Events, eventually, ROOT
 from import_chat_image import connection, image_bytes, UploadError
@@ -127,150 +127,148 @@ def main():
     assert 1000000 < len(raw) < MAX_BYTES
     events = Events()
     StickerBot.sent = []; StickerBot.collected = []; StickerBot.uncertain = False; StickerBot.block = False
-    upstream = ThreadingHTTPServer(('127.0.0.1', 0), StickerBot)
-    threading.Thread(target=upstream.serve_forever, daemon=True).start()
     checks = []
-    try:
-        with tempfile.TemporaryDirectory(prefix='tulpa-image-import-') as tmp, patch.dict('os.environ',isolated_env(),clear=True):
-            root = Path(tmp)
-            (root/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{upstream.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n')
-            with patch('chatlocal.onebot.ROOT', root), patch('chatlocal.message_sender.ROOT', root), \
-                    patch('chatlocal.mcp_chat_media.download', side_effect=AssertionError('Uploaded image used remote URL')):
-                app = FastAPI(); service = install_mcp_routes(app, Store(root/'chats.sqlite3'))
-                access = service.access; tools = service.tools
-                with TestClient(app) as ui:
-                    invalidate_availability()
-                    with socket.socket() as sock:
-                        sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
-                    access.configure(True, port); service.start()
-                    policy = access.path.parent/'mcp-chat-policy.json'
-                    policy.write_text('{"quiet_seconds":0.1,"reply_cooldown_seconds":0}')
-                    cfg = dict(name='image-import-fixture', platforms=['qq'], conversations=[['qq','111:group:222'],['qq','111:group:223']],
-                               send=True, chat=True, chat_images=True, chat_sticker_send=True, chat_sticker_collect=True)
-                    g = access.create(cfg)
-                    ro = access.create(cfg | dict(chat_sticker_send=False))
-                    other = access.create(cfg)
+    with fixture_server(StickerBot) as upstream:
+        try:
+            with tempfile.TemporaryDirectory(prefix='tulpa-image-import-') as tmp, patch.dict('os.environ',isolated_env(),clear=True):
+                root = Path(tmp)
+                (root/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{upstream.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n')
+                with patch('chatlocal.onebot.ROOT', root), patch('chatlocal.message_sender.ROOT', root), \
+                        patch('chatlocal.mcp_chat_media.download', side_effect=AssertionError('Uploaded image used remote URL')):
+                    app = FastAPI(); service = install_mcp_routes(app, Store(root/'chats.sqlite3'))
+                    access = service.access; tools = service.tools
+                    with TestClient(app) as ui:
+                        invalidate_availability()
+                        with socket.socket() as sock:
+                            sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
+                        access.configure(True, port); service.start()
+                        policy = access.path.parent/'mcp-chat-policy.json'
+                        policy.write_text('{"quiet_seconds":0.1,"reply_cooldown_seconds":0}')
+                        cfg = dict(name='image-import-fixture', platforms=['qq'], conversations=[['qq','111:group:222'],['qq','111:group:223']],
+                                   send=True, chat=True, chat_images=True, chat_sticker_send=True, chat_sticker_collect=True)
+                        g = access.create(cfg)
+                        ro = access.create(cfg | dict(chat_sticker_send=False))
+                        other = access.create(cfg)
 
-                    def call(name, grant=g, cancel=None, **args):
-                        return tools.call(grant['token'], name, args, cancel or threading.Event())
+                        def call(name, grant=g, cancel=None, **args):
+                            return tools.call(grant['token'], name, args, cancel or threading.Event())
 
-                    def start(cid='111:group:222', key='upload-start'):
-                        response = call('start_chat_session', conversation_id=cid, persona='图片验收', idempotency_key=key)
-                        sid = response.structuredContent['session']['id']
-                        if cid == '111:group:222':
-                            paused = ui.put(f'/api/mcp/chats/{sid}/learning', json=dict(enabled=False), headers={'X-ChatWeave-UI':'1'})
-                            assert paused.status_code == 200, paused.text
-                        return sid
+                        def start(cid='111:group:222', key='upload-start'):
+                            response = call('start_chat_session', conversation_id=cid, persona='图片验收', idempotency_key=key)
+                            sid = response.structuredContent['session']['id']
+                            if cid == '111:group:222':
+                                paused = ui.put(f'/api/mcp/chats/{sid}/learning', json=dict(enabled=False), headers={'X-ChatWeave-UI':'1'})
+                                assert paused.status_code == 200, paused.text
+                            return sid
 
-                    sid = start()
-                    eventually(lambda: tools.chat.receiver.status()['state'] == 'connected')
-                    assert 'import_chat_image' not in {s['name'] for s in tools.schemas(access.authorize(ro['token'], source=False))}
-                    aid = asyncio.run(wire(service, g, ro, sid, raw))
-                    checks.append('real MCP upload >32 KiB, preview, original OneBot bytes, planner, dedup and UNKNOWN guard')
-                    checks.append('authenticated request limits including chunked bodies and read-only grants')
+                        sid = start()
+                        eventually(lambda: tools.chat.receiver.status()['state'] == 'connected')
+                        assert 'import_chat_image' not in {s['name'] for s in tools.schemas(access.authorize(ro['token'], source=False))}
+                        aid = asyncio.run(wire(service, g, ro, sid, raw))
+                        checks.append('real MCP upload >32 KiB, preview, original OneBot bytes, planner, dedup and UNKNOWN guard')
+                        checks.append('authenticated request limits including chunked bodies and read-only grants')
 
-                    encoded = base64.b64encode(fixture_image(True)).decode('ascii')
-                    for value in ('data:image/png;base64,'+encoded, 'file:///private/key', 'https://example.invalid/secret', '秘密', base64.b64encode(b'not-image').decode()):
-                        result = call('import_chat_image', session_id=sid, data_base64=value)
-                        assert result.isError and value not in json.dumps(result.structuredContent), result.structuredContent
-                    for extra in ({'path':'/private/key'}, {'url':'https://example.invalid/image'}):
-                        result = call('import_chat_image', session_id=sid, data_base64=encoded, **extra)
+                        encoded = base64.b64encode(fixture_image(True)).decode('ascii')
+                        for value in ('data:image/png;base64,'+encoded, 'file:///private/key', 'https://example.invalid/secret', '秘密', base64.b64encode(b'not-image').decode()):
+                            result = call('import_chat_image', session_id=sid, data_base64=value)
+                            assert result.isError and value not in json.dumps(result.structuredContent), result.structuredContent
+                        for extra in ({'path':'/private/key'}, {'url':'https://example.invalid/image'}):
+                            result = call('import_chat_image', session_id=sid, data_base64=encoded, **extra)
+                            assert result.structuredContent['error_code'] == 'invalid_arguments'
+                        result = call('import_chat_image', session_id=sid, data_base64='A'*(MAX_BASE64_LENGTH+1))
                         assert result.structuredContent['error_code'] == 'invalid_arguments'
-                    result = call('import_chat_image', session_id=sid, data_base64='A'*(MAX_BASE64_LENGTH+1))
-                    assert result.structuredContent['error_code'] == 'invalid_arguments'
-                    huge = io.BytesIO(); Image.new('1', (4000,4000)).save(huge, 'PNG')
-                    result = call('import_chat_image', session_id=sid, data_base64=base64.b64encode(huge.getvalue()).decode())
-                    assert result.isError
-                    bmp = io.BytesIO(); Image.new('RGB', (4,4)).save(bmp, 'BMP')
-                    assert call('import_chat_image', session_id=sid, data_base64=base64.b64encode(bmp.getvalue()).decode()).isError
-                    assert call('import_chat_image', grant=ro, session_id=sid, data_base64=encoded).isError
-                    assert call('import_chat_image', grant=other, session_id=sid, data_base64=encoded).isError
-                    cancel = threading.Event(); cancel.set()
-                    assert call('import_chat_image', session_id=sid, data_base64=encoded, cancel=cancel).isError
-                    checks.append('invalid data, arbitrary paths/URLs, format/size/pixel caps, permission and cancellation')
+                        huge = io.BytesIO(); Image.new('1', (4000,4000)).save(huge, 'PNG')
+                        result = call('import_chat_image', session_id=sid, data_base64=base64.b64encode(huge.getvalue()).decode())
+                        assert result.isError
+                        bmp = io.BytesIO(); Image.new('RGB', (4,4)).save(bmp, 'BMP')
+                        assert call('import_chat_image', session_id=sid, data_base64=base64.b64encode(bmp.getvalue()).decode()).isError
+                        assert call('import_chat_image', grant=ro, session_id=sid, data_base64=encoded).isError
+                        assert call('import_chat_image', grant=other, session_id=sid, data_base64=encoded).isError
+                        cancel = threading.Event(); cancel.set()
+                        assert call('import_chat_image', session_id=sid, data_base64=encoded, cancel=cancel).isError
+                        checks.append('invalid data, arbitrary paths/URLs, format/size/pixel caps, permission and cancellation')
 
-                    animated = call('import_chat_image', session_id=sid, data_base64=encoded)
-                    assert not animated.isError and animated.structuredContent['total_frames'] == 3
-                    # 默认只交付单帧；frames='all' 才补采样帧（见 mcp_media_pixels）。
-                    assert len([p for p in animated.content if p.type=='image']) == 1
-                    gif_id = animated.structuredContent['sticker_id']
-                    second = start('111:group:223', 'upload-second-group')
-                    assert call('read_chat_sticker', session_id=second, sticker_id=gif_id).isError
-                    second_image = call('import_chat_image', session_id=second, data_base64=encoded).structuredContent
-                    assert second_image['sticker_id'] != gif_id
-                    with access.connect() as db:
-                        asset = dict(db.execute('SELECT * FROM chat_media_assets WHERE id=?', (gif_id,)).fetchone())
-                        assert asset['origin'].startswith('upload:') and asset['ref'] == '{}'
-                        for table in ('chat_media_assets','calls','operations','sticker_diagnostics'):
-                            stored = json.dumps([dict(r) for r in db.execute('SELECT * FROM '+table)])
-                            assert encoded not in stored and 'data_base64' not in stored and g['token'] not in stored
-                    digest = animated.structuredContent['sha256']
-                    cached = tools.chat.media.root/(digest+'.bin')
-                    if os.name == 'posix':
-                        assert cached.stat().st_mode & 0o077 == 0
-                    cached.write_bytes(b'changed')
-                    missing = call('read_chat_sticker', session_id=sid, sticker_id=gif_id)
-                    assert missing.isError and 'import_chat_image' in missing.structuredContent['error']
-                    assert call('import_chat_image', session_id=sid, data_base64=encoded).structuredContent['sticker_id'] == gif_id
-                    pinned = call('collect_chat_sticker', session_id=sid, sticker_id=gif_id, idempotency_key='pin-upload-local', save_qq=False)
-                    assert pinned.structuredContent['state'] == 'SUCCEEDED' and not StickerBot.collected
-                    if os.name == 'posix':
-                        assert all(p.stat().st_mode & 0o077 == 0 for p in tools.chat.media.library.root.rglob('*.bin'))
-                    cached.unlink()
-                    assert not call('read_chat_sticker', session_id=sid, sticker_id=gif_id).isError
-                    checks.append('animation, per-session handles, private metadata, cache integrity and pinned-original recovery')
+                        animated = call('import_chat_image', session_id=sid, data_base64=encoded)
+                        assert not animated.isError and animated.structuredContent['total_frames'] == 3
+                        # 默认只交付单帧；frames='all' 才补采样帧（见 mcp_media_pixels）。
+                        assert len([p for p in animated.content if p.type=='image']) == 1
+                        gif_id = animated.structuredContent['sticker_id']
+                        second = start('111:group:223', 'upload-second-group')
+                        assert call('read_chat_sticker', session_id=second, sticker_id=gif_id).isError
+                        second_image = call('import_chat_image', session_id=second, data_base64=encoded).structuredContent
+                        assert second_image['sticker_id'] != gif_id
+                        with access.connect() as db:
+                            asset = dict(db.execute('SELECT * FROM chat_media_assets WHERE id=?', (gif_id,)).fetchone())
+                            assert asset['origin'].startswith('upload:') and asset['ref'] == '{}'
+                            for table in ('chat_media_assets','calls','operations','sticker_diagnostics'):
+                                stored = json.dumps([dict(r) for r in db.execute('SELECT * FROM '+table)])
+                                assert encoded not in stored and 'data_base64' not in stored and g['token'] not in stored
+                        digest = animated.structuredContent['sha256']
+                        cached = tools.chat.media.root/(digest+'.bin')
+                        if os.name == 'posix':
+                            assert cached.stat().st_mode & 0o077 == 0
+                        cached.write_bytes(b'changed')
+                        missing = call('read_chat_sticker', session_id=sid, sticker_id=gif_id)
+                        assert missing.isError and 'import_chat_image' in missing.structuredContent['error']
+                        assert call('import_chat_image', session_id=sid, data_base64=encoded).structuredContent['sticker_id'] == gif_id
+                        pinned = call('collect_chat_sticker', session_id=sid, sticker_id=gif_id, idempotency_key='pin-upload-local', save_qq=False)
+                        assert pinned.structuredContent['state'] == 'SUCCEEDED' and not StickerBot.collected
+                        if os.name == 'posix':
+                            assert all(p.stat().st_mode & 0o077 == 0 for p in tools.chat.media.library.root.rglob('*.bin'))
+                        cached.unlink()
+                        assert not call('read_chat_sticker', session_id=sid, sticker_id=gif_id).isError
+                        checks.append('animation, per-session handles, private metadata, cache integrity and pinned-original recovery')
 
-                    # Execute the documented local-file uploader against the same
-                    # real service, so escaping, config formats and output are tested.
-                    image_path = root/'generated image.png'; image_path.write_bytes(raw)
-                    config_path = root/'client.json'
-                    config_path.write_text(json.dumps({'mcpServers':{'tulpa':{'url':service.status()['url'],'headers':{'Authorization':'Bearer '+g['token']}}}}))
-                    process = subprocess.run([sys.executable, '-X', 'utf8', str(ROOT/'scripts/import_chat_image.py'), '--config', str(config_path), '--session', sid, str(image_path)],
-                                             capture_output=True, text=True, encoding='utf-8', timeout=30, env=dict(os.environ,**SUBPROCESS_ENV))
-                    assert process.returncode == 0, process.stderr
-                    result = json.loads(process.stdout)
-                    assert result['sticker_id'] == aid and result['preview']['tool'] == 'read_chat_sticker'
-                    assert g['token'] not in process.stdout+process.stderr and base64.b64encode(raw).decode() not in process.stdout
-                    assert len(StickerBot.sent) == 2
-                    toml_path = root/'client.toml'
-                    toml_path.write_text('[mcp_servers.tulpa]\nurl='+json.dumps(service.status()['url'])+'\nbearer_token_env_var="IMAGE_FIXTURE_TOKEN"\n')
-                    with patch.dict('os.environ', {'IMAGE_FIXTURE_TOKEN':g['token']}):
-                        assert connection(toml_path) == (service.status()['url'], 'Bearer '+g['token'])
-                    for name, value in (('empty', b''), ('oversize', b'x'*(MAX_BYTES+1))):
-                        path = root/name; path.write_bytes(value)
-                        try: image_bytes(path); raise AssertionError('Invalid local file accepted')
-                        except UploadError: pass
-                    checks.append('local file CLI, JSON/TOML credentials, concise private output, no implicit send')
+                        # Execute the documented local-file uploader against the same
+                        # real service, so escaping, config formats and output are tested.
+                        image_path = root/'generated image.png'; image_path.write_bytes(raw)
+                        config_path = root/'client.json'
+                        config_path.write_text(json.dumps({'mcpServers':{'tulpa':{'url':service.status()['url'],'headers':{'Authorization':'Bearer '+g['token']}}}}))
+                        process = subprocess.run([sys.executable, '-X', 'utf8', str(ROOT/'scripts/import_chat_image.py'), '--config', str(config_path), '--session', sid, str(image_path)],
+                                                 capture_output=True, text=True, encoding='utf-8', timeout=30, env=dict(os.environ,**SUBPROCESS_ENV))
+                        assert process.returncode == 0, process.stderr
+                        result = json.loads(process.stdout)
+                        assert result['sticker_id'] == aid and result['preview']['tool'] == 'read_chat_sticker'
+                        assert g['token'] not in process.stdout+process.stderr and base64.b64encode(raw).decode() not in process.stdout
+                        assert len(StickerBot.sent) == 2
+                        toml_path = root/'client.toml'
+                        toml_path.write_text('[mcp_servers.tulpa]\nurl='+json.dumps(service.status()['url'])+'\nbearer_token_env_var="IMAGE_FIXTURE_TOKEN"\n')
+                        with patch.dict('os.environ', {'IMAGE_FIXTURE_TOKEN':g['token']}):
+                            assert connection(toml_path) == (service.status()['url'], 'Bearer '+g['token'])
+                        for name, value in (('empty', b''), ('oversize', b'x'*(MAX_BYTES+1))):
+                            path = root/name; path.write_bytes(value)
+                            try: image_bytes(path); raise AssertionError('Invalid local file accepted')
+                            except UploadError: pass
+                        checks.append('local file CLI, JSON/TOML credentials, concise private output, no implicit send')
 
-                    # Stopping during image decoding must prevent publication of
-                    # a new usable handle; the ordinary stop path is independent.
-                    entered = threading.Event(); release = threading.Event()
-                    def blocked(raw):
-                        entered.set(); assert release.wait(5)
-                        return pixels(raw)
-                    with patch('chatlocal.mcp_chat_media.pixels', side_effect=blocked), ThreadPoolExecutor(1) as pool:
-                        pending = pool.submit(call, 'import_chat_image', session_id=second, data_base64=encoded)
-                        assert entered.wait(3)
-                        assert call('stop_chat_session', session_id=second).structuredContent['event'] == 'stopped'
-                        release.set(); assert pending.result(5).isError
-                    assert call('import_chat_image', session_id=second, data_base64=encoded).isError
-                    with access.connect() as db:
-                        db.executemany('INSERT INTO calls(grant_id,tool,at,status) VALUES(?,?,strftime("%s","now"),?)',
-                                       [(other['id'],'import_chat_image','ok')]*60)
-                    assert call('import_chat_image', grant=other, session_id=sid, data_base64=encoded).structuredContent['error_code'] == 'rate_limited'
-                    assert not call('get_data_status', grant=other).isError
-                    access.revoke(g['id'])
-                    async def revoked():
-                        async with httpx.AsyncClient(trust_env=False) as http:
-                            response = await http.post(service.status()['url'], headers={'Authorization':'Bearer '+g['token']}, json={})
-                            assert response.status_code == 401
-                    asyncio.run(revoked())
-                    assert len(StickerBot.sent) == 2
-                    checks.append('stop during decode, stopped session, revocation and independent import rate limit')
-    finally:
-        StickerBot.uncertain = False
-        events.close(); upstream.shutdown(); upstream.server_close()
-    print(json.dumps(dict(ok=True, checks=checks, real_qq_messages=0), ensure_ascii=False, indent=2))
+                        # Stopping during image decoding must prevent publication of
+                        # a new usable handle; the ordinary stop path is independent.
+                        entered = threading.Event(); release = threading.Event()
+                        def blocked(raw):
+                            entered.set(); assert release.wait(5)
+                            return pixels(raw)
+                        with patch('chatlocal.mcp_chat_media.pixels', side_effect=blocked), ThreadPoolExecutor(1) as pool:
+                            pending = pool.submit(call, 'import_chat_image', session_id=second, data_base64=encoded)
+                            assert entered.wait(3)
+                            assert call('stop_chat_session', session_id=second).structuredContent['event'] == 'stopped'
+                            release.set(); assert pending.result(5).isError
+                        assert call('import_chat_image', session_id=second, data_base64=encoded).isError
+                        with access.connect() as db:
+                            db.executemany('INSERT INTO calls(grant_id,tool,at,status) VALUES(?,?,strftime("%s","now"),?)',
+                                           [(other['id'],'import_chat_image','ok')]*60)
+                        assert call('import_chat_image', grant=other, session_id=sid, data_base64=encoded).structuredContent['error_code'] == 'rate_limited'
+                        assert not call('get_data_status', grant=other).isError
+                        access.revoke(g['id'])
+                        async def revoked():
+                            async with httpx.AsyncClient(trust_env=False) as http:
+                                response = await http.post(service.status()['url'], headers={'Authorization':'Bearer '+g['token']}, json={})
+                                assert response.status_code == 401
+                        asyncio.run(revoked())
+                        assert len(StickerBot.sent) == 2
+                        checks.append('stop during decode, stopped session, revocation and independent import rate limit')
+        finally:
+            StickerBot.uncertain = False
+            events.close();         print(json.dumps(dict(ok=True, checks=checks, real_qq_messages=0), ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':

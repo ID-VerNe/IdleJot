@@ -2,7 +2,6 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from http.server import ThreadingHTTPServer
 import json
 from pathlib import Path
 import socket
@@ -15,6 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).parent))
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from check_fixture_support import isolated_env, network_guard
+from fixture_server import fixture_server
 from check_mcp_reactions import ReactionBot, Events, eventually, ROOT
 from check_mcp_language_learning import ground_fixture_rows
 from chatlocal.store import Store
@@ -219,32 +219,33 @@ async def wire(service,connection,sid,ui):
 def main():
     assert Path(__import__('chatlocal.mcp_chat_turns',fromlist=['x']).__file__).resolve()==ROOT/'chatlocal/mcp_chat_turns.py'
     events=Events();ReactionBot.sent=[];ReactionBot.writes=[];ReactionBot.history={};ReactionBot.intercept=None
-    server=ThreadingHTTPServer(('127.0.0.1',0),ReactionBot)
-    threading.Thread(target=server.serve_forever,daemon=True).start()
-    ports={server.server_port,events.port};restrict,_=network_guard(ports)
-    try:
-        with tempfile.TemporaryDirectory(prefix='tulpa-language-usage-') as tmp,patch.dict('os.environ',isolated_env(),clear=True),patch('socket.create_connection',restrict):
-            root=Path(tmp);store=Store(root/'chats.sqlite3')
-            (root/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{server.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n','utf-8')
-            with patch('chatlocal.onebot.ROOT',root),patch('chatlocal.message_sender.ROOT',root):
-                service=install_mcp_routes(app:=FastAPI(),store);access=service.access
-                with TestClient(app) as ui:
-                    with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
-                    ports.add(port);access.configure(True,port);service.start()
-                    connection=access.create(dict(name='usage-fixture',platforms=['qq'],conversations=[['qq','111:group:222']],chat=True,send=True,chat_reactions=True))
-                    (access.path.parent/'mcp-chat-policy.json').write_text('{"quiet_seconds":0.1,"reply_cooldown_seconds":0}','utf-8')
-                    service.tools.chat.reactions.policy_path.write_text('{"cooldown_seconds":0}','utf-8')
-                    sid=service.tools.call(connection['token'],'start_chat_session',dict(conversation_id='111:group:222',persona_preset='little_whale_v2',idempotency_key='usage-start'),threading.Event()).structuredContent['session']['id']
-                    event=dict(post_type='message',message_type='group',self_id=111,group_id=222,user_id=333,
-                        message_id=-9001,message_seq=9001,time=int(time.time()),sender={'user_id':333},
-                        message=[dict(type='text',data={'text':'合成测试消息，不来自真实群'})])
-                    ReactionBot.history['-9001']=deepcopy(event);events.send(event)
-                    def received():
-                        with access.connect() as db:return db.execute('SELECT 1 FROM chat_inbox WHERE session_id=? AND message_id=?',(sid,'-9001')).fetchone()
-                    eventually(received)
-                    time.sleep(.15)
-                    print(json.dumps(asyncio.run(wire(service,connection,sid,ui)),ensure_ascii=False))
-    finally:server.shutdown();events.close()
+    allowed_ports={events.port}
+    with fixture_server(ReactionBot, ports=allowed_ports) as server:
+        restrict,_=network_guard(allowed_ports)
+        try:
+            with tempfile.TemporaryDirectory(prefix='tulpa-language-usage-') as tmp,patch.dict('os.environ',isolated_env(),clear=True),patch('socket.create_connection',restrict):
+                root=Path(tmp);store=Store(root/'chats.sqlite3')
+                (root/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{server.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n','utf-8')
+                with patch('chatlocal.onebot.ROOT',root),patch('chatlocal.message_sender.ROOT',root):
+                    service=install_mcp_routes(app:=FastAPI(),store);access=service.access
+                    with TestClient(app) as ui:
+                        with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
+                        allowed_ports.add(port);access.configure(True,port);service.start()
+                        connection=access.create(dict(name='usage-fixture',platforms=['qq'],conversations=[['qq','111:group:222']],chat=True,send=True,chat_reactions=True))
+                        (access.path.parent/'mcp-chat-policy.json').write_text('{"quiet_seconds":0.1,"reply_cooldown_seconds":0}','utf-8')
+                        service.tools.chat.reactions.policy_path.write_text('{"cooldown_seconds":0}','utf-8')
+                        sid=service.tools.call(connection['token'],'start_chat_session',dict(conversation_id='111:group:222',persona_preset='little_whale_v2',idempotency_key='usage-start'),threading.Event()).structuredContent['session']['id']
+                        event=dict(post_type='message',message_type='group',self_id=111,group_id=222,user_id=333,
+                            message_id=-9001,message_seq=9001,time=int(time.time()),sender={'user_id':333},
+                            message=[dict(type='text',data={'text':'合成测试消息，不来自真实群'})])
+                        ReactionBot.history['-9001']=deepcopy(event);events.send(event)
+                        def received():
+                            with access.connect() as db:return db.execute('SELECT 1 FROM chat_inbox WHERE session_id=? AND message_id=?',(sid,'-9001')).fetchone()
+                        eventually(received)
+                        time.sleep(.15)
+                        print(json.dumps(asyncio.run(wire(service,connection,sid,ui)),ensure_ascii=False))
+        finally:
+            events.close()
 
 
 if __name__=='__main__':main()

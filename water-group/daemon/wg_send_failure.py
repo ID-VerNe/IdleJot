@@ -224,15 +224,12 @@ def record(group_id, failure, mute=None, mute_until=None, recovered=None, now=No
 
 
 def _write(entry):
-    """原子替换账本；写不进返回 False（调用方不许因此崩）。"""
-    try:
-        LEDGER.parent.mkdir(parents=True, exist_ok=True)
-        tmp = LEDGER.with_name(LEDGER.name + ".tmp")
-        tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, LEDGER)
-    except OSError:
-        return False
-    return True
+    """原子替换账本；写不进返回 False（调用方不许因此崩）。
+
+    issue #169 PD：合流到 `wg_daemon.write_json`（唯一临时名 + os.replace）。
+    """
+    import wg_daemon
+    return wg_daemon.write_json(LEDGER, entry)
 
 
 def read():

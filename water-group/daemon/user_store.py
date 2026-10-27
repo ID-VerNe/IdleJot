@@ -101,10 +101,13 @@ def save_user(qq, record):
         "last_renew_at": (record or {}).get("last_renew_at"),
         "ck_invalid_at": (record or {}).get("ck_invalid_at"),
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    # issue #169 PD：合流到 wg_daemon.write_json（唯一临时名 + os.replace）。
+    # 代价是丢掉 `indent=1` 的可读排版——user_store 的读者全是 json.loads（宿主
+    # host.py / load_user），没有人肉读这个文件的需求，可读性让位于并发安全。
+    # auth 字段已 DPAPI 加密 + base64，文件本身不是明文敏感，无需 chmod 0600
+    #（§4.4：Windows 上 DPAPI 已足够）。
+    from wg_daemon import write_json
+    write_json(path, payload)
     return payload
 
 

@@ -387,13 +387,10 @@ def _record_launch(proc, account, mode):
         "account": account or "",
         "mode": mode,
     }
-    try:
-        LAUNCH_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = LAUNCH_FILE.with_name(LAUNCH_FILE.name + ".tmp")
-        tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, LAUNCH_FILE)
-    except OSError:
-        pass
+    # issue #169 PD：合流到 wg_daemon.write_json（唯一临时名 + os.replace）。
+    # 原固定名 `.tmp` 并发写互踩；失败不抛，与原 `except OSError: pass` 一致。
+    import wg_daemon
+    wg_daemon.write_json(LAUNCH_FILE, record)
     LAST_LAUNCH = record
     return record
 

@@ -312,14 +312,15 @@ def _device_state():
 
 
 def _save_device_state(state):
-    """原子写回：崩溃不留半个 JSON（与 user_store / qr_login 同一手法）。"""
-    try:
-        DEVICE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = DEVICE_FILE.with_name(DEVICE_FILE.name + ".tmp")
-        tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, DEVICE_FILE)
-    except OSError:
-        pass
+    """原子写回：崩溃不留半个 JSON。
+
+    issue #169 PD：合流到 `wg_daemon.write_json`（唯一临时名 + os.replace）。
+    与 user_store / qr_login / wg_send_failure / bootstrap 原本各写一份固定名
+    `.tmp`，并发写互踩——wg_gap 已先修（本节第一个 commit），其余 JSON-plain
+    落盘点统一走助手。失败不抛，与原 `except OSError: pass` 一致。
+    """
+    import wg_daemon
+    wg_daemon.write_json(DEVICE_FILE, state)
 
 
 def device_id():

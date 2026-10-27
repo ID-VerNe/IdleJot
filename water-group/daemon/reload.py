@@ -127,9 +127,11 @@ def _enqueue(request: dict):
     target = path
     if path.exists():
         target = path.with_name(f"{REQUEST_NAME}.{request['nonce']}")
-    tmp = target.with_name(f"{target.name}.tmp.{os.getpid()}")
-    tmp.write_text(json.dumps(request, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, target)
+    # issue #169 PD：合流到 wg_daemon.write_json（唯一临时名 pid + 随机后缀）。
+    # 原写法已带 pid 但缺随机后缀——同 pid 的并发请求（reload worker 复用进程）
+    # 仍会互踩 tmp。助手统一带 token_hex(4)，并发写互不踩。
+    from wg_daemon import write_json
+    write_json(target, request)
     return target
 
 

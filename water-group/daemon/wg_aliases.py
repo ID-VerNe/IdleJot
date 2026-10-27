@@ -93,8 +93,8 @@ def sender_tag(sender, group_id=None, limit=SENDER_ALIAS_CHARS):
     return f"（{'，'.join(parts)}）" if parts else ""
 
 
-def body_hits(body, group_id=None, limit=BODY_HITS, sender=""):
-    """正文里命中的别名指向：``["↪ 外号「X」= 群友甲(12345)", ...]``。
+def body_targets(body, group_id=None, limit=BODY_HITS, sender=""):
+    """正文点到的人：``[("12345", "群友甲", "老甲"), ...]``（uid / 主名 / 命中的别名）。
 
     长的名字先匹配（「时之锁」优先于「时之」），同一个人只指一次；发送者自己
     的名字不指——那一行本来就是他说的话。没有命中就没有输出，不猜。
@@ -102,6 +102,9 @@ def body_hits(body, group_id=None, limit=BODY_HITS, sender=""):
     issue #52 两条防自指：扫描前剥掉 `@<数字>`（@ 段是指向信息不是正文，用本模块
     自己的 `AT_MENTION_RE`）；纯数字别名（QQ 号）不参与正文命中。`@<显示名>`
     命中别名视为真实提及，保留。
+
+    `body_hits` 只负责把这份结果排版给人看；`wg_dossiers` 要的是 uid（按人取
+    画像，issue #163）。命中规则只有这一份——两处各自扫一遍就会各错一条。
     """
     text = AT_MENTION_RE.sub("", str(body or ""))
     if not text:
@@ -116,7 +119,16 @@ def body_hits(body, group_id=None, limit=BODY_HITS, sender=""):
         if alias.isdigit() or alias not in text:
             continue
         seen_uids.add(uid)
-        hits.append(f"↪ 外号「{alias}」= {primary}({uid})")
+        hits.append((uid, primary, alias))
         if len(hits) >= limit:
             break
     return hits
+
+
+def body_hits(body, group_id=None, limit=BODY_HITS, sender=""):
+    """正文里命中的别名指向：``["↪ 外号「X」= 群友甲(12345)", ...]``。
+
+    命中规则全在 :func:`body_targets`，这里只排版：一行一个指向，挂在该行末尾。
+    """
+    return [f"↪ 外号「{alias}」= {primary}({uid})"
+            for uid, primary, alias in body_targets(body, group_id, limit, sender)]

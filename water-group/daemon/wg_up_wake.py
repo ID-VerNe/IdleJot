@@ -103,8 +103,16 @@ def login_account(info):
     """把 `login_info()` 的 `data` 解析成 `(account, nickname)`，缺失的一侧为 None。
 
     解析只放这一处：`--status` 与以后任何要印账号的入口共用，避免各自再解一次
-    （issue #156 就是两处口径不一致）。`None` / 非 dict / 空字典一律 `(None, None)`
-    ——「答了但没报账号」与「没答」是两件事，由调用方按 `info is None` 区分。
+    （issue #156 就是两处口径不一致）。
+
+    两种「拿不到账号」要分开读：`info is None` 是 OneBot 没答（端口在、桥不应答）；
+    空字典 `{}` 是答了、只是没报账号。调用方按 `info is None` 区分这两件事，所以
+    `None` 与 `{}` 都返回 `(None, None)` 并不表示它们同义。
+
+    非 dict（元组是 issue #156 之前的历史形状）同样返回 `(None, None)`：形状漂移
+    在这里被归一成「未报账号」，而不是抛异常把 `--status` 整条打挂。代价是它
+    不会自己喊出来，所以生产者的形状由 `scripts/check_status_napcat_line.py`
+    契约 1 单独钉住（issue #159）。
     """
     if not isinstance(info, dict):
         return (None, None)

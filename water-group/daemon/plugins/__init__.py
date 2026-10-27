@@ -56,18 +56,24 @@ def _load_busboss() -> Plugin:
     return module.PLUGIN
 
 
+def _load_repeater() -> Plugin:
+    import plugins.repeater_plugin as module
+    return module.PLUGIN
+
+
 # 名字在这里出现一次，是为了让失败也能报到具体插件上（note_error(name)）。
 LOADERS = (
     ("miyoushe", _load_miyoushe),
     ("sixty", _load_sixty),
     ("followup", _load_followup),
     ("busboss", _load_busboss),
+    ("repeater", _load_repeater),
 )
 
 # 事件型插件（issue #4 PD2a）：没有 ``#`` 指令，宿主在通用流程点派发命名事件。
 # 与 LOADERS 共用同一个 loader、同一个模块级 PLUGIN——commands 进程注册表里的
 # 和 CLI 派发到的是同一个对象，不存在两份状态。
-EVENT_LOADERS = (("followup", _load_followup),)
+EVENT_LOADERS = (("followup", _load_followup), ("repeater", _load_repeater))
 
 
 def load_all(log=None, capabilities=None, settings_provider=None, sender=None):

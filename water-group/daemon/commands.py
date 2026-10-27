@@ -71,6 +71,10 @@ DEFAULTS = {
     "http_url": "http://127.0.0.1:43000",
     "token": "",
     "self_account": "",
+    # 自己的名字（config.json 的 self_names）：复读插件要判「正文是不是在叫我」
+    # （issue #155），跟一句带自己名字的话等于替人召唤自己。宿主不认识具体插件，
+    # 只把这份名单归一后放进设置——与 self_account 同族，都是「谁是本机」。
+    "self_names": [],
     "groups": set(),
 }
 
@@ -286,6 +290,8 @@ def settings_from(cfg):
         "http_url": str(cfg.get("onebot_http_url") or DEFAULTS["http_url"]),
         "token": str(cfg.get("onebot_token") or ""),
         "self_account": str(cfg.get("self_account") or ""),
+        "self_names": [str(n).strip() for n in (cfg.get("self_names") or ())
+                       if str(n).strip()],
         "groups": groups,
     })
     return merged
@@ -614,14 +620,44 @@ def notify_login(settings, group_id, qq, text):
         log(f"qr notify failed group={group_id}: {type(exc).__name__}: {exc}")
 
 
+def should_dispatch_command(settings, event, self_ids):
+    """这条 `#` 指令要不要处理：总闸 + 四层过滤（issue #155）。
+
+    总闸单独一层的理由：进程现在可能**只为事件型插件**而活着
+    （``event_stream_needed``），那时 ``#`` 指令必须照旧静默——启动日志那句
+    「只跑事件型插件（# 指令不回复）」要说到做到。``should_handle`` 只看消息
+    形态与群白名单，它不知道总闸是开是关。
+    """
+    return bool(settings.get("enabled")) and should_handle(event, settings, self_ids)
+
+
+def event_stream_needed(settings):
+    """这个进程要不要起（issue #155）。
+
+    历史总闸是 ``slash_commands.enabled``：关掉就整个不启动。事件型插件
+    （``Plugin.needs_event_loop``）靠这条 WS 事件流吃饭，跟着一起死之后群里
+    表现成「功能没了」，而日志里只有一行「不启动」。所以声明过那一位且当前
+    启用的插件，能单独把事件流拉起来。
+
+    ``group_id`` 传空串：只判总开关，不套群白名单——白名单是「这些群才跟」，
+    不是「别的群就别起进程」。
+    """
+    if settings.get("enabled"):
+        return True
+    return any(plugin.needs_event_loop and plugin.enabled(settings)
+               for plugin in PLUGINS.plugins())
+
+
 def serve():
     from websockets.exceptions import ConnectionClosed
     from websockets.sync.client import connect
 
     settings = load_settings()
-    if not settings["enabled"]:
-        log("slash_commands.enabled 为假，指令守护不启动")
+    if not event_stream_needed(settings):
+        log("slash_commands.enabled 为假且没有插件需要事件流，指令守护不启动")
         return 0
+    if not settings["enabled"]:
+        log("slash_commands.enabled 为假：只跑事件型插件（# 指令不回复）")
     if not acquire_lock():
         return 0
     # 扫码轮询线程与 WS 循环共享最新设置：热重载只换 box 里的引用，线程不用重启。
@@ -640,6 +676,42 @@ def plugin_counts():
     """启动日志里的插件指纹：``名字:指令数,名字:指令数``。缺项 = 那个插件没加载起来。"""
     return ",".join(f"{plugin.name}:{len(plugin.commands)}"
                     for plugin in PLUGINS.plugins())
+
+
+def _emit_group_message(event, settings, self_ids):
+    """把一条群消息交给事件型插件；返回要发出去的文本就发（issue #155）。
+
+    派发点在 ``should_handle`` 之前：``#`` 指令守护只认前缀，而事件型插件要看的
+    是没有前缀的那些。发送走 ``PLUGINS.host.send``（与插件同一条通道，引用 / 编码 /
+    失败处理都在宿主里），不是本进程私开一条 HTTP——否则「插件不碰传输」这条边界
+    在这里就被绕开了。
+
+    整段吞异常：一条复读跟不出去，不该让 WS 循环（以及指令守护）跟着死。
+    """
+    if event.get("message_type") != "group":
+        return None
+    try:
+        reply = PLUGINS.emit("group_message", {
+            "settings": settings,
+            "event": event,
+            "self_ids": set(self_ids),
+        })
+    except Exception as exc:  # noqa: BLE001  插件判定炸了不能杀死监听
+        log(f"group_message plugin failed: {type(exc).__name__}: {exc}")
+        return None
+    if not reply:
+        return None
+    try:
+        PLUGINS.host.send(str(event.get("group_id") or ""), str(reply))
+        # 日志不写插件名：宿主不该知道是哪个插件接了这一手（同 app 侧
+        # 「宿主里不许出现插件名字面量」）。要查是谁，看 `--status` 的插件行。
+        log(f"event reply sent group={event.get('group_id')} "
+            f"msg={event.get('message_id')} text={str(reply)[:40]!r}")
+    except Exception as exc:  # noqa: BLE001  发送失败不能杀死监听
+        log(f"event reply failed group={event.get('group_id')}: "
+            f"{type(exc).__name__}: {exc}")
+        return None
+    return reply
 
 
 def _serve(settings, connect, ConnectionClosed, box=None):
@@ -698,11 +770,16 @@ def _serve(settings, connect, ConnectionClosed, box=None):
                         settings = load_settings()
                         if box is not None:
                             box["settings"] = settings
-                        if not settings["enabled"]:
-                            log("slash_commands.enabled 被关掉，退出")
+                        if not event_stream_needed(settings):
+                            log("slash_commands.enabled 被关掉且没有插件需要事件流，退出")
                             return 0
                         reload_at = time.monotonic() + RELAY_SECONDS
-                    if should_handle(data, settings, self_ids):
+                    # 事件型插件先看全量群消息（issue #155）：`should_handle` 只认
+                    # `#` 前缀，而复读/接龙要判的恰恰是没有前缀的那些。派发点在
+                    # 指令之前、与指令互不影响——插件自己过三态门控与群白名单，
+                    # 宿主不替它做选择（见 base.Hooks.on_event）。
+                    _emit_group_message(data, settings, self_ids)
+                    if should_dispatch_command(settings, data, self_ids):
                         dispatch(data, settings, self_ids, state)
         except KeyboardInterrupt:
             raise

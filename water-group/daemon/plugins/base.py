@@ -133,6 +133,12 @@ class Plugin:
     # 平铺读——``enabled`` 进三态、其余键进 options。只有真的有过一个顶层段的
     # 插件才声明（followup 的 ``"followup"``）；新插件留空。
     legacy_section: str = ""
+    # 这个插件靠 ``commands`` 进程的 WS 事件流吃饭（issue #155）：那个进程的
+    # 总闸是 ``slash_commands.enabled``，关掉就整个不启动，插件会跟着静默死掉
+    # 且一个字都不说。声明这一位的插件能在指令关掉时单独把事件流拉起来。
+    # 只给「必须看全量群事件」的插件用（目前只有 repeater）；追问窗口由
+    # reply/watch/up 三个一次性 CLI 派发，不依赖这个进程，所以不声明。
+    needs_event_loop: bool = False
 
     def enabled(self, settings: Settings, group_id: str = "") -> bool:
         """三态门控：``enabled`` 总开关 → ``groups`` 白名单 → 群级 ``group_off``。

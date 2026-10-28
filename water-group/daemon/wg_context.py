@@ -66,8 +66,9 @@ def active_session_id():
 def recent_chatter(limit, around=None):
     """Every message the group sent, not just the ones that woke us.
 
-    mention_only keeps ordinary chatter out of wg_events.jsonl, so the daemon
-    files cannot answer "what were they talking about just now". chat_inbox can:
+    mention_only keeps ordinary chatter out of wg_events.jsonl (natural groups now
+    let it in, #188, but mention_only groups still do not), so the daemon files
+    cannot answer "what were they talking about just now". chat_inbox can:
     the backend stores each event before deciding whether to deliver it.
     """
     # 延迟 import：reply.py 在模块级再导出本模块，顶层反向 import 会成环。

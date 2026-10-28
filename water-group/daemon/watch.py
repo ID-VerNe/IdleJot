@@ -337,7 +337,8 @@ def main():
             return 0
 
         # 没有新的 @/关键词，但追问窗口可能还开着：回复之后群里继续聊的几句
-        # 全在 chat_inbox 里（mention_only 根本没把它们投递出来），顺带查一眼。
+        # 全在 chat_inbox 里（mention_only 群里 collector 没把它们投递出来，#188；
+        # natural 群普通消息已走 wg_events.jsonl 唤醒，不靠这路），顺带查一眼。
         # 窗口自己会过期；路上撞见了就顺手关掉，不用另起进程打扫。
         # 查窗口、判三态、收窗都在插件里（issue #4 PD2a）；宿主只负责渲染。
         scan = plugins.emit("wake_scan", {"settings": _plugin_settings()})

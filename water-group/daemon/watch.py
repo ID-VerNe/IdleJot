@@ -25,6 +25,14 @@ either: the timeout block ends with an ``EXPIRED:`` count and its ids, so
 "nobody watched for two hours" and "the group said nothing" stop looking the
 same (issue #69).
 
+A wake that was scanned but never delivered is picked back up (issue #182).
+The listener lives one round, so when the host cuts the call before the wake
+block reaches the agent, the cursor has already moved past those ids and every
+later listener starts after them -- they sit in ``[待回]`` forever. A default
+start now rewinds the cursor to just before the oldest mention that is still
+unanswered and unexpired, reprints it, and says ``BACKFILL:`` why. Answered and
+expired wakes are left behind (the same judgment as ``reply.py --list``).
+
 While it waits it also refreshes the listener's liveness beat (issue #112): "was
 anyone on watch" has to be answerable from a file afterwards, and this poll loop
 is the only thing running during the long quiet stretches. Bare ``watch.py`` runs
@@ -86,6 +94,39 @@ def write_cursor(value):
 
 def latest_id(rows):
     return max((r.get("id") or 0) for r in rows) if rows else 0
+
+
+def wake_pending(event, rows, ledger):
+    """这一条到现在还该被回：叫得醒、账本没记、没过待回时效（issue #182）。
+
+    与 `reply.py --list` 的 `[待回]` 同一口径（同一组 `up.*` 判定），所以
+    「列表里还是待回」与「重挂的监听会不会补扫」不会分叉。
+    """
+    return (bool(up.wake_reason(event))
+            and not up.replied_after(event.get("id"), rows, ledger)
+            and not up.wake_expired(event))
+
+
+def rewind_for_backlog(rows, cursor, ledger):
+    """游标之前还有未回唤醒时，把起点退到最老一条之前（issue #182）。
+
+    监听只活一轮：宿主在唤醒块回传前截断调用时，Agent 一个字都没看到，而
+    游标已经被推进过这些 id——新监听从文件游标起扫，它们就永久 `[待回]`。
+    退回去走原来的 fresh 分支，等于把「漏送的唤醒」重放一次；已回与过期的
+    不参与（对照组见 check_listener_rehang 契约 44）。
+
+    只在默认路径调用：`--after` / `--replay` 是调用方显式给的起点，不许被
+    改写。没有 id 的坏行不参与回退——否则游标会被拉到 0，整批历史重新翻出来。
+    """
+    pending = [e for e in rows
+               if (e.get("id") or 0) and (e.get("id") or 0) <= cursor
+               and wake_pending(e, rows, ledger)]
+    if not pending:
+        return cursor
+    target = max(0, min(e.get("id") or 0 for e in pending) - 1)
+    print(f"BACKFILL: 游标 {cursor} 之前有 {len(pending)} 条未回唤醒，"
+          f"回退到 {target} 重新扫描")
+    return target
 
 
 def report_expired(rows, start_cursor):
@@ -182,11 +223,19 @@ def main():
     if note:
         print(note)
     reported_empty = False
+    # 重挂后的第一轮先回溯（issue #182）：游标之前若还压着未回唤醒，退回去让
+    # 下面的 fresh 分支重放它们。只做一次，且只在默认路径——`--after` / `--replay`
+    # 的起点是调用方显式给的，不许被改写。start_cursor 已是回退前的值，
+    # report_expired 的口径不受影响。
+    check_backlog = args.after is None and not args.replay
 
     while True:
         raw_rows = up.events()
         rows = wg_isolation.rows_of(raw_rows)
         ledger = up.replied_ids()
+        if check_backlog:
+            check_backlog = False
+            cursor = rewind_for_backlog(rows, cursor, ledger)
         # 过滤把自己的会话滤空了要出声（issue #164）：群号/self_account/状态目录
         # 配错时，「过滤生效」与「群里没人说话」在输出里长得一模一样。每轮只报一次。
         empty_note = wg_isolation.filter_report(raw_rows)

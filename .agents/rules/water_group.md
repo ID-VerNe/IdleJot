@@ -70,12 +70,15 @@
 .venv/Scripts/python.exe water-group/daemon/dossier.py --mark --through <末条id>
 ```
 
-触发有三条（`config.json` 的 `dossier` 段）：攒够 `burst_messages`（默认 80）；
-或闲置 `idle_minutes`（默认 20）且攒够 `min_messages`（默认 25）；或连续
-`quiet_rounds`（默认 3）轮 `listen.py` 没人指名、这几轮加起来超过 `quiet_minutes`
-（默认 4，须小于 3 × 轮长，否则轮次判据成死码）且至少 `quiet_min_messages`
-（默认 1）条素材。轮次由 `listen.py` 每轮
-静默后 `--tick` 自己记，`WAKE` 与 `--mark` 清零；`--no-digest` 与 `--probe` 不计。
+触发有三条（`config.json` 的 `dossier` 段），按 `quiet` → `burst` → `idle` 判：
+连续 `quiet_rounds`（默认 3）轮 `listen.py` 没人指名、这几轮加起来超过
+`quiet_minutes`（默认 4，须小于 3 × 轮长，否则轮次判据成死码）且至少
+`quiet_min_messages`（默认 1）条素材；或最近 `burst_window_minutes`（默认 10）内
+涌入 `burst_messages`（默认 80）条；或闲置 `idle_minutes`（默认 20）且攒够
+`min_messages`（默认 25）。轮次由 `listen.py` 每轮静默后 `--tick` 自己记，`WAKE`
+与 `--mark` 清零；`--no-digest` 与 `--probe` 不计。`NO due-hold` 表示上一批 DUE
+还没 `--mark`、`listen.py` 已用 `--tick due` 记过，不是异常；超过
+`reap_after_minutes`（默认 15）仍无人处理时 `--digest --reap` 会兜底推进游标。
 
 写档案只走 MCP `update_member_dossier` / `query_member_dossier` / `consolidate_chat_memory`，
 **禁止直连 SQLite**。`traits` 必须传 dict（传数组会被静默丢空）。

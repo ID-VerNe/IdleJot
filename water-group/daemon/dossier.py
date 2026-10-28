@@ -5,19 +5,30 @@ still lands in `chat_inbox`: Tulpa inserts each event before deciding whether to
 deliver it. The raw material for a profile refresh is therefore already on disk --
 this script only decides when there is enough of it and hands it over.
 
-The trigger is deliberately boring, and there are three of them. A burst of
-messages is enough on its own; otherwise the caller has to be idle for a while
-*and* have a decent pile of unread chatter. Neither of those covers the case the
-bot actually lives in -- a group that keeps chatting without ever mentioning us
--- so a third path counts consecutive listening rounds that nobody named us in
-(issue #162). Every number lives in `config.json` under `dossier` so it can be
-tuned without touching code.
+The trigger is deliberately boring, and there are three of them, checked in this
+order (issue #183): consecutive listening rounds nobody named us in (the primary
+path, issue #162), a *recent* burst of messages, then the old idle-and-backlog
+pair. Quiet goes first because it is the only path that says why we are being
+woken; a burst only says "a lot arrived", and when it is measured against the
+whole backlog it is true forever once the cursor stalls. So burst counts only
+the last `burst_window_minutes` -- a real spike, not an old pile.
+
+Being woken is itself a state (issue #183). `--check` records nothing, so the
+caller does: after a DUE, `--tick due` stores `due_event_id` / `due_at`, and
+`--check` answers `NO due-hold` for the same batch until either new material
+arrives, the caller summarises it (`--mark`), or `--digest --reap` releases the
+cursor. Without that, a cursor nobody advances makes every round announce the
+same 400 messages again, which is indistinguishable from a real backlog.
+
+Every number lives in `config.json` under `dossier` so it can be tuned without
+touching code.
 
 Usage:
   dossier.py --check            exit 0 when a refresh is due, 3 when it is not
   dossier.py --dump [N]         print the material, one JSON object per line
   dossier.py --mark             record everything up to now as summarised
-  dossier.py --tick [reset]     count one round nobody named us (reset = clear)
+  dossier.py --tick [round|reset|due]  count a quiet round / clear / record a DUE
+  dossier.py --digest [--reap]  rule-based pass; --reap may release a stalled cursor
   dossier.py --ingest FILE      write one summary into the group timeline
   dossier.py --apply FILE.json  write a batch of member dossiers / events
 
@@ -53,6 +64,19 @@ seconds, and pinning rounds alone would turn "about five minutes" into a lie.
 overwrite meant `--mark` erased whatever a new key had accumulated. The symptom
 was either "due again right after a refresh" or "the counter never grows", and
 both look intermittent.
+
+Who advances `last_event_id` (issue #183) -- one owner, one fallback:
+
+* the model-backed pass, via `--mark`, after `--dump` was actually summarised.
+  This is the only authoritative advance: the material was read, not just
+  skimmed.
+* `--digest --reap` is the fallback, and only after `reap_after_minutes` have
+  passed since a DUE nobody acted on. It advances to the last event this rule
+  pass covered, so the backlog stops lying about being "about to be summarised".
+  The rows stay in `chat_inbox`; only the pending accounting moves.
+* `--digest` alone still does not advance, and that is deliberate: the cheap
+  keyword pass and the model pass want the same rows, and silently eating them
+  here is how the cursor stalled in the first place.
 
 Known boundary: `wg_dossier.json` is one global file, not one per group, so a
 multi-group deployment shares one counter and one cursor (`doc/MULTI_GROUP_PLAN.md`
@@ -94,6 +118,12 @@ DEFAULTS = {
     "quiet_minutes": 4,
     # 静默路径的素材下限：0 条时触发等于空跑一次模型调用（issue 待讨论 1）。
     "quiet_min_messages": 1,
+    # burst 是「最近一波」而不是「从游标起的积压」（issue #183）：后者只增不减，
+    # 游标一停就把几百条历史积压永远报成爆发，quiet 分支再也走不到。
+    "burst_window_minutes": 10,
+    # DUE 之后等多久还没人 `--mark`，才允许 `--digest --reap` 兜底推进游标
+    # （issue #183）。给模型深加工留出处理窗口；调小会让素材过早被规则层吃掉。
+    "reap_after_minutes": 15,
 }
 
 DUE = 0
@@ -280,6 +310,103 @@ def quiet_progress(cfg):
     return f"{rounds}/{target}({elapsed:.1f}min)"
 
 
+def _pending_latest(rows):
+    """Newest event id in a pending batch; 0 when there is nothing to read."""
+    return rows[-1]["id"] if rows else 0
+
+
+def recent_count(rows, cfg, now=None):
+    """How many of `rows` arrived inside the burst window (issue #183).
+
+    `burst_messages` promises "a lot happened just now". Counting everything
+    newer than the cursor instead turns a stalled cursor into a permanent burst:
+    the number only grows, and `--check` reports the same 400-message backlog as
+    a spike forever. A row without a usable timestamp cannot be shown to be
+    recent, so it is left out -- fail closed towards "not a burst" rather than
+    inventing one.
+    """
+    window = cfg["burst_window_minutes"]
+    if window <= 0:
+        return len(rows)
+    moment = time.time() if now is None else float(now)
+    cutoff_ms = (moment - window * 60) * 1000
+    recent = 0
+    for row in rows:
+        try:
+            ts = float(row.get("ts"))
+        except (TypeError, ValueError):
+            continue
+        if ts >= cutoff_ms:
+            recent += 1
+    return recent
+
+
+def due_state():
+    """(event_id, at) of the DUE we last announced; (0, None) when none.
+
+    Same degradation rule as `quiet_state`: the file is shared with `--mark`
+    and hand edits, so a string or a bool must read as "no DUE" instead of
+    making `--check` crash or hold forever.
+    """
+    data = load_mark()
+    if not isinstance(data, dict):
+        return 0, None
+    event_id = data.get("due_event_id")
+    at = data.get("due_at")
+    event_id = event_id if isinstance(event_id, int) and not isinstance(event_id, bool) else 0
+    try:
+        at = (float(at) if at is not None and not isinstance(at, bool) else None)
+    except (TypeError, ValueError):
+        at = None
+    return max(0, event_id), at
+
+
+def due_hold(latest, cfg):
+    """True while the batch we already announced is still the newest one.
+
+    Re-announcing the same unsorted backlog every round is what made
+    `DOSSIER_DUE` spin (issue #183): the caller cannot tell "new work" from "the
+    same work I ignored". New material, `--mark`, or `--digest --reap` all end
+    the hold, so silence here is always traceable to one of the three.
+    """
+    event_id, at = due_state()
+    if not event_id or at is None or latest > event_id:
+        return False
+    return (time.time() - at) / 60 < cfg["reap_after_minutes"]
+
+
+def reap_stalled(cfg, batch, now=None):
+    """Release a cursor nobody advanced (issue #183).
+
+    Returns `(through, stalled_minutes)`. `through` is 0 when nothing moved;
+    `stalled_minutes` is None when there was no DUE to begin with, so the caller
+    can tell "not applicable" from "held, but still fresh".
+
+    Only a DUE older than `reap_after_minutes` is reaped, and only up to the
+    last row this rule pass actually covered -- advancing to the newest id would
+    skip the middle of a backlog that `--dump` is still chewing through
+    oldest-first.
+    """
+    event_id, at = due_state()
+    if not event_id or at is None:
+        return 0, None
+    moment = time.time() if now is None else float(now)
+    stalled = max(0.0, (moment - at) / 60)
+    if stalled < cfg["reap_after_minutes"]:
+        return 0, None
+    cursor = int(load_mark().get("last_event_id") or 0)
+    through = min(_pending_latest(batch), event_id) if batch else cursor
+    if through <= cursor:
+        # Nothing this pass could cover: drop the stale DUE so the next real
+        # batch is announced instead of being held by a ghost.
+        save_mark({"due_event_id": None, "due_at": None})
+        return 0, stalled
+    save_mark({"last_event_id": through, "last_run": int(moment),
+               "due_event_id": None, "due_at": None,
+               "quiet_rounds": 0, "quiet_since": None})
+    return through, stalled
+
+
 def cmd_check(cfg):
     session_id, _ = active_session()
     if not session_id:
@@ -287,16 +414,18 @@ def cmd_check(cfg):
         return NOT_YET
     rows = pending_rows(session_id, int(load_mark().get("last_event_id") or 0))
     count = len(rows)
+    latest = _pending_latest(rows)
     idle = idle_minutes()
-    if count >= cfg["burst_messages"]:
-        print(f"YES burst pending={count}")
-        return DUE
-    if count >= cfg["min_messages"] and idle >= cfg["idle_minutes"]:
-        print(f"YES idle={idle:.0f}min pending={count}")
-        return DUE
-    # Third path (issue #162): nobody named us for N rounds in a row. Rounds are
-    # the primary test; the minutes are a floor because `--timeout` is the
-    # caller's to shrink, and three 30s rounds are not "about five minutes".
+    # Same batch, already announced, caller still inside its window: saying it
+    # again adds no information (issue #183). `--check` stays read-only here;
+    # the DUE itself is recorded by `listen.py` via `--tick due`.
+    if count and due_hold(latest, cfg):
+        print(f"NO due-hold pending={count} latest={latest}")
+        return NOT_YET
+    # Quiet comes first (issue #183). It is the path that can say *why* we are
+    # due; burst only says "a lot arrived", and while burst was measured
+    # against the whole backlog it was true forever once the cursor stalled --
+    # which is exactly how the quiet path became dead code.
     rounds, since = quiet_state()
     elapsed = quiet_minutes_elapsed()
     if (rounds >= cfg["quiet_rounds"]
@@ -305,16 +434,31 @@ def cmd_check(cfg):
         stamp = wg_clock.clock(since) if since is not None else "-"
         print(f"YES quiet rounds={rounds} since={stamp} pending={count}")
         return DUE
+    # Burst is a spike, not a backlog (issue #183): only rows inside
+    # `burst_window_minutes` count, so an old pile left behind by a stalled
+    # cursor no longer masquerades as a fresh explosion.
+    recent = recent_count(rows, cfg)
+    if recent >= cfg["burst_messages"]:
+        print(f"YES burst pending={count} recent={recent}")
+        return DUE
+    if count >= cfg["min_messages"] and idle >= cfg["idle_minutes"]:
+        print(f"YES idle={idle:.0f}min pending={count}")
+        return DUE
     print(f"NO idle={idle:.0f}min pending={count} quiet={quiet_progress(cfg)}")
     return NOT_YET
 
 
-def cmd_tick(reset=False, round_seconds=None):
-    """Count one round nobody named us, or clear the counter (issue #162).
+def cmd_tick(reset=False, round_seconds=None, due=False):
+    """Count one round nobody named us, clear the counter, or record a DUE.
 
     Called by `listen.py` right after `watch.py` returns 2 (timed out = this
     round had no mention). `reset` is the wake path: somebody named us, which is
     the counter-example to "N rounds in a row".
+
+    `due` records the batch `--check` just announced (issue #183). It lives here
+    rather than in `--check` because that verb is documented as read-only: a
+    gate or a human running `--check` must not create state that changes what
+    the next listener does.
 
     `quiet_since` is written on the first counted round and never moved after
     that -- moving it would keep pushing the floor ahead of the rounds and the
@@ -329,6 +473,19 @@ def cmd_tick(reset=False, round_seconds=None):
     `round_seconds` is how long that round actually waited, so the elapsed
     time the `NO` line prints is the time the group was really quiet.
     """
+    if due:
+        session_id, _ = active_session()
+        if not session_id:
+            print("due skipped: no active session")
+            return 1
+        latest = _pending_latest(
+            pending_rows(session_id, int(load_mark().get("last_event_id") or 0)))
+        if not latest:
+            print("due skipped: no pending material")
+            return 0
+        save_mark({"due_event_id": latest, "due_at": time.time()})
+        print(f"due recorded event={latest}")
+        return 0
     if reset:
         save_mark({"quiet_rounds": 0, "quiet_since": None})
         print("quiet reset rounds=0")
@@ -367,14 +524,22 @@ def cmd_dump(cfg, limit):
     return 0
 
 
-def cmd_digest(limit=150):
+def cmd_digest(cfg, limit=150, reap=False):
     """Cheap half: hand recent chatter to the engine's rule-based digester.
 
     No model involved -- keyword hits and preference declarations only -- so it can
     run on every idle tick. It is idempotent: save_profile updates fields instead of
-    appending, and a member whose tone_style is already set is left alone. The
-    cursor is deliberately not advanced; that belongs to the model-backed path, so
-    the same messages stay available for a deeper pass.
+    appending, and a member whose tone_style is already set is left alone.
+
+    The rule pass itself still does not advance the cursor; the model-backed
+    path owns it (`--mark`). `reap=True` is the narrow exception (issue #183):
+    once a DUE has gone unanswered for `reap_after_minutes`, these rows have
+    already been through the rule layer and parking the cursor only makes
+    `--check` re-announce the same pile. See `reap_stalled`.
+
+    Batches go oldest-first, same as `--dump`: a newest-first slice combined
+    with an advancing cursor would jump over the middle of a backlog and strand
+    it there forever.
     """
     sys.path.insert(0, str(ROOT))
     try:
@@ -388,13 +553,21 @@ def cmd_digest(limit=150):
         return 1
     group_id = conversation.split(":")[-1]
     rows = pending_rows(session_id, int(load_mark().get("last_event_id") or 0))
-    if not rows:
+    batch_rows = rows[:limit] if limit and limit > 0 else rows
+    if batch_rows:
+        batch = [{"sender_id": r["sender_id"], "sender_name": r["sender"],
+                  "content": r["text"]} for r in batch_rows]
+        result = get_memory_engine().digest_idle_batch(group_id, batch)
+        print(f"digested={result.get('digested_count')} "
+              f"updated={result.get('updated_members')}")
+    else:
         print("nothing to digest")
-        return 0
-    batch = [{"sender_id": r["sender_id"], "sender_name": r["sender"], "content": r["text"]}
-             for r in rows[-limit:]]
-    result = get_memory_engine().digest_idle_batch(group_id, batch)
-    print(f"digested={result.get('digested_count')} updated={result.get('updated_members')}")
+    if reap:
+        through, stalled = reap_stalled(cfg, batch_rows)
+        if through:
+            print(f"reaped through event {through} (stalled={stalled:.0f}min)")
+        elif stalled is not None:
+            print(f"due cleared (stalled={stalled:.0f}min, nothing left)")
     return 0
 
 
@@ -415,8 +588,11 @@ def cmd_mark(through=None):
             return 1
     # Clearing the quiet counter belongs to marking (issue #162): the material
     # was just summarised, so the next round must not immediately be due again.
+    # Clearing the DUE record belongs here too (issue #183): the batch it named
+    # has now been summarised, so holding the next one would be a lie.
     save_mark({"last_event_id": int(top), "last_run": int(time.time()),
-               "quiet_rounds": 0, "quiet_since": None})
+               "quiet_rounds": 0, "quiet_since": None,
+               "due_event_id": None, "due_at": None})
     print(f"marked through event {top}")
     return 0
 
@@ -721,12 +897,16 @@ def main():
     parser = argparse.ArgumentParser(description="在没人 @ 的时候沉淀群友画像")
     parser.add_argument("--check", action="store_true", help="该提炼了吗")
     parser.add_argument("--digest", action="store_true", help="规则版消化（不调模型，可随时跑）")
+    parser.add_argument("--reap", action="store_true",
+                        help="配合 --digest：DUE 超过 reap_after_minutes 仍无人 --mark 时，"
+                             "把游标兜底推进到本批已消化的末尾（issue #183）")
     parser.add_argument("--dump", nargs="?", const=0, type=int, metavar="N",
                         help="输出待提炼素材（text 为完整正文，不截断），可限制条数")
     parser.add_argument("--mark", action="store_true", help="标记到当前最新消息")
-    parser.add_argument("--tick", nargs="?", const="round", choices=("round", "reset"),
-                        metavar="{round,reset}",
-                        help="记一轮「没人指名」（缺省 round）；reset 清零（有人指名时用）")
+    parser.add_argument("--tick", nargs="?", const="round", choices=("round", "reset", "due"),
+                        metavar="{round,reset,due}",
+                        help="记一轮「没人指名」（缺省 round）；reset 清零（有人指名时用）；"
+                             "due 记录刚叫醒过的那批素材，避免同一批每轮重复 DUE")
     parser.add_argument("--round-seconds", type=float, metavar="S",
                         help="配合 --tick round：这一轮实际等了多久（`listen.py` 传 --timeout）；"
                              "首轮据此把 quiet_since 回推到本轮开始，否则 N 轮只算 N-1 个间隔")
@@ -758,7 +938,7 @@ def main():
     if args.mark:
         return cmd_mark(args.through)
     if args.tick is not None:
-        return cmd_tick(args.tick == "reset", args.round_seconds)
+        return cmd_tick(args.tick == "reset", args.round_seconds, due=args.tick == "due")
     if args.ingest is not None:
         return cmd_ingest(args.ingest, args.group, args.through, args.dry_run)
     if args.apply is not None:
@@ -772,7 +952,7 @@ def main():
     if args.notes or args.notes_apply is not None:
         return cmd_notes(args.notes_apply, args.group, args.dry_run, args.json)
     if args.digest:
-        return cmd_digest()
+        return cmd_digest(cfg, reap=args.reap)
     if args.dump is not None:
         return cmd_dump(cfg, args.dump or cfg["max_material"])
     if args.check:

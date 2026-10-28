@@ -36,6 +36,17 @@ issue #162 的现象：`dossier.py --check` 只有两条阈值（攒够 `burst_m
     用例 3 只钉「下限在拦」，没有一条断言默认组合能真的触发。修法是两头：
     `--tick --round-seconds` 把 `quiet_since` 回推到首轮**开始**（否则 N 轮只跨
     N-1 个间隔），默认下限取 4（< 4.5 留余量）。用例同时钉住两头。
+14. **积压不是爆发**（issue #183）：200 条全部落在 `burst_window_minutes` 之外
+    + 3 轮静默 → `YES quiet`，不再被 `YES burst` 短路。这条是 issue 现象的直接
+    回归：旧代码只要 pending ≥ 80 就恒报 `YES burst`，quiet 分支根本走不到。
+15. 窗口内的真爆发仍报 `YES burst`（原语义没有被 quiet 抢走）。
+16. **同一批素材只叫醒一次**：`--tick due` 之后 `--check` 输出 `NO due-hold` 且
+    NOT_YET；新消息进来立刻重新 DUE。没有这条，游标不动时每轮都在叫同一批。
+17. **停滞兜底**：`--digest --reap` 在宽限内不动游标；超过 `reap_after_minutes`
+    才推进到本批末尾，之后 pending 归零、quiet 计数清零、`--check` 转 `NO`。
+18. `--mark` 清 due 状态：沉淀完成后下一批不该被上一批的 DUE 挡住。
+19. **接线真的接上了**：真实 `listen.py` 判 DUE 后写 `due_event_id`；`--probe`
+    不写（临时监听不许污染生产状态）。
 
 已知边界（这条门禁**不**声称能抓住的）：
 
@@ -43,6 +54,9 @@ issue #162 的现象：`dossier.py --check` 只有两条阈值（攒够 `burst_m
   要覆盖得多组不同日期的夹具，本门禁没做（#151 已把这条写成既有边界）。
 - **多群分槽**：`wg_dossier.json` 本来就是单个全局文件，本 issue 不扩面，
   docstring 里已声明（`doc/MULTI_GROUP_PLAN.md` 负责那次拆分）。
+- **时间戳缺失的消息算不算爆发**：`recent_count` 对没有 `timestamp` 的行按「不在
+  窗口内」处理（不虚报），这里的用例都带时间戳；线上 `collector` 一定写，缺了是
+  上游问题，不在本门禁的射程内。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`（阈值走临时配置，不读开发机
 的 `config.json`），不碰 `~/.water-group`：
@@ -96,8 +110,13 @@ def write_config(home, dossier=None):
     return path
 
 
-def seed_store(home, messages=0):
-    """最小 mcp-access 库：一个活跃会话 + N 条可提炼的群消息。"""
+def seed_store(home, messages=0, base_ts=None):
+    """最小 mcp-access 库：一个活跃会话 + N 条可提炼的群消息。
+
+    `base_ts` 是毫秒时刻（payload 里 `timestamp` 的单位）。issue #183 的 burst
+    判据要看「最近窗口内有没有一波」，所以需要能造「一小时前的积压」与「刚刚的
+    爆发」两种夹具；不给就是没有时间戳（旧夹具的形态）。
+    """
     data = home / "data"
     data.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(str(data / "mcp-access.sqlite3"))
@@ -109,10 +128,23 @@ def seed_store(home, messages=0):
         """
     )
     for index in range(messages):
+        payload = {"sender": "甲", "sender_id": "1", "content": f"第 {index + 1} 句闲聊"}
+        if base_ts is not None:
+            payload["timestamp"] = int(base_ts + index * 1000)
         db.execute("INSERT INTO chat_inbox (id, session_id, payload) VALUES (?, 1, ?)",
-                   (index + 1, json.dumps({"sender": "甲", "sender_id": "1",
-                                           "content": f"第 {index + 1} 句闲聊"},
-                                          ensure_ascii=False)))
+                   (index + 1, json.dumps(payload, ensure_ascii=False)))
+    db.commit()
+    db.close()
+
+
+def add_message(home, event_id, ts=None):
+    """追加一条消息（issue #183 的「有新素材就重新 DUE」用例要用）。"""
+    payload = {"sender": "甲", "sender_id": "1", "content": f"第 {event_id} 句闲聊"}
+    if ts is not None:
+        payload["timestamp"] = int(ts)
+    db = sqlite3.connect(str(home / "data" / "mcp-access.sqlite3"))
+    db.execute("INSERT INTO chat_inbox (id, session_id, payload) VALUES (?, 1, ?)",
+               (event_id, json.dumps(payload, ensure_ascii=False)))
     db.commit()
     db.close()
 
@@ -600,6 +632,164 @@ def test_listen_backdates_first_round(home):
     print(f"✓ 14. listen.py --timeout 2 → quiet_since 回推 {back:.2f}s（首轮开始）")
 
 
+# ---------- 15..17：积压不是爆发、真爆发仍触发（issue #183） ----------
+
+
+def test_backlog_is_not_a_burst(home):
+    """窗口外的 200 条积压 + 3 轮静默 → `YES quiet`，不是 `YES burst`（issue #183）。
+
+    issue 现象的直接回归：`pending` 是「从游标起的总量」，旧代码拿它跟
+    `burst_messages` 比，游标一停就恒大于 80，于是永远 `YES burst`、quit 分支
+    永远走不到。这里 200 条全部落在窗口外，quiet 条件已满足，必须报 quiet。
+    """
+    write_config(home, {"quiet_minutes": 0, "burst_window_minutes": 10})
+    seed_store(home, messages=200, base_ts=(time.time() - 3600) * 1000)
+    for _ in range(3):
+        tick(home)
+    done = check(home)
+    assert done.returncode == 0, (done.returncode, done.stdout, done.stderr)
+    line = next((ln for ln in done.stdout.splitlines() if ln.startswith("YES")), "")
+    assert line.startswith("YES quiet"), \
+        f"窗口外的历史积压被误报成爆发（issue #183 的原始症状）：{line!r}"
+    assert "pending=200" in line, line
+    print(f"✓ 15. 窗口外 200 条积压 + 3 轮 → {line}（不再被 burst 短路）")
+
+
+def test_recent_spike_is_still_a_burst(home):
+    """窗口内真爆发 + 轮次不足 → `YES burst`（quiet 没有把原语义抢走）。"""
+    write_config(home, {"burst_window_minutes": 10})
+    seed_store(home, messages=80, base_ts=time.time() * 1000)
+    done = check(home)
+    assert done.returncode == 0, (done.returncode, done.stdout, done.stderr)
+    line = next((ln for ln in done.stdout.splitlines() if ln.startswith("YES")), "")
+    assert line.startswith("YES burst"), f"窗口内的真爆发没被认出来：{line!r}"
+    assert "recent=80" in line and "pending=80" in line, line
+    print(f"✓ 16. 10 分钟窗口内 80 条 → {line}（爆发语义保留）")
+
+
+def test_same_batch_is_not_announced_twice(home):
+    """`--tick due` 之后同一批素材 `NO due-hold`；新消息进来重新 DUE（issue #183）。
+
+    游标不动时 `--check` 每轮都判 DUE，`listen.py` 于是每轮打一次 `DOSSIER_DUE`
+    然后退出——调用方分不清「有新活」和「还是我没处理的那批」。这条把「叫醒」
+    变成有状态的一次性事件。
+    """
+    write_config(home, {"quiet_minutes": 0})
+    seed_store(home, messages=4, base_ts=time.time() * 1000)
+    for _ in range(3):
+        tick(home)
+    first = check(home)
+    assert first.returncode == 0, (first.returncode, first.stdout)
+    assert first.stdout.startswith("YES quiet"), first.stdout
+
+    recorded = run(home, DOSSIER, "--tick", "due")
+    assert recorded.returncode == 0, (recorded.returncode, recorded.stdout, recorded.stderr)
+    assert "due recorded event=4" in recorded.stdout, recorded.stdout
+
+    held = check(home)
+    assert held.returncode == 3, f"同一批素材又 DUE 了一次（每轮空转）：{held.stdout}"
+    assert held.stdout.startswith("NO due-hold"), held.stdout
+    assert "latest=4" in held.stdout, held.stdout
+
+    add_message(home, 5, ts=time.time() * 1000)
+    fresh = check(home)
+    assert fresh.returncode == 0, f"有新素材必须重新 DUE：{fresh.stdout}"
+    assert fresh.stdout.startswith("YES quiet"), fresh.stdout
+    assert "pending=5" in fresh.stdout, fresh.stdout
+    print("✓ 17. --tick due → NO due-hold；新增一条后重新 YES quiet")
+
+
+# ---------- 18..19：停滞兜底与 --mark 清 due ----------
+
+
+def test_digest_reap_releases_a_stalled_cursor(home):
+    """`--digest --reap`：宽限内不动游标，超宽限推进到本批末尾（issue #183）。
+
+    `--digest` 不推游标是刻意的（留给模型深加工），但没人跑模型时游标就永久
+    停滞——issue 的 `pending=385` 就是这么来的。兜底必须同时满足两条：DUE 已经
+    过了 `reap_after_minutes`、且本批规则消化真的跑完了。宽限内推进会让模型
+    深加工拿不到素材，所以两侧都钉。
+    """
+    write_config(home, {"quiet_minutes": 0, "reap_after_minutes": 15})
+    seed_store(home, messages=6, base_ts=time.time() * 1000)
+    for _ in range(3):
+        tick(home)
+    assert check(home).returncode == 0, check(home).stdout
+    assert run(home, DOSSIER, "--tick", "due").returncode == 0
+
+    fresh = run(home, DOSSIER, "--digest", "--reap")
+    assert fresh.returncode == 0, (fresh.returncode, fresh.stdout, fresh.stderr)
+    assert "reaped" not in fresh.stdout, f"宽限内不许推进游标：{fresh.stdout}"
+    assert mark(home).get("last_event_id") is None, mark(home)
+
+    # 把 DUE 回拨到宽限之外：真实等 15 分钟没有意义，时钟是夹具的一部分。
+    state = mark(home)
+    state["due_at"] = time.time() - 20 * 60
+    write_mark(home, state)
+
+    stale = run(home, DOSSIER, "--digest", "--reap")
+    assert stale.returncode == 0, (stale.returncode, stale.stdout, stale.stderr)
+    assert "reaped through event 6" in stale.stdout, stale.stdout
+    after = mark(home)
+    assert after.get("last_event_id") == 6, f"游标没被兜底推进：{after}"
+    assert after.get("due_event_id") is None and after.get("due_at") is None, after
+    assert after.get("quiet_rounds") == 0, f"推进游标后 quiet 计数必须清零：{after}"
+
+    done = check(home)
+    assert done.returncode == 3, f"兜底推进后不该再 DUE：{done.stdout}"
+    assert "pending=0" in done.stdout, done.stdout
+    print("✓ 18. --digest --reap：宽限内不动；超宽限推进到 6，pending 归零")
+
+
+def test_mark_clears_due_state(home):
+    """`--mark` 清 due 状态：沉淀完成后下一批不该被上一批的 DUE 挡住（issue #183）。"""
+    write_config(home, {"quiet_minutes": 0})
+    seed_store(home, messages=6, base_ts=time.time() * 1000)
+    for _ in range(3):
+        tick(home)
+    assert check(home).returncode == 0
+    assert run(home, DOSSIER, "--tick", "due").returncode == 0
+    assert mark(home).get("due_event_id") == 6, mark(home)
+
+    marked = run(home, DOSSIER, "--mark", "--through", "5")
+    assert marked.returncode == 0, (marked.returncode, marked.stdout, marked.stderr)
+    state = mark(home)
+    assert state.get("due_event_id") is None, f"--mark 没清 due_event_id：{state}"
+    assert state.get("due_at") is None, f"--mark 没清 due_at：{state}"
+    assert state.get("last_event_id") == 5, state
+    print("✓ 19. --mark 清 due_event_id / due_at，游标推进到 5")
+
+
+def test_listen_records_due_batch(home):
+    """真实 `listen.py` 判 DUE 后写 `due_event_id`；探针不写（issue #183 接线）。
+
+    前一条钉 `--tick due` 本身，这一条钉「`listen.py` 真的调了它」。不接线的
+    话，`--check` 永远看不到 due 记录，同一批素材照样每轮重复 DUE——issue 的
+    空转现象原样保留，而前面几条照样全绿（用例 14 的同类教训）。
+    """
+    write_config(home, {"quiet_minutes": 0})
+    seed_store(home, messages=4, base_ts=time.time() * 1000)
+    done = run(home, LISTEN, "--timeout", "1", "--cycles", "4")
+    assert done.returncode == 0, (done.returncode, done.stdout, done.stderr)
+    assert "DOSSIER_DUE" in done.stdout, done.stdout[-800:]
+    state = mark(home)
+    assert state.get("due_event_id") == 4, f"listen.py 没记录本批 DUE：{state}"
+    assert isinstance(state.get("due_at"), (int, float)), state
+
+    held = check(home)
+    assert held.returncode == 3, f"listen 刚叫醒过，下一轮不该再 DUE：{held.stdout}"
+    assert "due-hold" in held.stdout, held.stdout
+
+    # 探针是门禁的临时监听，不许写 due 记录（否则跑一次门禁就抑制一轮生产 DUE）。
+    write_mark(home, {"quiet_rounds": 3, "quiet_since": time.time() - 600})
+    probe = run(home, LISTEN, "--timeout", "1", "--cycles", "1", "--probe")
+    assert probe.returncode == 0, (probe.returncode, probe.stdout, probe.stderr)
+    assert "DOSSIER_DUE" in probe.stdout, probe.stdout[-800:]
+    assert mark(home).get("due_event_id") is None, \
+        f"探针写了生产状态（issue #94 PB 的同类污染）：{mark(home)}"
+    print("✓ 20. listen.py 判 DUE 后写 due_event_id；--probe 不写")
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -643,8 +833,26 @@ def main():
     with temp_dir(prefix="wg-cadence-") as home:
         write_config(home)
         test_listen_backdates_first_round(home)
+    with temp_dir(prefix="wg-cadence-") as home:
+        write_config(home)
+        test_backlog_is_not_a_burst(home)
+    with temp_dir(prefix="wg-cadence-") as home:
+        write_config(home)
+        test_recent_spike_is_still_a_burst(home)
+    with temp_dir(prefix="wg-cadence-") as home:
+        write_config(home)
+        test_same_batch_is_not_announced_twice(home)
+    with temp_dir(prefix="wg-cadence-") as home:
+        write_config(home)
+        test_digest_reap_releases_a_stalled_cursor(home)
+    with temp_dir(prefix="wg-cadence-") as home:
+        write_config(home)
+        test_mark_clears_due_state(home)
+    with temp_dir(prefix="wg-cadence-") as home:
+        write_config(home)
+        test_listen_records_due_batch(home)
     print("=" * 72)
-    print("✓ dossier 沉淀时机（连续 N 轮无人指名）14 项门禁全部通过")
+    print("✓ dossier 沉淀时机（连续 N 轮无人指名 + 积压归因 + 游标兜底）20 项门禁全部通过")
     print("=" * 72)
 
 

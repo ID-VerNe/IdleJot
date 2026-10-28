@@ -40,7 +40,7 @@
 | `wg_events.jsonl` | 已送达的群友消息流水（自己的发送回执不落盘），按 event id 去重，Agent 断线期间也不会丢 |
 | `wg_state.json` | 最近一次 `wait` 的完整返回，含 `input_batch` |
 | `wg_ack.txt` | Agent 已处理到的游标，采集器下一轮用它确认进度 |
-| `wg_pause` | Agent 规划/发送期间存在，保证批次不被下一轮等待打散 |
+| `wg_pause` | 暂停标记，判定归 `wg_pause.py`（issue #189）：一行 JSON `{"reason","pid","at","until"}`，owner 存活 + 未到时限才算数；无主/超时/非规范内容（手工 `touch` 的 `placeholder`、坏 JSON）过了 `LEGACY_GRACE` 就当失效，由采集器当轮删掉并恢复采集。采集器在暂停期间照写心跳，不会因暂停被判死 |
 | `wg_heartbeat` | 采集器最后一次完成循环的时间，供总监护判活 |
 | `wg_session.txt` | 当前会话 id |
 | `mcp_token.txt` | 当前授权 token |

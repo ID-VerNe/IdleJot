@@ -47,6 +47,7 @@ import wg_gap  # noqa: E402  (停机窗口缺口账本：漏了什么事后说�
 import wg_images  # noqa: E402  (图片标记渲染，与 reply/look 同一份实现)
 import wg_isolation  # noqa: E402  (本会话只管一个群：状态行照实报，issue #164)
 import wg_listener_state  # noqa: E402  (监听存亡账本：「无人值守」的可读事实，issue #112)
+import wg_pause  # noqa: E402  (暂停标记：有效/失效的判定，状态行照实报，issue #189)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
 from wg_daemon import read_json  # noqa: E402
 from wg_paths import logs_dir, state_dir  # noqa: E402
@@ -264,6 +265,23 @@ def report(exclude_pids=None, resident_pid=None):
     print(f"后端      : {backend}  (47860 / 48777)")
     print(f"守护      : {guard}  心跳 {beat}")
     print(f"监听      : {listener}")
+    # issue #189：暂停标记以前在状态行里完全不可见，「监听挂着」于是成了「有人在收」
+    # 的同义词——现场正是监听在、采集器也在，事件流水却停住。标记存在（有效或已失效）
+    # 就单独报一行：原因、owner、还剩多久 / 谁去清；不存在时不加字（排除型对照，
+    # 与「缺口」行同口径，保住 --status「只看不动」——probe() 不删不写）。
+    pause = wg_pause.probe()
+    if pause.state != "none":
+        collectors = collector_pids(exclude=exclude_pids)
+        who = (f"采集器 pid={','.join(collectors)}" if collectors
+               else "采集器未运行")
+        if pause.state == "active":
+            tail = (f"{who} 在跑，但这一轮不采集" if collectors
+                    else f"{who}——这份暂停没有任何人执行，标记会留到下次拉起")
+        elif collectors:
+            tail = f"{who} 下一轮会删掉它并恢复采集"
+        else:
+            tail = f"{who}，没人会去清它——标记会一直留到下次拉起"
+        print(f"采集      : {wg_pause.describe(pause)}；{tail}")
     # issue #114：监听在不在与「这段时间消息有没有漏收」是两件事。后端停机跨过
     # 一段时间再拉起，窗口内的群消息不进任何本地存储，只读入口（--status / --list /
     # listen NO_WORK）此前一律报「一切正常」。「缺口」行读 `state/wg_gap.json`——

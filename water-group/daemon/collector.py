@@ -17,7 +17,7 @@ whenever the grant behind it rotates.
 
 Control files, all inside the state directory:
   wg_ack.txt      cursor the agent has finished handling; the collector acks it next loop
-  wg_pause        present while the agent is planning/sending, so the batch stays stable
+  wg_pause        pause marker; judged by wg_pause (owner + deadline), never by existence
   wg_heartbeat    unix time of the last completed loop, watched by supervisor.py
   wg_session.txt  active session id
 """
@@ -31,13 +31,13 @@ import mcp_client
 import session
 import wg_gap  # noqa: E402  (停机窗口缺口账本，issue #114)
 import wg_images
+import wg_pause  # noqa: E402  (暂停标记的判定与清理，issue #189)
 
 ROOT = Path(__file__).resolve().parents[2]
 from wg_daemon import beater, logger
 from wg_paths import logs_dir, state_dir
 STATE_DIR = state_dir()
 ACK = STATE_DIR / "wg_ack.txt"
-PAUSE = STATE_DIR / "wg_pause"
 STATE = STATE_DIR / "wg_state.json"
 EVENTS = STATE_DIR / "wg_events.jsonl"
 LOG = logs_dir() / "wg_collector.log"
@@ -132,7 +132,16 @@ def main():
 
     while True:
         try:
-            if PAUSE.exists():
+            # issue #189：暂停以前只看「文件在不在」，于是任意一个手工塞进来的
+            # `wg_pause`（现场内容是 `placeholder`）都能永久停采：这一分支既不采
+            # 也不写心跳，supervisor 300 秒判死重启，重启后第一轮又回到这里。
+            # 现在判定交给 wg_pause：有主（owner 存活）+ 有时限才算数，失效的标记
+            # 当轮删掉继续采；**暂停期间照写心跳**——不写就等着被判死，而重启救不了。
+            hold, note = wg_pause.gate()
+            if note:
+                log(note)
+            if hold:
+                beat()
                 time.sleep(2)
                 continue
             ack = read_ack()

@@ -68,7 +68,7 @@ v1 的三处判断在勘察后被推翻，已在文中标注 **【v1 修正】**
 | `daemon/watch.py:34` | `wg_watch.txt` 单游标 | 共享状态目录时，B 群的高 id 会把游标推过 A 群未读的低 id（按群目录后自愈） |
 | `daemon/up.py:368-394` | `replied_after()` 的 pre-ledger 兜底在全局事件流里找「之后有没有自己说话」 | 别群的自发言会把旧事件误判为已回 |
 | `daemon/collector.py:73-82` | `bootstrap_session()` 循环里不写心跳 | 建会话持续失败 → 心跳停在启动时刻 → 300 秒后被 supervisor 杀掉重启，形成重启循环 |
-| `daemon/collector.py:96-98` | `wg_pause` 存在时不写心跳，而**全仓没有任何写入方** | 潜在路径：一旦有人创建该文件且超过 300 秒，采集器会被判死 |
+| `daemon/collector.py:96-98` | `wg_pause` 存在时不写心跳，而**全仓没有任何写入方** | 潜在路径：一旦有人创建该文件且超过 300 秒，采集器会被判死。**已由 #189 修掉**：判定收口到 `daemon/wg_pause.py`（owner 存活 + 时限 + 遗留宽限），失败的标记当轮清理，暂停期间照写心跳 |
 | `daemon/mint_grant.py:49-51` | `last_scope()` 用 `ORDER BY id DESC`，而 `grants.id` 是 `uuid4().hex` | **不是时间序**。实测 5 份同名 grant 里字典序最大的是第 3 新的，新 grant 可能继承旧权限 |
 | `water-group/start-bot.pyw:54` | 幂等只看 43000 + 47860，不看 48777，也不看 collector | MCP 挂了或某个群 collector 死了，仍报「已在运行」 |
 

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Callable
 
 from wg_daemon import read_json, write_json  # noqa: E402  (issue #11 PB: 助手收口)
+import wg_pause  # noqa: E402  (暂停标记的判定：有主 + 有时限，issue #189)
 from reload_plan import (  # noqa: E402  (issue #11 PD: 分析层)
     FAILED_NAME,
     INFLIGHT_NAME,
@@ -452,10 +453,9 @@ class Reloader:
     def _busy(self):
         if not self.defer_when_busy:
             return False
-        try:
-            return _state("wg_pause").exists()
-        except OSError:
-            return False
+        # issue #189：只看「文件在不在」会把一个没人认领的遗留标记当成正在进行的
+        # 发送，热重载从此被永久挡住。判定交给 wg_pause（owner 存活 + 有时限）。
+        return wg_pause.active()
 
     def _tick_watch(self, procs, spawn):
         if not self.watch:

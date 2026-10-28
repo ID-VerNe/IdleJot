@@ -137,10 +137,15 @@ def main():
                 continue
             ack = read_ack()
             try:
+                # mention_only 按本会话群的 trigger_mode 取（#188）：natural 群请求
+                # False 让普通闲聊投递，mention_only 群维持「只投递 @ / 关键词」。
+                # 每批现读——config 是热文件，改了 trigger_mode 不用等 collector 重启。
+                import wg_up_wake  # noqa: PLC0415  (已在上方 import；留显式说明取值来源)
+                mention_only = wg_up_wake.trigger_mode() != "natural"
                 data, blocks = mcp_client.call_tool_raw(
                     "wait_chat_messages",
                     {"session_id": sid, "timeout_seconds": 170,
-                     "acknowledge_through_id": ack, "mention_only": True},
+                     "acknowledge_through_id": ack, "mention_only": mention_only},
                     timeout=200,
                 )
             except Exception as exc:  # noqa: BLE001

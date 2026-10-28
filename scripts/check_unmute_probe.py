@@ -1,0 +1,355 @@
+"""issue #192 gate: 禁言解禁必须叫醒值守的监听，而不是等下一句话。
+
+issue #192 的现场：机器人被禁言 10 分钟，`watch.py` 的轮询循环照旧在等 @——
+禁言结束这件事没有任何一句话触发它。`wg_send_failure.recheck()`（issue #145）早就
+会现查 `shut_up_timestamp`，但入口只有 `reply.py --list` 的表头：**只读入口会复查，
+值守循环不会**，而禁言期间 Agent 等的正是后者。恢复输出只有那句 `TIMEOUT`，与
+「群里没人说话」完全同形。
+
+本门禁用假 OneBot + 临时 state 跑真实子进程，钉住：
+
+  1. 提前解禁（账本预测 +600s，实测 `shut_up_timestamp=0` / `group_all_shut=False`）
+     与自然到期（预测已过）都必须在**没人说话**的轮次里返回 0、打印 `UNMUTED:`、
+     末行仍是 `WAKE`，并把 `recovered=True` / `recheck_result=released` 写回账本；
+  2. 仍禁言 / 探测失败 / `group_all_shut` 读不到时**不许**冒充解禁：返回 2、
+     无 `UNMUTED`、结论分别是 `muted` / `unknown`，且 `recovered` 不被写成 True；
+  3. 全员禁言（成员 `shut_up_timestamp=0`）没有解禁时刻，账本只记 `group_shut=True`
+     ——这条记录同样必须进探测（前置放宽），解除时同样唤醒。对照组：账本
+     `group_shut=None`（不知道）时零请求，不把参数错 / 网络错变成轮询对象；
+  4. 节流：账本刚写 5 秒、上次复查 5 秒都零请求；把 `rechecked_at` 推到 27 秒前
+     才探一次（`PROBE_INTERVAL=15`）。对照组把「永远不探」与「每秒都探」都排掉；
+  5. 只读入口的口径没被监听拖快：`reply.py --list` 在「上次复查 20 秒前」仍不探
+     （`RECHECK_AFTER=60`）；
+  6. 端到端接线：`listen.py` 起 `watch.py`（`run_passthrough`）时 `UNMUTED` 块要被
+     转述出来，`RESTART:` 仍是末行——只测 `watch.py` 会漏掉「参数没传下去 /
+     输出被吞掉」这一类（issue #162 的教训）。
+
+已知边界：本门禁不覆盖「解禁与有人 @ 同时发生」的先后顺序——那时普通唤醒先走，
+`handle()` 的成功发送会写 `recovered=True`，`UNMUTED` 不出现是设计（`watch.py`
+把探测放在 fresh 之后）。也不覆盖真实 QQ 侧 NapCat 的字段抖动。
+
+    .venv/Scripts/python.exe scripts/check_unmute_probe.py
+"""
+import contextlib
+import io
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
+from check_fixture_support import scratch_dir  # noqa: E402
+fs.bootstrap_paths(scripts=False)
+
+# 数据根 / 配置 / 库全部钉进临时目录，import 任何 daemon 模块之前完成：`wg_config`
+# 的 CONFIG 与 `wg_paths` 的 state_dir 都是 import 期求值的，晚一步就会指向实机。
+# `IDLEJOT_WG_STATE` 必须显式覆盖：`wg_paths.state_dir()` 的优先级是
+# `IDLEJOT_WG_STATE or TULPA_WG_STATE`，只钉后者会被外部环境穿透——那正是
+# 「测试写生产状态」的口子（穿透就意味着向实机 OneBot 发查询）。
+_SCRATCH = scratch_dir(prefix="wg_unmute_")
+os.environ["WATER_GROUP_HOME"] = str(_SCRATCH / "home")
+os.environ["TULPA_WG_STATE"] = str(_SCRATCH / "state")
+os.environ["IDLEJOT_WG_STATE"] = str(_SCRATCH / "state")
+os.environ["IDLEJOT_WG_DB"] = str(_SCRATCH / "chats.sqlite3")
+os.environ["IDLEJOT_WG_CONFIG"] = str(_SCRATCH / "config.json")
+for path in ("home", "state"):
+    (_SCRATCH / path).mkdir(parents=True, exist_ok=True)
+
+from fixture_server import FixtureHandler, fixture_server  # noqa: E402
+import reply  # noqa: E402
+import wg_send_failure  # noqa: E402
+
+GROUP = "777000111"
+SELF = "99999"
+LEDGER = _SCRATCH / "state" / "wg_send_failure.json"
+EVENTS = _SCRATCH / "state" / "wg_events.jsonl"
+DAEMON = ROOT / "water-group" / "daemon"
+
+# 夹具状态：每个用例自己写，Handler 只读。
+# `member_queries` 数的是 `get_group_member_info` 次数——「没探」与「探了但结论一样」
+# 在输出上完全同形，只能靠请求计数区分（#145 的教训）。
+FIX = {"member": {}, "group": {}, "member_fails": False, "group_fails": False,
+       "member_queries": 0}
+
+
+class Handler(FixtureHandler):
+    def do_POST(self):
+        self.read_json()
+        action = self.path.strip("/")
+        if action == "get_group_member_info":
+            FIX["member_queries"] += 1
+            if FIX["member_fails"]:
+                self.send_json({"status": "failed", "retcode": 1200, "message": "查询失败"})
+            else:
+                self.send_json({"status": "ok", "retcode": 0, "data": FIX["member"]})
+        elif action == "get_group_info":
+            if FIX["group_fails"]:
+                self.send_json({"status": "failed", "retcode": 1200, "message": "查询失败"})
+            else:
+                self.send_json({"status": "ok", "retcode": 0, "data": FIX["group"]})
+        else:
+            self.send_json({"status": "failed", "retcode": 1404, "message": action})
+
+
+def _write_config(base):
+    (_SCRATCH / "config.json").write_text(json.dumps({
+        "self_account": SELF, "onebot_token": "fixture-token",
+        "onebot_http_url": base, "groups": {},
+    }, ensure_ascii=False), encoding="utf-8")
+
+
+def _reset(now, shut_up=0, all_shut=False, member_fails=False, group_fails=False):
+    """清账本 / 清事件 / 复位假 OneBot 的应答。"""
+    wg_send_failure.clear()
+    try:
+        EVENTS.unlink()
+    except OSError:
+        pass
+    FIX["member_fails"] = member_fails
+    FIX["group_fails"] = group_fails
+    FIX["member_queries"] = 0
+    FIX["member"] = {"user_id": int(SELF), "card": "机器人", "nickname": "bot",
+                     "role": "member", "shut_up_timestamp": shut_up or 0}
+    FIX["group"] = {"group_id": int(GROUP), "group_all_shut": all_shut}
+
+
+def _ledger(mute_until=None, at=None, recovered=None, group_shut=None, **extra):
+    """直接写一条账本（模拟上一次失败留下的冻结记录），不经过发送路径。"""
+    now = time.time()
+    entry = {"at": int(now if at is None else at), "group_id": GROUP,
+             "kind": "onebot", "retcode": 200, "reason": "EventChecker Failed",
+             "mute_until": int(mute_until) if mute_until else None,
+             "recovered": recovered, "recovered_at": None,
+             "rechecked_at": None, "group_shut": group_shut,
+             "recheck_result": None}
+    entry.update(extra)
+    LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    LEDGER.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
+    return entry
+
+
+def _read_ledger():
+    try:
+        return json.loads(LEDGER.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _run(script, *args, timeout=90):
+    """起真实子进程（env 继承本进程已钉住的数据根）。"""
+    return subprocess.run(
+        [sys.executable, str(DAEMON / script), *args],
+        cwd=str(ROOT), env=dict(os.environ), capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=timeout)
+
+
+def _last_line(out):
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    return lines[-1].strip() if lines else ""
+
+
+CASES = []
+
+
+def case(fn):
+    CASES.append(fn)
+    return fn
+
+
+@case
+def 提前解禁叫醒监听():
+    """账本预测 +600s、实测已解禁：没人说话的轮次里也要返回 0 并打印 UNMUTED。"""
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=False)
+    _ledger(now + 600, at=now - 3600)
+    r = _run("watch.py", "--timeout", "5")
+    rec = _read_ledger()
+    return (r.returncode == 0 and "UNMUTED: 禁言已于" in r.stdout
+            and _last_line(r.stdout) == "WAKE"
+            and rec.get("recovered") is True
+            and rec.get("recheck_result") == "released"
+            and FIX["member_queries"] == 1)
+
+
+@case
+def 自然到期也叫醒():
+    """预测时刻已过、复查过一次仍禁言（`muted`）：实测解禁同样要唤醒。"""
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=False)
+    _ledger(now - 30, at=now - 900, recheck_result="muted")
+    r = _run("watch.py", "--timeout", "5")
+    rec = _read_ledger()
+    return (r.returncode == 0 and "UNMUTED:" in r.stdout
+            and _last_line(r.stdout) == "WAKE"
+            and rec.get("recheck_result") == "released")
+
+
+@case
+def 仍禁言静默值守():
+    """现查仍禁言：返回 2、一个字都不多说，账本按现查时刻更新。"""
+    now = int(time.time())
+    until = now + 600
+    _reset(now, shut_up=until, all_shut=False)
+    _ledger(until, at=now - 3600)
+    r = _run("watch.py", "--timeout", "2")
+    rec = _read_ledger()
+    return (r.returncode == 2 and "TIMEOUT" in r.stdout
+            and "UNMUTED" not in r.stdout
+            and rec.get("recheck_result") == "muted"
+            and rec.get("mute_until") == until
+            and FIX["member_queries"] == 1)
+
+
+@case
+def 探测失败不冒充解禁():
+    """成员查询整条失败：结论只能是 `unknown`，不能说「解禁」也不能说「仍禁言」。"""
+    now = int(time.time())
+    _reset(now, member_fails=True)
+    _ledger(now + 600, at=now - 3600)
+    r = _run("watch.py", "--timeout", "2")
+    rec = _read_ledger()
+    return (r.returncode == 2 and "UNMUTED" not in r.stdout
+            and rec.get("recheck_result") == "unknown"
+            and rec.get("recovered") is None)
+
+
+@case
+def 全员禁言仍静默但确实复查():
+    """全员禁言没有解禁时刻：账本只有 `group_shut=True`，也必须进探测。
+
+    旧前置是「有 `mute_until` 才查」，全群禁言的账本永远探不到——管理员解禁后
+    仍然没人知道。
+    """
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=True)
+    _ledger(None, at=now - 3600, group_shut=True)
+    r = _run("watch.py", "--timeout", "2")
+    rec = _read_ledger()
+    return (r.returncode == 2 and "UNMUTED" not in r.stdout
+            and FIX["member_queries"] == 1
+            and rec.get("recheck_result") == "muted"
+            and rec.get("recovered") is None)
+
+
+@case
+def 全员禁言解除叫醒():
+    """同一份 `group_shut=True` 账本，`group_all_shut` 翻成 False 就是实测解禁。"""
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=False)
+    _ledger(None, at=now - 3600, group_shut=True)
+    r = _run("watch.py", "--timeout", "5")
+    rec = _read_ledger()
+    return (r.returncode == 0 and "UNMUTED:" in r.stdout
+            and _last_line(r.stdout) == "WAKE"
+            and rec.get("recovered") is True
+            and rec.get("recheck_result") == "released")
+
+
+@case
+def 读不到全员禁言不算解禁():
+    """`get_group_info` 失败时 `group_all_shut` 是 None，不是 False——不许当解禁。"""
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=False, group_fails=True)
+    _ledger(now + 600, at=now - 3600)
+    r = _run("watch.py", "--timeout", "2")
+    rec = _read_ledger()
+    return (r.returncode == 2 and "UNMUTED" not in r.stdout
+            and rec.get("recheck_result") == "unknown"
+            and rec.get("recovered") is None)
+
+
+@case
+def 没有禁言账本时零请求():
+    """对照组：无账本 / 非禁言类失败 / 已有结论，三种前置都不许打接口。
+
+    这一条防的是「把监听变成轮询器」：短了看不出症状，长了就是每分钟一次无谓请求。
+    """
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=False)
+    wg_send_failure.clear()
+    r1 = _run("watch.py", "--timeout", "1")
+    none_queries = FIX["member_queries"]
+    _ledger(None, at=now - 3600)                       # 参数错 / 网络错：没有对象
+    r2 = _run("watch.py", "--timeout", "1")
+    other_queries = FIX["member_queries"] - none_queries
+    _ledger(now + 600, at=now - 3600, recovered=True,  # 已有结论
+            recovered_at=now - 30)
+    r3 = _run("watch.py", "--timeout", "1")
+    settled_queries = FIX["member_queries"] - none_queries - other_queries
+    return (r1.returncode == 2 and r2.returncode == 2 and r3.returncode == 2
+            and none_queries == 0 and other_queries == 0 and settled_queries == 0)
+
+
+@case
+def 账本刚写不重复探测():
+    """失败那一刻 `diagnose()` 已经查过：40 秒内再挂监听不许再打一次接口。"""
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=False)
+    _ledger(now + 600, at=now - 5)          # 若探就会判 released
+    r = _run("watch.py", "--timeout", "2")
+    return (r.returncode == 2 and "UNMUTED" not in r.stdout
+            and FIX["member_queries"] == 0)
+
+
+@case
+def 复查间隔内不重复探测():
+    """上次复查 5 秒前（< PROBE_INTERVAL 15s）：本轮零请求。"""
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=False)
+    _ledger(now + 600, at=now - 3600, rechecked_at=now - 5)
+    r = _run("watch.py", "--timeout", "2")
+    return (r.returncode == 2 and "UNMUTED" not in r.stdout
+            and FIX["member_queries"] == 0)
+
+
+@case
+def 间隔到期后会再探():
+    """对照组：同一份账本把 `rechecked_at` 推到 27 秒前，必须探一次并唤醒。
+
+    与上一条配对：只有「刚查过不查」而没有「过一会儿要查」，等于永远不查。
+    """
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=False)
+    _ledger(now + 600, at=now - 3600, rechecked_at=now - 27)
+    r = _run("watch.py", "--timeout", "5")
+    return (r.returncode == 0 and "UNMUTED:" in r.stdout
+            and FIX["member_queries"] == 1)
+
+
+@case
+def 只读入口仍是六十秒口径():
+    """`reply.py --list` 在「上次复查 20 秒前」不该重探：监听的 15s 不许传染过去。"""
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=False)
+    _ledger(now + 600, at=now - 3600, rechecked_at=now - 20)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        reply.list_wakes()
+    return FIX["member_queries"] == 0 and "UNMUTED" not in buf.getvalue()
+
+
+@case
+def 监听转述解禁唤醒():
+    """端到端接线：`listen.py` 的 `run_passthrough` 要把 UNMUTED 块转述出来，
+    `RESTART:` 仍是末行（#69 契约 1），退出码 0 表示「有活」。"""
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=False)
+    _ledger(now + 600, at=now - 3600)
+    r = _run("listen.py", "--timeout", "5", "--no-digest")
+    return (r.returncode == 0 and "UNMUTED:" in r.stdout
+            and _last_line(r.stdout).startswith("RESTART:"))
+
+
+def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    with fixture_server(Handler) as server:
+        _write_config(f"http://127.0.0.1:{server.server_port}")
+        return fs.run_cases(CASES)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

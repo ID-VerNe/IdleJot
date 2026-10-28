@@ -289,7 +289,8 @@ def test_status_line():
         os.utime(wg_pause.path(STATE), (old, old))
         body = pause_body(status_text())
         assert body is not None and "标记已失效" in body, body
-        assert "下一轮会删掉它并恢复采集" in body, body
+        # 「下一轮」要带时间上限：采集器可能正卡在本轮 170 秒的 wait 里
+        assert "本轮 wait 返回后 ≤170 秒）会删掉它并恢复采集" in body, body
         body = pause_body(status_text(collectors=()))
         assert body is not None and "没人会去清它" in body, body
     finally:

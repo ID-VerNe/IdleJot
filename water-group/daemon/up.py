@@ -279,7 +279,9 @@ def report(exclude_pids=None, resident_pid=None):
             tail = (f"{who} 在跑，但这一轮不采集" if collectors
                     else f"{who}——这份暂停没有任何人执行，标记会留到下次拉起")
         elif collectors:
-            tail = f"{who} 下一轮会删掉它并恢复采集"
+            # 采集器此刻可能正卡在本轮 `wait_chat_messages`（timeout 170s）里，
+            # 所以「下一轮」不是「下一瞬间」——把上限写出来，别让人以为按 2 秒的节奏走。
+            tail = f"{who} 下一轮（本轮 wait 返回后 ≤170 秒）会删掉它并恢复采集"
         else:
             tail = f"{who}，没人会去清它——标记会一直留到下次拉起"
         print(f"采集      : {wg_pause.describe(pause)}；{tail}")

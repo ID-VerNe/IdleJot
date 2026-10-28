@@ -151,13 +151,31 @@ def run_cases(cases, *, setup=None, prefix=True, catch=True):
 
 
 @contextmanager
-def temp_dir(prefix='tulpa-test-'):
-    """Scratch directory for fixtures, isolated from the working tree."""
-    path = Path(tempfile.mkdtemp(prefix=prefix))
+def temp_dir(prefix='tulpa-test-', dir=None):
+    """Scratch directory for fixtures, isolated from the working tree.
+
+    ``dir`` lands the temp dir under a parent (``ROOT/'.tmp'``) when a suite
+    cares about that location; ``None`` (default) uses the OS temp root.
+    """
+    path = Path(tempfile.mkdtemp(prefix=prefix, dir=dir))
     try:
         yield path
     finally:
         shutil.rmtree(path, ignore_errors=True)
+
+
+def scratch_dir(prefix='tulpa-scratch-'):
+    """Module-level scratch dir that outlives any ``with`` block.
+
+    For suites that pin ``WATER_GROUP_HOME`` / ``IDLEJOT_WG_STATE`` at module
+    top so background threads importing chatlocal lazily (after ``patch.dict``
+    exits) read the temp root (issue #79/#89). ``with temp_dir()`` would close
+    before those threads import; this registers atexit cleanup instead. The
+    dir lives until interpreter shutdown. Returns ``Path``.
+    """
+    path = Path(tempfile.mkdtemp(prefix=prefix))
+    atexit.register(shutil.rmtree, path, True)
+    return path
 
 
 def network_guard(ports):

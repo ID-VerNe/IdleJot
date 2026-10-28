@@ -15,14 +15,13 @@ collector 重启后 load_seen 只认得文件里的行，重放旧批次也不�
 import json
 import os
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
-from check_fixture_support import isolated_env
+from check_fixture_support import isolated_env, temp_dir
 
 # 一批真实形状：@ 唤醒、自己的回执、群友接话、自己再回一句。
 BATCH = [
@@ -90,8 +89,7 @@ def check_missing_flag(collector):
 
 
 def main():
-    with tempfile.TemporaryDirectory(prefix="wg-collector-") as tmp:
-        home = Path(tmp)
+    with temp_dir(prefix="wg-collector-") as home:
         with patch.dict("os.environ", isolated_env(home), clear=True):
             import collector
             assert str(collector.EVENTS).startswith(str(home)), \

@@ -32,13 +32,10 @@ AST 墓碑（第 9 项）钉住两种翻车写法不许回来：`dict(type=label
     /usr/bin/env -u PYTHONPATH .venv/Scripts/python.exe scripts/check_unsupported_segment.py
 """
 import ast
-import atexit
 import json
 import os
-import shutil
 import sqlite3
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -47,10 +44,10 @@ ROOT = Path(__file__).resolve().parents[1]
 # 先钉数据根（#79/#89 同类）：memory_engine 的 WG_HOME 与 DEFAULT_DB_PATH 是
 # import 期求值的，晚一步夹具档案就写进实机记忆库。
 import check_fixture_support as fs  # noqa: F401,E402  (issue #169 PE: path 注入收口)
+from check_fixture_support import scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False)
 
-_SCRATCH = Path(tempfile.mkdtemp(prefix="tulpa-unsupported-"))
-atexit.register(shutil.rmtree, _SCRATCH, True)
+_SCRATCH = scratch_dir(prefix="tulpa-unsupported-")
 os.environ["WATER_GROUP_HOME"] = str(_SCRATCH / "home")
 os.environ["IDLEJOT_WG_MEMORY_DB"] = str(_SCRATCH / "mem.sqlite3")
 os.environ["IDLEJOT_WG_STATE"] = str(_SCRATCH / "state")

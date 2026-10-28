@@ -5,11 +5,11 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import sys
-import tempfile
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import upgrade_installation as u
+from check_fixture_support import temp_dir  # noqa: E402
 
 
 def package(root, version, *, extra=False):
@@ -35,8 +35,8 @@ def fails(fn):
 
 
 def main():
-    with tempfile.TemporaryDirectory(prefix='tulpa-upgrade-') as folder, ExitStack() as cleanup:
-        base = Path(folder).resolve()
+    with temp_dir(prefix='tulpa-upgrade-') as folder, ExitStack() as cleanup:
+        base = folder.resolve()
         new, old = base / '新版本', base / '现有版本'
         package(new, '0.5.1')
         package(old, '0.5.0', extra=True)

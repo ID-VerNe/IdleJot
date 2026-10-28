@@ -23,15 +23,15 @@ import json
 import os
 import sqlite3
 import sys
-import tempfile
 import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
+from check_fixture_support import scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False)
 
-TMP = Path(tempfile.mkdtemp(prefix="wg_quote_"))
+TMP = scratch_dir(prefix="wg_quote_")
 DB = TMP / "fixture.sqlite3"
 STATE = TMP / "state"
 STATE.mkdir(parents=True, exist_ok=True)

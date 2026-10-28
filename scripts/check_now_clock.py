@@ -21,17 +21,14 @@ issue #51 之后 `watch.py` 启动就要 `self_account`（没有就拒绝启动�
 （`FIXTURE_CONFIG`，`IDLEJOT_WG_CONFIG` 指过去），否则会红在「监听拒绝启动」
 上，而它测的是唤醒块的时间锚。
 """
-import atexit
 import contextlib
 import io
 import json
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -40,8 +37,9 @@ ROOT = Path(__file__).resolve().parents[1]
 DAEMON = ROOT / "water-group" / "daemon"
 
 # 数据根必须在 import 之前钉死：STATE / DB 都是 import 期求值的。
-HOME = Path(tempfile.mkdtemp(prefix="wg-clock-gate-"))
-atexit.register(shutil.rmtree, HOME, True)
+import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
+from check_fixture_support import scratch_dir  # noqa: E402
+HOME = scratch_dir(prefix="wg-clock-gate-")
 (HOME / "data").mkdir(parents=True, exist_ok=True)
 os.environ["WATER_GROUP_HOME"] = str(HOME)
 os.environ["IDLEJOT_WG_DB"] = str(HOME / "data" / "mcp-access.sqlite3")
@@ -58,7 +56,6 @@ FIXTURE_CONFIG.write_text(json.dumps({"self_account": "10001",
                                      ensure_ascii=False), encoding="utf-8")
 os.environ["IDLEJOT_WG_CONFIG"] = str(FIXTURE_CONFIG)
 
-import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
 fs.bootstrap_paths(scripts=False, root=False)
 
 import followup  # noqa: E402

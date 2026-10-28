@@ -34,13 +34,16 @@ import os
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TMP = tempfile.mkdtemp(prefix="wg_followup_")
-DB = Path(TMP) / "fixture.sqlite3"
+import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
+from check_fixture_support import scratch_dir  # noqa: E402
+fs.bootstrap_paths(scripts=False, root=False)
+
+TMP = scratch_dir(prefix="wg_followup_")
+DB = TMP / "fixture.sqlite3"
 SID = "session-fixture"
 WATCH = ROOT / "water-group" / "daemon" / "watch.py"
 
@@ -48,8 +51,8 @@ WATCH = ROOT / "water-group" / "daemon" / "watch.py"
 # IDLEJOT_* 就会落回实机状态——本文件会 close() 窗口，等于删掉真实窗口文件。
 os.environ["TULPA_WG_DB"] = str(DB)
 os.environ["IDLEJOT_WG_DB"] = str(DB)
-os.environ["TULPA_WG_STATE"] = TMP
-os.environ["IDLEJOT_WG_STATE"] = TMP
+os.environ["TULPA_WG_STATE"] = str(TMP)
+os.environ["IDLEJOT_WG_STATE"] = str(TMP)
 
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
@@ -386,7 +389,7 @@ def run_watch():
     checkout 没有它——写份最小配置用 IDLEJOT_WG_CONFIG 指过去（只进子进程 env，
     不动本进程 environ：本文件其他用例对 config 有自己的桩）。
     """
-    fixture = Path(TMP) / "watch-fixture-config.json"
+    fixture = TMP / "watch-fixture-config.json"
     fixture.write_text(json.dumps({"self_account": "10001",
                                    "onebot_token": "followup-fixture"},
                                   ensure_ascii=False), encoding="utf-8")
@@ -395,8 +398,8 @@ def run_watch():
     for name in ("WATER_GROUP_HOME", "IDLEJOT_WG_STATE", "TULPA_WG_STATE",
                  "IDLEJOT_WG_DB", "TULPA_WG_DB"):
         env.pop(name, None)
-    env["IDLEJOT_WG_STATE"] = TMP
-    env["TULPA_WG_STATE"] = TMP
+    env["IDLEJOT_WG_STATE"] = str(TMP)
+    env["TULPA_WG_STATE"] = str(TMP)
     env["IDLEJOT_WG_DB"] = str(DB)
     env["TULPA_WG_DB"] = str(DB)
     env["IDLEJOT_WG_CONFIG"] = str(fixture)

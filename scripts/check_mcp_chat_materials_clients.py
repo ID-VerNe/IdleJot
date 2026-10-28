@@ -17,7 +17,6 @@ import socket
 import ssl
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import tomllib
@@ -26,6 +25,7 @@ from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from check_mcp_reactions import ReactionBot, Events, eventually
 from fixture_server import fixture_server
+from check_fixture_support import temp_dir  # noqa: E402
 from chatlocal.mcp_routes import install_mcp_routes
 from chatlocal.store import Store
 from fastapi import FastAPI
@@ -86,8 +86,8 @@ def main():
     summary=[]
     with fixture_server(ReactionBot) as upstream:
         try:
-            with tempfile.TemporaryDirectory(prefix='tulpa-materials-clients-') as tmp:
-                root=Path(tmp);store=Store(root/'chats.sqlite3')
+            with temp_dir(prefix='tulpa-materials-clients-') as tmp:
+                root=tmp;store=Store(root/'chats.sqlite3')
                 (root/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{upstream.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n','utf-8')
                 with patch('chatlocal.onebot.ROOT',root),patch('chatlocal.message_sender.ROOT',root),patch.dict(os.environ,{
                     'REPLY_ONEBOT_URL':f'http://127.0.0.1:{upstream.server_port}','REPLY_ONEBOT_TOKEN':'',

@@ -11,20 +11,18 @@
     .venv/Scripts/python.exe scripts/check_stop_stack.py
 """
 import ast
-import atexit
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
+from check_fixture_support import scratch_dir  # noqa: E402
+
 # up.py 在 import 时就把 state_dir() 求值了，隔离必须发生在 import 之前。
-HOME = Path(tempfile.mkdtemp(prefix="tulpa-stop-gate-"))
-atexit.register(shutil.rmtree, HOME, True)
+HOME = scratch_dir(prefix="tulpa-stop-gate-")
 os.environ["WATER_GROUP_HOME"] = str(HOME)
 
 import up  # noqa: E402

@@ -29,11 +29,12 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LISTEN = ROOT / "water-group" / "daemon" / "listen.py"
+
+from check_fixture_support import temp_dir  # noqa: E402
 
 # 外部测试变量会把 state 又指回实机，这里必须清掉，只留临时数据根。
 ISOLATING_VARS = ("IDLEJOT_WG_STATE", "TULPA_WG_STATE", "IDLEJOT_WG_DB",
@@ -48,7 +49,7 @@ def write_fixture_config(tmp):
     临时目录、用 `IDLEJOT_WG_CONFIG` 指过去：不碰仓库树（崩在中间不会给开发机
     留占位配置），也不读实机配置（门禁不许依赖机器状态）。
     """
-    config = Path(tmp) / "config.json"
+    config = tmp / "config.json"
     config.write_text(json.dumps({"self_account": "10001",
                                   "onebot_token": "listen-fixture"},
                                  ensure_ascii=False), encoding="utf-8")
@@ -89,7 +90,7 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
-    with tempfile.TemporaryDirectory(prefix="wg-listen-") as home:
+    with temp_dir(prefix="wg-listen-") as home:
         config = write_fixture_config(home)
         result = run_listen(home, config)
     out = result.stdout or ""

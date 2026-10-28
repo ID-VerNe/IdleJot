@@ -7,7 +7,6 @@ for every NapCat feature. All events and credentials below are invented.
 import json
 from pathlib import Path
 import sys
-import tempfile
 import threading
 import time
 from types import SimpleNamespace
@@ -16,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from websockets.sync.server import serve
 from chatlocal.onebot_events import EventReceiver
 from chatlocal.mcp_chat_media import image_ref
+from check_fixture_support import temp_dir  # noqa: E402
 
 
 def check(reject):
@@ -70,8 +70,8 @@ def rotated_file_ids():
     from chatlocal.store import Store
     from chatlocal.artifact_onebot import upsert
     root = Path(__file__).resolve().parents[1]
-    with tempfile.TemporaryDirectory(dir=root/'.tmp', prefix='napcat-file-id-') as name:
-        store = Store(Path(name)/'fixture.sqlite3')
+    with temp_dir(dir=root/'.tmp', prefix='napcat-file-id-') as name:
+        store = Store(name/'fixture.sqlite3')
         descriptor = dict(file_name='synthetic.txt', file_size=8, upload_time=1772140800, uploader=333)
         with store.connect() as db:
             # Two enumerations of the same native file can yield new opaque IDs.

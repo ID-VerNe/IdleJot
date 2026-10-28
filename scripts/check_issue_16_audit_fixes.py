@@ -9,14 +9,11 @@
 全程离线：数据根钉到临时目录、grants 用假库、MCP 走 httpx.MockTransport，不碰真栈。
 """
 import ast
-import atexit
 import json
 import os
 import random
-import shutil
 import sqlite3
 import sys
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -27,14 +24,13 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
-from check_fixture_support import isolated_env  # noqa: E402
+from check_fixture_support import isolated_env, scratch_dir  # noqa: E402
 
 # Pin the data root before importing anything that resolves it at import time:
 # chatlocal/config.py mkdirs DATA/TMP on import, and the daemons resolve
 # STATE_DIR/DB at import. Without this the suite would touch the real
 # ~/.water-group (the issue #14 failure mode all over again).
-_SCRATCH = Path(tempfile.mkdtemp(prefix="tulpa-issue16-"))
-atexit.register(shutil.rmtree, _SCRATCH, True)
+_SCRATCH = scratch_dir(prefix="tulpa-issue16-")
 os.environ.clear()
 os.environ.update(isolated_env(_SCRATCH))
 os.environ["IDLEJOT_WG_STATE"] = str(_SCRATCH / "state")

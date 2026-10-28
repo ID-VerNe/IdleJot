@@ -31,21 +31,19 @@ issue 要的是「群友自发复读时机器人跟一句」，而这类功能�
 
     .venv/Scripts/python.exe scripts/check_repeater.py
 """
-import atexit
 import json
 import os
-import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
+from check_fixture_support import scratch_dir  # noqa: E402
+
 # 数据根在 import 任何守护模块之前钉住：`repeater` 的账本路径在调用期读
 # `state_dir()`，而 `commands` 在 import 期就把 `STATE_DIR` 求值完了。
-_SCRATCH = Path(tempfile.mkdtemp(prefix="wg_repeater_"))
-atexit.register(shutil.rmtree, _SCRATCH, True)
+_SCRATCH = scratch_dir(prefix="wg_repeater_")
 os.environ["WATER_GROUP_HOME"] = str(_SCRATCH)
 os.environ["IDLEJOT_WG_STATE"] = str(_SCRATCH / "state")
 os.environ["TULPA_WG_STATE"] = str(_SCRATCH / "state")

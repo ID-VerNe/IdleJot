@@ -18,7 +18,6 @@ import importlib.util
 import json
 import os
 import sys
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -26,7 +25,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_fixture_support import isolated_env
+from check_fixture_support import isolated_env, temp_dir
 
 WATCHDOG = ROOT / "water-group" / "daemon" / "watchdog.py"
 
@@ -61,9 +60,9 @@ class FakeNapCat:
 
 
 def main():
-    with tempfile.TemporaryDirectory(prefix="watchdog-token-") as tmp:
-        config = Path(tmp) / "config.json"
-        with patch.dict("os.environ", isolated_env(Path(tmp) / "home"), clear=True):
+    with temp_dir(prefix="watchdog-token-") as tmp:
+        config = tmp / "config.json"
+        with patch.dict("os.environ", isolated_env(tmp / "home"), clear=True):
             write_config(config, "token-before-rotation")
             watchdog = load_watchdog(config)
             napcat = FakeNapCat()

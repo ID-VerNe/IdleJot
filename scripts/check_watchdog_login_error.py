@@ -27,14 +27,13 @@ import ast
 import importlib.util
 import json
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_fixture_support import isolated_env  # noqa: E402  (数据根隔离，见 issue #79/#89)
+from check_fixture_support import isolated_env, temp_dir  # noqa: E402  (数据根隔离，见 issue #79/#89)
 
 WATCHDOG = ROOT / "water-group" / "daemon" / "watchdog.py"
 
@@ -154,10 +153,10 @@ def case_loop_wiring():
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    with tempfile.TemporaryDirectory(prefix="watchdog-login-") as tmp:
-        home = Path(tmp) / "home"
+    with temp_dir(prefix="watchdog-login-") as tmp:
+        home = tmp / "home"
         (home / "logs").mkdir(parents=True)
-        config = Path(tmp) / "config.json"
+        config = tmp / "config.json"
         with patch.dict("os.environ", isolated_env(home), clear=True):
             config.write_text(json.dumps({"onebot_token": "gate-token"}),
                               encoding="utf-8")

@@ -9,13 +9,12 @@ import json
 from pathlib import Path
 import socket
 import sys
-import tempfile
 import threading
 import time
 from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from check_fixture_support import isolated_env, network_guard
+from check_fixture_support import isolated_env, network_guard, temp_dir
 from fixture_server import fixture_server
 from check_mcp_language_learning import Clock,ROOT,expression_fixture,review_fixture,jargon_fixture
 from check_mcp_reactions import ReactionBot,Events
@@ -40,8 +39,8 @@ def durable():
     clock=Clock()
     a=dict(scope='qq:111:group:222',gid='one-credential',sid='session-a',epoch='epoch-1')
     b=dict(a,scope='qq:111:group:223',sid='session-b')
-    with tempfile.TemporaryDirectory(prefix='tulpa-multigroup-store-') as tmp:
-        path=Path(tmp)/'language.sqlite3';store=LanguageStore(path,clock=clock)
+    with temp_dir(prefix='tulpa-multigroup-store-') as tmp:
+        path=tmp/'language.sqlite3';store=LanguageStore(path,clock=clock)
         with store.db() as db:
             db.execute('INSERT INTO pins VALUES(?,?)',(a['gid'],a['scope']))
             db.execute('INSERT INTO contexts VALUES(?,?,?)',(digest('same-host'),a['scope'],a['gid']))
@@ -118,8 +117,8 @@ def integration():
     with fixture_server(ReactionBot, ports=allowed_ports) as server:
         restrict,_=network_guard(allowed_ports)
         try:
-            with tempfile.TemporaryDirectory(prefix='tulpa-multigroup-mcp-') as tmp,patch.dict('os.environ',isolated_env(),clear=True),patch('socket.create_connection',restrict):
-                root=Path(tmp);history=Store(root/'chats.sqlite3')
+            with temp_dir(prefix='tulpa-multigroup-mcp-') as tmp,patch.dict('os.environ',isolated_env(),clear=True),patch('socket.create_connection',restrict):
+                root=tmp;history=Store(root/'chats.sqlite3')
                 (root/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{server.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n','utf-8')
                 with patch('chatlocal.onebot.ROOT',root),patch('chatlocal.message_sender.ROOT',root):
                     service=install_mcp_routes(app:=FastAPI(),history);tools=service.tools;chat=tools.chat;access=service.access

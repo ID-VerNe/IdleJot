@@ -26,14 +26,13 @@ launches stop at MAX and the loop only ever reports halt again.
 import importlib.util
 import json
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_fixture_support import isolated_env
+from check_fixture_support import isolated_env, temp_dir
 
 WATCHDOG = ROOT / "water-group" / "daemon" / "watchdog.py"
 
@@ -57,9 +56,9 @@ def load_watchdog(config_path):
 
 
 def main():
-    with tempfile.TemporaryDirectory(prefix="watchdog-halt-") as tmp:
-        home = Path(tmp) / "home"
-        config = Path(tmp) / "config.json"
+    with temp_dir(prefix="watchdog-halt-") as tmp:
+        home = tmp / "home"
+        config = tmp / "config.json"
         with patch.dict("os.environ", isolated_env(home), clear=True):
             config.write_text(json.dumps({"onebot_token": "gate-token"}), encoding="utf-8")
             watchdog = load_watchdog(config)

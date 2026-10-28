@@ -9,7 +9,6 @@ import base64
 import json
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.parse
 from pathlib import Path
@@ -19,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
 from fixture_server import FixtureHandler, fixture_server  # noqa: E402
-from check_fixture_support import network_guard  # noqa: E402
+from check_fixture_support import network_guard, temp_dir  # noqa: E402
 
 import commands  # noqa: E402
 import miyoushe  # noqa: E402  (域异常由插件声明，commands 不再转出类对象)
@@ -860,8 +859,7 @@ def test_degraded_login(_tmp):
 
 
 def main():
-    with tempfile.TemporaryDirectory() as tmp_name:
-        tmp = Path(tmp_name)
+    with temp_dir() as tmp:
         real_users_dir = user_store.users_dir
         real_log = qr_login.LOG
         real_daily = qr_login.DAILY_FILE

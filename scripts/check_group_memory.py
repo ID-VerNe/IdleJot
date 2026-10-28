@@ -16,12 +16,13 @@ Tests:
 import json
 import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+from check_fixture_support import temp_dir  # noqa: E402
 
 # Import through the bridge package so this suite does not create a second
 # top-level copy of the engine under the name `memory_engine`.
@@ -756,8 +757,7 @@ def main():
     print("========================================================================")
     print("        [测试] Tulpa 群友动态小本本记忆 & 专属调侃系统验证")
     print("========================================================================")
-    with tempfile.TemporaryDirectory(dir=str(ROOT / ".tmp"), prefix="mem-check-") as tmp:
-        tmp_dir = Path(tmp)
+    with temp_dir(dir=str(ROOT / ".tmp"), prefix="mem-check-") as tmp_dir:
         test_schema_and_init(tmp_dir)
         test_seeding(tmp_dir)
         test_alias_matching(tmp_dir)

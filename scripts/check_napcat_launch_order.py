@@ -31,7 +31,6 @@ that really waits on the wall clock is a gate nobody runs.
 import contextlib
 import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -39,6 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from water_group import bootstrap
+from check_fixture_support import temp_dir  # noqa: E402
 
 failures = []
 
@@ -127,32 +127,30 @@ def run_case(qq_exe, boot_ok=True, bat_exists=True, launcher=None,
     探针答不答——issue #50 的两个新用例（C7/C8）一个只要端口、一个只要登录死。
     """
     calls = []
-    tmp = tempfile.TemporaryDirectory(prefix="napcat-order-")
-    napcat_dir = Path(tmp.name)
-    if bat_exists:
-        (napcat_dir / "launcher-user.bat").write_text("@echo off\r\n", encoding="ascii")
+    with temp_dir(prefix="napcat-order-") as napcat_dir:
+        if bat_exists:
+            (napcat_dir / "launcher-user.bat").write_text("@echo off\r\n", encoding="ascii")
 
-    previous = os.environ.pop("TULPA_NAPCAT_LAUNCHER", None)
-    if launcher is not None:
-        os.environ["TULPA_NAPCAT_LAUNCHER"] = launcher
-    try:
-        with stubbed(
-            NAPCAT_DIR=napcat_dir,
-            resolve_qq_exe=lambda: qq_exe,
-            is_port_open=(lambda port: True) if ports_open else (lambda port: False),
-            wait_napcat_ports=lambda seconds=12: boot_ok,
-            login_info=(lambda: None) if not logged_in else (
-                lambda: {"user_id": "10001", "nickname": "gate-bot"}),
-            launch_napcat_direct=lambda exe, account="": calls.append(("inject", exe)),
-            start_process_detached=lambda cmd, **kw: calls.append(("bat", list(cmd))) or FakeProc(),
-        ):
-            ok, note = bootstrap.ensure_napcat()
-    finally:
-        if previous is not None:
-            os.environ["TULPA_NAPCAT_LAUNCHER"] = previous
-        else:
-            os.environ.pop("TULPA_NAPCAT_LAUNCHER", None)
-        tmp.cleanup()
+        previous = os.environ.pop("TULPA_NAPCAT_LAUNCHER", None)
+        if launcher is not None:
+            os.environ["TULPA_NAPCAT_LAUNCHER"] = launcher
+        try:
+            with stubbed(
+                NAPCAT_DIR=napcat_dir,
+                resolve_qq_exe=lambda: qq_exe,
+                is_port_open=(lambda port: True) if ports_open else (lambda port: False),
+                wait_napcat_ports=lambda seconds=12: boot_ok,
+                login_info=(lambda: None) if not logged_in else (
+                    lambda: {"user_id": "10001", "nickname": "gate-bot"}),
+                launch_napcat_direct=lambda exe, account="": calls.append(("inject", exe)),
+                start_process_detached=lambda cmd, **kw: calls.append(("bat", list(cmd))) or FakeProc(),
+            ):
+                ok, note = bootstrap.ensure_napcat()
+        finally:
+            if previous is not None:
+                os.environ["TULPA_NAPCAT_LAUNCHER"] = previous
+            else:
+                os.environ.pop("TULPA_NAPCAT_LAUNCHER", None)
     return ok, note, calls
 
 

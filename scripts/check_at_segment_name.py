@@ -32,15 +32,15 @@ import json
 import os
 import sqlite3
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: F401,E402  先钉数据根（#79/#89 同类）
+from check_fixture_support import scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False)
 
 # 记忆库路径 import 期求值，必须在 import daemon/chatlocal 模块之前钉走。
-_SCRATCH = Path(tempfile.mkdtemp(prefix="wg_at_name_"))
+_SCRATCH = scratch_dir(prefix="wg_at_name_")
 os.environ["WATER_GROUP_HOME"] = str(_SCRATCH / "home")
 os.environ["IDLEJOT_WG_MEMORY_DB"] = str(_SCRATCH / "mem.sqlite3")
 (_SCRATCH / "home").mkdir(parents=True, exist_ok=True)

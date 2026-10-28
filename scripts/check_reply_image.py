@@ -45,7 +45,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -54,6 +53,7 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_fixture_support  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
+from check_fixture_support import scratch_dir  # noqa: E402
 
 from fixture_server import FixtureHandler, fixture_server  # noqa: E402
 
@@ -71,7 +71,7 @@ PNG2 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYPgPAAEDAQAI"
     "icLsAAAAAElFTkSuQmCC")
 
-HOME = Path(tempfile.mkdtemp(prefix="wg_reply_image_"))
+HOME = scratch_dir(prefix="wg_reply_image_")
 STATE = HOME / "state"
 STATE.mkdir(parents=True)
 (HOME / "data").mkdir()

@@ -9,14 +9,13 @@ import os
 from pathlib import Path
 import socket
 import sys
-import tempfile
 import threading
 import time
 from unittest.mock import patch
 import wave
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from check_fixture_support import isolated_env
+from check_fixture_support import isolated_env, temp_dir
 from check_mcp_chat import Events, eventually, ROOT
 from check_mcp_chat_media import fixture_image
 from fixture_server import FixtureHandler,fixture_server
@@ -168,8 +167,8 @@ async def private_materials(service, grant, sid, group_sid):
 def main():
     events=Events();checks=[]
     try:
-        with fixture_server(Bot) as upstream,tempfile.TemporaryDirectory(prefix='tulpa-sl-extensions-') as tmp,patch.dict('os.environ',isolated_env(),clear=True):
-            root=Path(tmp)
+        with fixture_server(Bot) as upstream,temp_dir(prefix='tulpa-sl-extensions-') as tmp,patch.dict('os.environ',isolated_env(),clear=True):
+            root=tmp
             (root/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{upstream.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n')
             with patch('chatlocal.onebot.ROOT',root),patch('chatlocal.message_sender.ROOT',root):
                 app=FastAPI();service=install_mcp_routes(app,Store(root/'chats.sqlite3'))

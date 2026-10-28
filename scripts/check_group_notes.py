@@ -18,11 +18,12 @@ Six properties, one per symptom:
 6. MCP wiring: ``query_group_notes`` is in CHAT_TOOLS and has a schema.
 """
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT))
+
+from check_fixture_support import temp_dir  # noqa: E402
 
 # Import through the bridge package so this suite does not create a second
 # top-level copy of the engine under the name `memory_engine`.
@@ -127,8 +128,7 @@ def main():
     print("========================================================================")
     print("        [测试] issue #31 群级结构化术语（黑话/店名）读写闭环验证")
     print("========================================================================")
-    with tempfile.TemporaryDirectory(dir=str(ROOT / ".tmp"), prefix="group-notes-") as tmp:
-        tmp_dir = Path(tmp)
+    with temp_dir(dir=str(ROOT / ".tmp"), prefix="group-notes-") as tmp_dir:
         test_schema_creates_group_notes(tmp_dir)
         test_write_and_read_by_term(tmp_dir)
         test_upsert_does_not_grow(tmp_dir)

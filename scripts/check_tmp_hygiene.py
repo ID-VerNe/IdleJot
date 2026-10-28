@@ -27,9 +27,10 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
+
+from check_fixture_support import temp_dir  # noqa: E402
 
 HOME = Path(os.environ.get("WATER_GROUP_HOME") or (Path.home() / ".water-group"))
 # E1 的判据按「放错家」分两类：草稿的家是 drafts/ 或 archive/drafts-*/，脚本的家是
@@ -220,8 +221,7 @@ def seed(root, *, dirty):
 
 def self_test():
     """A/B controls: every assertion must fire when violated and stay quiet otherwise."""
-    root = Path(tempfile.mkdtemp(prefix="wg-hygiene-selftest-"))
-    try:
+    with temp_dir(prefix="wg-hygiene-selftest-") as root:
         dirty = root / "dirty"
         clean = root / "clean"
         seed(dirty, dirty=True)
@@ -260,8 +260,6 @@ def self_test():
         assert "E4 info" in "\n".join(lines_after), "\n".join(lines_after)
         assert ok_after, "E4 只报告，不影响退出码"
         print("✓ 归档缩水：E4 报告但不拦")
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
     print("=" * 72)
     print("✓ 巡检门禁自检 4 组通过")
     print("=" * 72)

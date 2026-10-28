@@ -32,12 +32,12 @@ require_wake_identity 不存在（AttributeError）、report 不读配置健康�
 import ast
 import json
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
+from check_fixture_support import temp_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False)
 
 from water_group import bootstrap  # noqa: E402
@@ -134,8 +134,8 @@ def case_watch_refuses():
     """监听启动校验：缺 self_account 拒绝，在位放行。"""
     real = wg_config.CONFIG
     try:
-        with tempfile.TemporaryDirectory(prefix="cfg-watch-") as tmp:
-            missing = Path(tmp) / "config.json"
+        with temp_dir(prefix="cfg-watch-") as tmp:
+            missing = tmp / "config.json"
             wg_config.CONFIG = missing
             expect("watch: self_account 读空", up.self_account(), "")
             expect("watch: 缺身份时拒绝启动（exit 1）", watch.require_wake_identity(), 1)
@@ -173,9 +173,9 @@ def case_report_consumes_problems():
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    with tempfile.TemporaryDirectory(prefix="cfg-fail-loud-") as tmp:
+    with temp_dir(prefix="cfg-fail-loud-") as tmp:
         cases = [
-            ("problems 逐项点名", lambda: case_problems(Path(tmp))),
+            ("problems 逐项点名", lambda: case_problems(tmp)),
             ("ensure_napcat 缺账号拒绝注入", case_ensure_napcat_refuses),
             ("watch 缺身份拒绝启动", case_watch_refuses),
             ("report 消费配置健康度", case_report_consumes_problems),

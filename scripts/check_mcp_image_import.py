@@ -10,14 +10,13 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
-import tempfile
 import threading
 from unittest.mock import patch
 
 SUBPROCESS_ENV={k:os.environ[k] for k in ('SYSTEMROOT','WINDIR') if k in os.environ}
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_fixture_support import isolated_env
+from check_fixture_support import isolated_env, temp_dir
 from fixture_server import fixture_server
 from check_mcp_chat_media import StickerBot, fixture_image
 from check_mcp_chat import Events, eventually, ROOT
@@ -130,8 +129,8 @@ def main():
     checks = []
     with fixture_server(StickerBot) as upstream:
         try:
-            with tempfile.TemporaryDirectory(prefix='tulpa-image-import-') as tmp, patch.dict('os.environ',isolated_env(),clear=True):
-                root = Path(tmp)
+            with temp_dir(prefix='tulpa-image-import-') as tmp, patch.dict('os.environ',isolated_env(),clear=True):
+                root = tmp
                 (root/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{upstream.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n')
                 with patch('chatlocal.onebot.ROOT', root), patch('chatlocal.message_sender.ROOT', root), \
                         patch('chatlocal.mcp_chat_media.download', side_effect=AssertionError('Uploaded image used remote URL')):

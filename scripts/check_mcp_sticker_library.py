@@ -7,13 +7,12 @@ from pathlib import Path
 import socket
 import statistics
 import sys
-import tempfile
 import threading
 import time
 from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from check_fixture_support import isolated_env
+from check_fixture_support import isolated_env, temp_dir
 from fixture_server import fixture_server
 from check_mcp_chat_media import Events, StickerBot, eventually, ROOT
 from fastapi import FastAPI
@@ -37,8 +36,8 @@ def main():
     metrics={}
     with fixture_server(StickerBot) as upstream:
         try:
-            with tempfile.TemporaryDirectory(dir=ROOT/'.tmp',prefix='sticker-library-') as tmp,patch.dict('os.environ',isolated_env(),clear=True):
-                folder=Path(tmp);store=Store(folder/'chats.sqlite3')
+            with temp_dir(dir=ROOT/'.tmp',prefix='sticker-library-') as tmp,patch.dict('os.environ',isolated_env(),clear=True):
+                folder=tmp;store=Store(folder/'chats.sqlite3')
                 (folder/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{upstream.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n','utf-8')
                 app=FastAPI();svc=install_mcp_routes(app,store);access=svc.access;tools=svc.tools
                 with patch('chatlocal.onebot.ROOT',folder),patch('chatlocal.message_sender.ROOT',folder),TestClient(app) as ui:

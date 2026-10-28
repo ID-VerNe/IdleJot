@@ -41,18 +41,12 @@ ADVISORY_FILE_LINES = 700
 # Empty between issue #37 and issue #169: up.py (the last entry, "crossed via #9")
 # became a facade -- probing / wake-config / start-stop moved to wg_up_probe /
 # wg_up_wake / wg_up_stack.
+# issue #169 PF-2 split scripts/check_listener_rehang.py (2201 lines / 43 contracts)
+# into the scripts/check_listener_rehang/ package (_common / exit_hint / budget /
+# ownership / ledger / watch), each sub-module under MAX_FILE_LINES; the EXEMPTIONS
+# entry bound to PF is now cleared.
 # An exemption must be added back with the issue that will remove it, never "for now".
-#
-# issue #169 PA: `scripts` entered SCAN_DIRS, and `scripts/check_listener_rehang.py`
-# (2220 lines / 43 contracts) immediately went red. It is split into a package by
-# issue #169 section PF -- exit_hint / budget / ledger / watch -- keeping the 43
-# contract numbers globally unique and un-reordered. That split removes this entry;
-# until then it is the only scripts/ file above MAX_FILE_LINES.
-EXEMPTIONS = {
-    'scripts/check_listener_rehang.py':
-        'issue #169 PF: split into scripts/check_listener_rehang/ package '
-        '(exit_hint/budget/ledger/watch); 43 contract numbers stay unique, un-reordered',
-}
+EXEMPTIONS = {}
 
 
 def iter_sources(root):

@@ -58,7 +58,7 @@
 上一个字都不打印——Agent 看到的最后一行停在「等下一次唤醒…」，分不清是被杀还是还在等。
 要短一点用 `--wait 60`，要立刻返回用 `--no-wait`。`listen.py` 每轮进入 `watch.py` 之前会打
 「等最多 90s（第 1 轮）…」，`RESTART:` 行只推荐不超预算的取值（短的回常驻周期、超的压回
-预算），文档里的 `--timeout` 示例也由 `scripts/check_listener_rehang.py` 逐个扫；
+预算），文档里的 `--timeout` 示例也由 `scripts/check_listener_rehang` 逐个扫；
 **仓外的私有规则 `~/.water-group/rules/*.md` 同样在扫**（issue #87）——它不在仓内，
 但「动手前先读」的最高权威文档不能教超预算的取值。
 
@@ -393,7 +393,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 4 | `static` | `check_path_hygiene.py` | 路径卫生：运行时数据不许从仓库根推导（防 #14 复发） |
 | 5 | `static` | `check_no_console_child.py` | 子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发） |
 | 6 | `static` | `check_listen_passthrough.py` | 唤醒内容不被 listen.py 吞掉（#91） |
-| 7 | `static` | `check_listener_rehang.py` | 监听空窗：退出必带重挂指令、回复默认续挂、过期唤醒不静默、退出留痕且空窗可由只读入口报出（#69/#112） |
+| 7 | `static` | `check_listener_rehang` | 监听空窗：退出必带重挂指令、回复默认续挂、过期唤醒不静默、退出留痕且空窗可由只读入口报出（#69/#112） |
 | 8 | `static` | `check_gap_disclosure.py` | 停机窗口缺口披露：后端不在的那段时间漏了什么事后说得出来，up.py --status / reply.py --list / listen.py NO_WORK 三处只读入口报出窗口内漏 N 条、@ 本机 M 条，不再报告一切正常（#114） |
 | 9 | `static` | `check_status_napcat_line.py` | up.py --status 的 NapCat 行：括号内是 OneBot 真账号而非字段名；生产者形状与解析口径两侧各钉一条（只桩最底层 OneBot 调用），反例对照确认判据抓得住（#156/#159） |
 | 10 | `static` | `check_module_size.py` | 模块体量红线：文件超 1000 行或类超 800 行即 fail（#11） |

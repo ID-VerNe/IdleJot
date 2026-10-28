@@ -105,6 +105,11 @@ NO_RESTART = {
     "water-group/daemon/wg_send_failure.py": "shared send-failure diagnostics for CLI (reply), no daemon imports it",
     "water-group/daemon/listen.py": "one-shot CLI",
     "water-group/daemon/look.py": "one-shot CLI",
+    # issue #200：视频补读口与它的安全下载层只被 video.py（一次性 CLI）用；
+    # 渲染侧 `wg_videos` 相反——它被 watch/reply/up import，进了守护闭包，
+    # 所以**不**在这一列。
+    "water-group/daemon/video.py": "one-shot CLI",
+    "water-group/daemon/wg_download.py": "one-shot CLI (video) downloader",
     "water-group/daemon/reply.py": "one-shot CLI",
     "water-group/daemon/watch.py": "one-shot CLI",
     "water-group/daemon/wg_logs.py": "one-shot log reader",

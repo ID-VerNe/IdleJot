@@ -44,6 +44,7 @@ import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收
 import wg_budget  # noqa: E402  (等待预算：重挂提示不推荐撑不住的取值，issue #83)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_gap  # noqa: E402  (停机窗口缺口账本：漏了什么事后说得出来，issue #114)
+import wg_videos  # noqa: E402  (视频标记渲染，issue #200)
 import wg_images  # noqa: E402  (图片标记渲染，与 reply/look 同一份实现)
 import wg_isolation  # noqa: E402  (本会话只管一个群：状态行照实报，issue #164)
 import wg_listener_state  # noqa: E402  (监听存亡账本：「无人值守」的可读事实，issue #112)
@@ -325,7 +326,7 @@ def report(exclude_pids=None, resident_pid=None):
         for e in wakes:
             stamp = wg_clock.clock_ms(e.get("timestamp"))
             state = wake_state(e, rows, ledger)
-            images = wg_images.render(e)
+            images = wg_images.render(e) + wg_videos.render(e)
             # status 行与唤醒行同一份渲染口径（issue #32）：40 字额度按正文
             # 算，段占位不占，截断了带 --show 指引。
             body, _, _ = wg_text.render_body(e.get("content"), wg_text.STATUS_BODY_CHARS,

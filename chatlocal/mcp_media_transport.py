@@ -24,6 +24,11 @@ import dns.resolver
 from . import reply_timing as timing
 
 MAX_BYTES = 6 * 1024 * 1024
+# 下载判据的公开常量（issue #200）：daemon 侧的 ``wg_download`` 复述同一套闸门，
+# ``scripts/check_video_visibility.py`` 断言两边同值。数字以前直接写在 ``download()``
+# 里（``range(5)`` / ``+25``），门禁无从比对，漂移也没有任何东西会喊。
+MAX_REDIRECTS = 5
+DOWNLOAD_TIMEOUT_SECONDS = 25
 MAX_BASE64_LENGTH = 4 * ((MAX_BYTES + 2) // 3)
 
 
@@ -107,9 +112,9 @@ def public_addresses(host, port, *, deadline=None):
 @timing.stage('image.download')
 def download(url, cancel, *, max_bytes=MAX_BYTES, trusted_file=False):
     """DNS pinned per hop, no proxy, no local networks even after redirects."""
-    deadline = time.monotonic()+25
+    deadline = time.monotonic()+DOWNLOAD_TIMEOUT_SECONDS
     try:
-        for _ in range(5):
+        for _ in range(MAX_REDIRECTS):
             parts = remote_target(url,trusted_file=trusted_file)
             port = parts.port or (443 if parts.scheme == 'https' else 80)
             records = public_addresses(parts.hostname, port, deadline=deadline)

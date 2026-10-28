@@ -61,6 +61,7 @@ import wg_gap  # noqa: E402  (停机窗口缺口账本，issue #114)
 import winconsole  # noqa: E402
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #128)
+import wg_videos  # noqa: E402  (视频标记渲染，issue #200)
 import wg_images  # noqa: E402
 import wg_isolation  # noqa: E402  (群身份与跨群护栏，issue #164)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
@@ -547,7 +548,7 @@ def list_wakes():
             continue
         mark = up.wake_state(e, rows, ledger)
         stamp = wg_clock.clock_ms(e.get("timestamp"))
-        images = wg_images.render(e)
+        images = wg_images.render(e) + wg_videos.render(e)
         quotes = wg_quotes.render_event(e)
         # 正文渲染与 watch 唤醒行同一份口径（issue #32）：段占位不占额度，
         # 截断了带 … 和 --show 指引。

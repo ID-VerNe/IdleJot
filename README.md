@@ -280,15 +280,18 @@ reply.py 发送成功
 dossier.py --check              # 该提炼了吗（exit 0 = 该，3 = 还不用）
 dossier.py --dump 60            # 取一批素材，最早的优先
 dossier.py --digest             # 规则版消化：纯关键词，不调模型
+dossier.py --digest --reap      # 同上；DUE 长期无人 --mark 时兜底推进游标
 dossier.py --mark --through <id> # 推游标（顺带清零「连续无人指名」计数）
 dossier.py --tick               # 记一轮没人指名；listen.py 每轮静默后自动调
 dossier.py --notes              # 看本群术语表（黑话 / 店名 / 约定）
 dossier.py --notes-apply 术语.json  # 写术语：[{"term": "...", "value": "..."}]
 ```
 
-触发条件在 `config.json` 的 `dossier` 段：攒够 `burst_messages`（默认 80）直接触发；或者闲置超过 `idle_minutes`（默认 20）且攒了 `min_messages`（默认 25）；或者连续 `quiet_rounds`（默认 3）轮 `listen.py` 都没被指名、且这几轮加起来超过 `quiet_minutes`（默认 4，下限保护）并至少有 `quiet_min_messages`（默认 1）条素材。三条判据并列，各自独立命中，互不改写。
+触发条件在 `config.json` 的 `dossier` 段，三条判据按 `quiet` → `burst` → `idle` 的顺序判：连续 `quiet_rounds`（默认 3）轮 `listen.py` 都没被指名、且这几轮加起来超过 `quiet_minutes`（默认 4，下限保护）并至少有 `quiet_min_messages`（默认 1）条素材；或者最近 `burst_window_minutes`（默认 10）内涌入 `burst_messages`（默认 80）条；或者闲置超过 `idle_minutes`（默认 20）且攒了 `min_messages`（默认 25）。`quiet` 排最前是因为只有它能说明「为什么现在叫醒」：`burst` 一旦拿「从游标起的积压总量」当爆发量，游标一停就恒真，quiet 分支成了死码（issue #183）。
 
 最后那条是给「群里一直聊、但没人 @ 我」的常态准备的：默认 90s 一轮，3 轮约 4.5 分钟。轮次是主判据，分钟数是下限——`--timeout 30` 时三轮只有 90 秒，只钉轮次会让「挂满一段时间」变成假话。**下限默认 4 而不是 5**：三个默认轮次只有 4.5 分钟，下限取 5 会让默认配置下第 3 轮永远过不去，轮次判据变成死码（`NO` 行照样显示 `3/3`，只是永远差一步）。`quiet_since` 记的是首轮**开始**（`--tick --round-seconds` 把 `watch.py --timeout` 的时长回推掉），否则 N 轮只跨 N−1 个间隔。计数由 `listen.py` 在每轮静默超时后写进 `state/wg_dossier.json`，有人指名（`WAKE`）或 `--mark` 时归零；`reply.py --wait` 续挂的 `--no-digest` 与门禁的 `--probe` 都不计数。`--check` 的 `NO` 行会带上当前进度（`quiet=2/3(4.1min)`），`YES` 行会说明是哪条判据命中的。
+
+`burst` 只看窗口内的增量，不再拿积压总量冒充爆发；同一批素材也只叫醒一次——`listen.py` 判 DUE 后用 `--tick due` 记下这批，`--check` 下一轮输出 `NO due-hold`，而不是每轮重复喊同一件事。确实没人处理时，`--digest --reap` 在 `reap_after_minutes`（默认 15）之后把游标兜底推进到规则层已消化的末尾（原消息仍在 `chat_inbox`，只是不再计入 pending）；模型深加工 + `--mark` 仍是唯一权威的推进者，`--digest` 本身照旧不动游标。
 
 两层：`--digest` 走关键词打标，零成本，每次超时都该跑；`--dump` → 提炼 → `consolidate_chat_memory` → `--mark` 是模型版，质量高但贵，只在 `--check` 说该做时才做。
 

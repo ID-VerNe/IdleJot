@@ -117,6 +117,10 @@ def run(script, *args):
 def tick(mode="round", round_seconds=None):
     """Count one round nobody named us (issue #162); `reset` clears the counter.
 
+    `due` records the batch `--check` just announced (issue #183), so the next
+    round can say `NO due-hold` instead of re-announcing a pile nobody has
+    touched yet. Kept out of `--check` because that verb is read-only.
+
     Not routed through `run`: that relays the child's text, and a line per round
     saying `quiet rounds=1` would sit in the listener's output right next to the
     `NO … quiet=1/3` line `--check` prints, which already says the same thing
@@ -241,8 +245,18 @@ def _rounds(args):
             tick(round_seconds=wait)
         # Rule-based digestion is free, so it runs on every quiet stretch; the
         # model-backed pass is left to whoever picks up the DOSSIER_DUE below.
-        run("dossier.py", "--digest")
+        # `--reap` only moves the cursor when a previous DUE went unanswered
+        # (issue #183). A probe is the gate's temporary listener and must not
+        # touch production state, so it gets the plain pass.
+        run("dossier.py", "--digest", *([] if args.probe else ["--reap"]))
         if run("dossier.py", "--check") == 0:
+            # Record the batch we are about to announce (issue #183). Without
+            # it the next round announces the same pile again -- the cursor did
+            # not move, so `--check` cannot tell "new work" from "work I already
+            # ignored". The record lives in `--tick due`; `--check` stays
+            # read-only so a gate or a human running it changes nothing.
+            if not args.probe:
+                tick("due")
             print("DOSSIER_DUE")
             restart_hint(args.timeout)
             return _finish("DOSSIER_DUE", 0)

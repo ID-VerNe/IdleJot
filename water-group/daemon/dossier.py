@@ -341,12 +341,16 @@ def recent_count(rows, cfg, now=None):
     return recent
 
 
-def due_state():
+def due_state(now=None):
     """(event_id, at) of the DUE we last announced; (0, None) when none.
 
     Same degradation rule as `quiet_state`: the file is shared with `--mark`
     and hand edits, so a string or a bool must read as "no DUE" instead of
-    making `--check` crash or hold forever.
+    making `--check` crash or hold forever. A timestamp in the *future* is
+    treated the same way: the clock jumped back or the file was edited by hand,
+    and honouring it would suppress every later DUE until the wall clock caught
+    up -- `--reap` could not release it either, because "stalled" would stay
+    clamped at zero.
     """
     data = load_mark()
     if not isinstance(data, dict):
@@ -358,6 +362,9 @@ def due_state():
         at = (float(at) if at is not None and not isinstance(at, bool) else None)
     except (TypeError, ValueError):
         at = None
+    moment = time.time() if now is None else float(now)
+    if at is None or at > moment:
+        return max(0, event_id), None
     return max(0, event_id), at
 
 

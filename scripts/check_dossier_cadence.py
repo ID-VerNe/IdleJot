@@ -36,17 +36,23 @@ issue #162 的现象：`dossier.py --check` 只有两条阈值（攒够 `burst_m
     用例 3 只钉「下限在拦」，没有一条断言默认组合能真的触发。修法是两头：
     `--tick --round-seconds` 把 `quiet_since` 回推到首轮**开始**（否则 N 轮只跨
     N-1 个间隔），默认下限取 4（< 4.5 留余量）。用例同时钉住两头。
-14. **积压不是爆发**（issue #183）：200 条全部落在 `burst_window_minutes` 之外
+14. 真实 `listen.py` 静默一轮 → `quiet_since` 回推到本轮开始（`--round-seconds`）。
+15. **积压不是爆发**（issue #183）：200 条全部落在 `burst_window_minutes` 之外
     + 3 轮静默 → `YES quiet`，不再被 `YES burst` 短路。这条是 issue 现象的直接
     回归：旧代码只要 pending ≥ 80 就恒报 `YES burst`，quiet 分支根本走不到。
-15. 窗口内的真爆发仍报 `YES burst`（原语义没有被 quiet 抢走）。
-16. **同一批素材只叫醒一次**：`--tick due` 之后 `--check` 输出 `NO due-hold` 且
+16. 窗口内的真爆发仍报 `YES burst`（原语义没有被 quiet 抢走）。
+17. **同一批素材只叫醒一次**：`--tick due` 之后 `--check` 输出 `NO due-hold` 且
     NOT_YET；新消息进来立刻重新 DUE。没有这条，游标不动时每轮都在叫同一批。
-17. **停滞兜底**：`--digest --reap` 在宽限内不动游标；超过 `reap_after_minutes`
+18. **停滞兜底**：`--digest --reap` 在宽限内不动游标；超过 `reap_after_minutes`
     才推进到本批末尾，之后 pending 归零、quiet 计数清零、`--check` 转 `NO`。
-18. `--mark` 清 due 状态：沉淀完成后下一批不该被上一批的 DUE 挡住。
-19. **接线真的接上了**：真实 `listen.py` 判 DUE 后写 `due_event_id`；`--probe`
+19. `--mark` 清 due 状态：沉淀完成后下一批不该被上一批的 DUE 挡住。
+20. **接线真的接上了**：真实 `listen.py` 判 DUE 后写 `due_event_id`；`--probe`
     不写（临时监听不许污染生产状态）。
+21. **reap 只吞已消化的前缀**：200 条积压、单批 150 条 → 推进到 150、剩 50 条
+    pending。直接推到 `due_event_id` 会跳过中间 50 条，用例 18 只有 6 条时
+    抓不住（复核发现）。
+22. `due_at` 在未来（时钟回拨 / 手改 mark）不许把 DUE 永久压住，也不许让
+    `--reap` 卡在 `stalled=0`（复核发现）。
 
 已知边界（这条门禁**不**声称能抓住的）：
 
@@ -790,6 +796,57 @@ def test_listen_records_due_batch(home):
     print("✓ 20. listen.py 判 DUE 后写 due_event_id；--probe 不写")
 
 
+def test_reap_only_covers_the_digested_prefix(home):
+    """`--reap` 只推进到本批规则消化过的末尾，不许跳过中间（issue #183）。
+
+    用例 18 只有 6 条素材，`batch_last == due_event_id`，把实现换成「直接推到
+    due_event_id」照样全绿——而 200 条积压时那条实现会跳过 50 条从未消化的消息，
+    正是 `--dump` oldest-first 想避免的漏读。这条用 200 条把两批分开。
+    """
+    write_config(home, {"quiet_minutes": 0, "reap_after_minutes": 15})
+    seed_store(home, messages=200, base_ts=(time.time() - 3600) * 1000)
+    for _ in range(3):
+        tick(home)
+    assert check(home).returncode == 0, check(home).stdout
+    assert run(home, DOSSIER, "--tick", "due").returncode == 0
+
+    state = mark(home)
+    state["due_at"] = time.time() - 20 * 60
+    write_mark(home, state)
+
+    done = run(home, DOSSIER, "--digest", "--reap")
+    assert done.returncode == 0, (done.returncode, done.stdout, done.stderr)
+    assert "reaped through event 150" in done.stdout, \
+        f"兜底水位越过了本批（150 条）该到的位置：{done.stdout}"
+    after = mark(home)
+    assert after.get("last_event_id") == 150, after
+    following = check(home)
+    assert "pending=50" in following.stdout, f"中间 50 条被跳过了：{following.stdout}"
+    print("✓ 21. 200 条积压 + 单批 150 → reaped through event 150，pending 剩 50")
+
+
+def test_future_due_does_not_hold_forever(home):
+    """`due_at` 在未来（时钟回拨 / 手改 mark）不许把 DUE 永久压住（issue #183）。
+
+    复核发现：`(now - at) / 60` 为负时恒小于 `reap_after_minutes`，`due_hold`
+    永远 True；`reap_stalled` 又把 stalled 夹成 0，连兜底都放不出来。于是
+    quiet 主路径被一条坏记录压死，且 `due_state` 的 docstring 明明承诺「坏值
+    降级成没有 DUE」。
+    """
+    write_config(home, {"quiet_minutes": 0, "reap_after_minutes": 15})
+    seed_store(home, messages=4, base_ts=time.time() * 1000)
+    for _ in range(3):
+        tick(home)
+    write_mark(home, {"quiet_rounds": 3, "quiet_since": time.time() - 600,
+                      "due_event_id": 4, "due_at": time.time() + 6 * 3600})
+
+    done = check(home)
+    assert done.returncode == 0, f"未来的 due_at 把 DUE 永久压住了：{done.stdout}"
+    assert done.stdout.startswith("YES quiet"), done.stdout
+    assert "due-hold" not in done.stdout, done.stdout
+    print("✓ 22. due_at 在未来 → 按「没有 DUE」处理，quiet 照常触发")
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -851,8 +908,14 @@ def main():
     with temp_dir(prefix="wg-cadence-") as home:
         write_config(home)
         test_listen_records_due_batch(home)
+    with temp_dir(prefix="wg-cadence-") as home:
+        write_config(home)
+        test_reap_only_covers_the_digested_prefix(home)
+    with temp_dir(prefix="wg-cadence-") as home:
+        write_config(home)
+        test_future_due_does_not_hold_forever(home)
     print("=" * 72)
-    print("✓ dossier 沉淀时机（连续 N 轮无人指名 + 积压归因 + 游标兜底）20 项门禁全部通过")
+    print("✓ dossier 沉淀时机（连续 N 轮无人指名 + 积压归因 + 游标兜底）22 项门禁全部通过")
     print("=" * 72)
 
 

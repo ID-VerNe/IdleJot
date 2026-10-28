@@ -5,10 +5,11 @@
 这类约束放在模型侧只能靠提示词自觉。所以判定全在这里，`plugins/repeater_plugin.py`
 只做插座（「文件不搬迁」，见 `plugins/base.py` 契约第 2 条）。
 
-**数据从哪来**：`collector` 用 `mention_only=True` 只投递 @ / 关键词
-（`collector.py:143`），普通群消息进不了 `wg_events.jsonl`。全量群事件只有
-`commands` 的 WS 循环持有（`commands.py:645` 的 `_serve`），宿主在那里派发
-`group_message` 事件——本模块不碰连接，只收一条事件。
+**数据从哪来**：`collector` 按 `trigger_mode` 取 `mention_only`（`collector.py:143`，
+#188）——mention_only 群只投递 @ / 关键词，普通群消息进不了 `wg_events.jsonl`；
+natural 群普通消息会进，但复读/接龙要的是**全量**群事件（含 mention_only 群的闲聊），
+所以仍不读它。全量群事件只有 `commands` 的 WS 循环持有（`commands.py:645` 的
+`_serve`），宿主在那里派发 `group_message` 事件——本模块不碰连接，只收一条事件。
 
 **两种模式，接龙优先**
 

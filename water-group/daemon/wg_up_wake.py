@@ -188,6 +188,36 @@ def wake_words():
     return [str(w) for w in words if w]
 
 
+def trigger_mode(group_id=None):
+    """本会话群的触发模式（issue #188）：`natural` / `mention_only`。
+
+    决定两件事：collector 向 ``wait_chat_messages`` 请求的 ``mention_only`` 值
+    （natural 给 False 让普通消息投递），与 ``wake_reason`` 对普通消息的放行
+    （natural 群普通消息也算唤醒）。两处合起来才打通——只改采集层会被读侧
+    ``wake_reason`` 再滤掉，只改读侧会被采集层先丢掉。
+
+    ``group_id`` 缺省取本会话的群（``wg_isolation.group_id()``）——一个会话只
+    管一个群（#164），collector / watch / reply 三处都不带群号调用。显式传则
+    读 ``config.groups.<gid>.trigger_mode``，回退 ``default_trigger_mode``，
+    再缺省 ``mention_only``：与 ``sync_groups`` / ``bootstrap`` 的派生口径一致，
+    拼错的配置值不会把门禁关掉。
+
+    每次现读、不缓存：config 是热文件，测试与热重载都靠替换
+    ``wg_up_wake.config`` 打桩，缓存会让两者失效。
+    """
+    if group_id is None:
+        # 延迟 import：wg_isolation import 本模块会成环（它只被读，但 import 图上
+        # 它在 wg_up_wake 之后），与 wake_words 现读 config 同一理由——不在模块级拉。
+        import wg_isolation  # noqa: PLC0415
+        group_id = wg_isolation.group_id()
+    cfg = config()
+    if group_id:
+        item = (cfg.get("groups") or {}).get(str(group_id))
+        if isinstance(item, dict) and item.get("trigger_mode"):
+            return str(item["trigger_mode"])
+    return str(cfg.get("default_trigger_mode") or "mention_only")
+
+
 def command_prefix():
     """`#` 指令前缀，读 config.json 的 slash_commands.prefix。
 
@@ -306,6 +336,12 @@ def wake_reason(event):
         word = _forward_word(detail.get("nodes"), budget, words)
         if word:
             return f"keyword:{word}"
+    # natural 群的普通消息也算唤醒——叫醒决策交给 Agent，不强制每条必回（#188）。
+    # 放在所有显式判定之后：@ / 关键词 / 合并转发仍返回它们的精确理由，watch 与
+    # --list 的 `[<reason>]` 标记据此区分「点名」与「普通闲聊」。mention_only 群
+    # 走到这里返回空串，维持「闲聊不唤醒」的既有门禁。
+    if trigger_mode() == "natural":
+        return "natural"
     return ""
 
 

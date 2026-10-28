@@ -22,11 +22,14 @@ import io
 import os
 import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TMP = Path(tempfile.mkdtemp(prefix="wg_encoding_"))
+import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
+from check_fixture_support import scratch_dir  # noqa: E402
+fs.bootstrap_paths(scripts=False, root=False)
+
+TMP = scratch_dir(prefix="wg_encoding_")
 
 # bootstrap 在 import 时就算出 LOGS_DIR，隔离目录必须先设好，否则探针会写进真日志。
 os.environ["WATER_GROUP_HOME"] = str(TMP)

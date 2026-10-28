@@ -10,13 +10,10 @@
 
     .venv/Scripts/python.exe scripts/check_sixty.py
 """
-import atexit
 import datetime
 import os
-import shutil
 import socket
 import sys
-import tempfile
 import time
 import urllib.parse
 from pathlib import Path
@@ -26,13 +23,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
+from check_fixture_support import network_guard, scratch_dir, temp_dir  # noqa: E402
 from fixture_server import FixtureHandler, fixture_server  # noqa: E402
-from check_fixture_support import network_guard  # noqa: E402
 
 # 记忆库与日志必须在 import commands/sixty **之前**钉到临时目录：wg_paths 与
 # memory_engine 的路径都是 import 期求值的，事后 patch 模块常量不管用。
-_SCRATCH = Path(tempfile.mkdtemp(prefix="tulpa-sixty-"))
-atexit.register(shutil.rmtree, _SCRATCH, True)
+_SCRATCH = scratch_dir(prefix="tulpa-sixty-")
 os.environ["WATER_GROUP_HOME"] = str(_SCRATCH / "home")
 os.environ["IDLEJOT_WG_MEMORY_DB"] = str(_SCRATCH / "mem.sqlite3")
 (_SCRATCH / "home").mkdir(parents=True, exist_ok=True)
@@ -762,8 +758,7 @@ def main():
     Fake60s.hits.clear()
     Fake60s.mode.clear()
     sixty._CACHE.clear()
-    with tempfile.TemporaryDirectory() as tmp_name:
-        tmp = Path(tmp_name)
+    with temp_dir() as tmp:
         real_cmd_log = commands.LOG
         real_sixty_log = sixty.LOG
         commands.LOG = tmp / "wg_commands.log"

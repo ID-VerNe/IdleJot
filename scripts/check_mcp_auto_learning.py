@@ -13,7 +13,6 @@ from pathlib import Path
 import socket
 import sqlite3
 import sys
-import tempfile
 import threading
 import time
 from unittest.mock import patch
@@ -24,7 +23,7 @@ from PIL import Image
 
 sys.path.insert(0,str(Path(__file__).parent))
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from check_fixture_support import isolated_env, network_guard
+from check_fixture_support import isolated_env, network_guard, temp_dir
 from fixture_server import fixture_server
 from check_mcp_reactions import ReactionBot,Events,ROOT
 from check_mcp_chat_enrichment import DetailBot, text
@@ -260,8 +259,8 @@ async def receipt_guards(service):
 
 def migration():
     clock=Clock();scope='qq:111:group:222'
-    with tempfile.TemporaryDirectory() as tmp:
-        path=Path(tmp)/'mcp-language.sqlite3';store=LanguageStore(path,clock=clock)
+    with temp_dir() as tmp:
+        path=tmp/'mcp-language.sqlite3';store=LanguageStore(path,clock=clock)
         b=dict(scope=scope,gid='old-a',sid='old-session',epoch='old-process')
         store.attach(b)
         with store.db() as db:
@@ -325,8 +324,8 @@ def main():
     with fixture_server(LearningBot, ports=allowed_ports) as upstream:
         restrict,_=network_guard(allowed_ports)
         try:
-            with tempfile.TemporaryDirectory() as tmp,patch.dict('os.environ',isolated_env(),clear=True),patch('socket.create_connection',restrict):
-                root=Path(tmp);data=Store(root/'chats.sqlite3')
+            with temp_dir() as tmp,patch.dict('os.environ',isolated_env(),clear=True),patch('socket.create_connection',restrict):
+                root=tmp;data=Store(root/'chats.sqlite3')
                 (root/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{upstream.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n','utf-8')
                 with patch('chatlocal.onebot.ROOT',root),patch('chatlocal.message_sender.ROOT',root):
                     app=FastAPI();service=install_mcp_routes(app,data);tools=service.tools;access=service.access;chat=tools.chat

@@ -44,23 +44,23 @@
 形状变化不影响它们，因此不在这里重复钉。生产者形状只钉「dict / None 二选一」，
 不钉 dict 里有哪些键——第 2 组的夹具覆盖了缺字段与空字典。
 """
-import atexit
 import contextlib
 import io
 import os
 import re
-import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 # 数据根在 import 前隔离：up / wg_up_wake 都在模块级求 state_dir()。
-HOME = Path(tempfile.mkdtemp(prefix="tulpa-napcat-line-gate-"))
-atexit.register(shutil.rmtree, HOME, True)
+import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
+from check_fixture_support import scratch_dir  # noqa: E402
+HOME = scratch_dir(prefix="tulpa-napcat-line-gate-")
 os.environ["WATER_GROUP_HOME"] = str(HOME)
 os.environ["IDLEJOT_WG_STATE"] = str(HOME / "state")
+
+fs.bootstrap_paths(scripts=False, root=False)
 
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 

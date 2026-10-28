@@ -26,7 +26,6 @@ import importlib.util
 import json
 import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,7 +34,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_fixture_support import isolated_env
+from check_fixture_support import isolated_env, temp_dir
 
 WATCHDOG = ROOT / "water-group" / "daemon" / "watchdog.py"
 ACCOUNT = "10001"
@@ -152,8 +151,8 @@ def main():
             print(f"✗ {label}：期望 {want!r}，实际 {got!r}")
             failures.append(label)
 
-    with tempfile.TemporaryDirectory(prefix="watchdog-identity-") as tmp:
-        home = Path(tmp) / "home"
+    with temp_dir(prefix="watchdog-identity-") as tmp:
+        home = tmp / "home"
         launch_file = home / "state" / "napcat_launch.json"
         with patch.dict("os.environ", isolated_env(home), clear=True):
             from water_group import bootstrap

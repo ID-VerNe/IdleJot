@@ -8,14 +8,13 @@ from pathlib import Path
 import socket
 import ssl
 import sys
-import tempfile
 import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from check_fixture_support import isolated_env
+from check_fixture_support import isolated_env, temp_dir
 from fixture_server import fixture_server
 from check_mcp_chat_enrichment import DetailBot, Events, eventually, ROOT
 from check_mcp_chat_media import fixture_image, dns_response
@@ -98,8 +97,8 @@ def main():
     raw=fixture_image();animated=fixture_image(True)
     with fixture_server(DetailBot) as upstream:
         try:
-            with tempfile.TemporaryDirectory(dir=ROOT/'.tmp',prefix='image-reuse-') as tmp,patch.dict('os.environ',isolated_env(),clear=True):
-                root=Path(tmp);data=root/'data';data.mkdir()
+            with temp_dir(dir=ROOT/'.tmp',prefix='image-reuse-') as tmp,patch.dict('os.environ',isolated_env(),clear=True):
+                root=tmp;data=root/'data';data.mkdir()
                 (root/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{upstream.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n')
                 with patch('chatlocal.onebot.ROOT',root),patch('chatlocal.message_sender.ROOT',root), \
                      patch('chatlocal.media.DATA',data),patch('chatlocal.media.ROOT',root), \

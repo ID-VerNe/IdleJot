@@ -54,14 +54,13 @@ import os
 import re
 import sqlite3
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-from check_fixture_support import temp_dir  # noqa: E402
+from check_fixture_support import scratch_dir, temp_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False)
 
 # issue #145：本门禁有两处 `reply.list_wakes()`，而它现在会顺手复查发送失败账本
@@ -70,8 +69,8 @@ fs.bootstrap_paths(scripts=False)
 # （`rechecked_at` / `recheck_result`），还会吃掉 60 秒复查窗口，让真正的
 # `reply.py --list` 跳过复查。`state_dir()` 的优先级是 IDLEJOT 先于 TULPA，
 # 只靠 `check_fixture_support` 的 `WATER_GROUP_HOME` 钉不住它。
-os.environ["IDLEJOT_WG_STATE"] = str(
-    Path(tempfile.mkdtemp(prefix="wg_gap_state_")) / "state")
+_GAP_STATE = scratch_dir(prefix="wg_gap_state_")
+os.environ["IDLEJOT_WG_STATE"] = str(_GAP_STATE / "state")
 
 import up  # noqa: E402
 import wg_clock  # noqa: E402

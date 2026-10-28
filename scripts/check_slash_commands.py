@@ -13,10 +13,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import commands  # noqa: E402
 import up  # noqa: E402  (唤醒侧的 `#` 闸门，issue #70)
 import wg_up_wake  # noqa: E402  (issue #37 PC: config 的真实调用点；up.config 只是门面引用)
+from check_fixture_support import temp_dir  # noqa: E402
 
 # 守护的 log() 写死运维日志；检查进程不该往里混行，整体改道临时目录。
 commands.LOG = Path(tempfile.gettempdir()) / "wg_commands_check.log"
@@ -227,8 +229,8 @@ check("serve: enabled=false 直接退出不联网", code == 0)
 
 # ---- 单实例锁：两个守护同时在线会把每条 # 指令回两遍 ---------------------------
 real_lock = commands.LOCK
-with tempfile.TemporaryDirectory() as tmp:
-    commands.LOCK = Path(tmp) / "wg_commands.lock"
+with temp_dir() as tmp:
+    commands.LOCK = tmp / "wg_commands.lock"
     try:
         check("lock: 首个实例拿到锁", commands.acquire_lock())
         check("lock: 持锁进程还活着，第二个实例被拒", not commands.acquire_lock())

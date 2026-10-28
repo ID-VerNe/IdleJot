@@ -15,19 +15,19 @@ import json
 import os
 import sqlite3
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TMP = tempfile.mkdtemp(prefix="wg_ctx_")
-DB = Path(TMP) / "fixture.sqlite3"
+import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
+from check_fixture_support import scratch_dir  # noqa: E402
+fs.bootstrap_paths(scripts=False, root=False)
+
+TMP = scratch_dir(prefix="wg_ctx_")
+DB = TMP / "fixture.sqlite3"
 SID = "session-fixture"
 
 os.environ["TULPA_WG_DB"] = str(DB)
-os.environ["TULPA_WG_STATE"] = TMP  # 空的，up.events() 读不到唤醒文件
-
-import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
-fs.bootstrap_paths(scripts=False, root=False)
+os.environ["TULPA_WG_STATE"] = str(TMP)  # 空的，up.events() 读不到唤醒文件
 
 import reply  # noqa: E402
 

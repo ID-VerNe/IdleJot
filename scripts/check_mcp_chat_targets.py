@@ -10,13 +10,12 @@ import json
 from pathlib import Path
 import socket
 import sys
-import tempfile
 import threading
 import time
 from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from check_fixture_support import isolated_env
+from check_fixture_support import isolated_env, temp_dir
 from fixture_server import fixture_server
 from check_mcp_chat import Events, OneBot, eventually, ROOT
 import httpx
@@ -93,8 +92,8 @@ def main():
     events=Events()
     with fixture_server(TargetBot) as upstream:
         try:
-            with tempfile.TemporaryDirectory(prefix='tulpa-chat-targets-') as tmp,patch.dict('os.environ',isolated_env(),clear=True):
-                folder=Path(tmp);store=Store(folder/'chats.sqlite3')
+            with temp_dir(prefix='tulpa-chat-targets-') as tmp,patch.dict('os.environ',isolated_env(),clear=True):
+                folder=tmp;store=Store(folder/'chats.sqlite3')
                 (folder/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{upstream.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n','utf-8')
                 with patch('chatlocal.onebot.ROOT',folder),patch('chatlocal.message_sender.ROOT',folder):
                     app=FastAPI();service=install_mcp_routes(app,store);access=service.access;tools=service.tools

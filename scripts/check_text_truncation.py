@@ -25,17 +25,14 @@ issue #32 把同一契约推到 Agent 实际读消息的 daemon 路径（唤醒�
 
     .venv/Scripts/python.exe scripts/check_text_truncation.py
 """
-import atexit
 import ast
 import contextlib
 import io
 import json
 import os
 import re
-import shutil
 import sqlite3
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -44,17 +41,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
+from check_fixture_support import scratch_dir, temp_dir  # noqa: E402
+
 # Pin the data root before anything resolves it. memory_engine's WG_HOME and
 # DEFAULT_DB_PATH are evaluated at import time, and `get_memory_engine()` seeds
 # on first use -- a later patch would be too late and this gate would write
 # fixture profiles into the live library (the #79/#89 class of bug).
-_SCRATCH = Path(tempfile.mkdtemp(prefix="tulpa-trunc-"))
-atexit.register(shutil.rmtree, _SCRATCH, True)
+_SCRATCH = scratch_dir(prefix="tulpa-trunc-")
 (_SCRATCH / "home").mkdir(parents=True, exist_ok=True)
 os.environ["WATER_GROUP_HOME"] = str(_SCRATCH / "home")
 os.environ["IDLEJOT_WG_MEMORY_DB"] = str(_SCRATCH / "mem.sqlite3")
 
-from check_fixture_support import temp_dir  # noqa: E402
 from chatlocal import agent_tools  # noqa: E402
 from chatlocal.text_limits import (  # noqa: E402
     EVENT_TEXT_CHARS,

@@ -15,16 +15,15 @@ The suite checks three layers:
      and the singleton is shared.
 """
 import ast
-import atexit
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+from check_fixture_support import scratch_dir  # noqa: E402
 
 # 子进程探针会 import water_group.memory_engine，而 WG_HOME / DEFAULT_DB_PATH 都是
 # import 期求值的（memory_store.py 的 WG_HOME / DEFAULT_DB_PATH，issue #11 PA 搬家），
@@ -32,14 +31,13 @@ sys.path.insert(0, str(ROOT))
 # get_memory_engine() 首次加载还会自动 seed_from_persona()（facade 末尾的单例），
 # 于是每跑一次本门禁就往实机库写两行种子档案。钉到临时目录后，探针仍然验证同一件事
 # （模块同一性 / 单例唯一），只是不再碰真实数据。见 issue #79。
-_SCRATCH = Path(tempfile.mkdtemp(prefix="tulpa-wg-import-"))
+_SCRATCH = scratch_dir(prefix="tulpa-wg-import-")
 (_SCRATCH / "home").mkdir(parents=True, exist_ok=True)
 PROBE_ENV = {
     **os.environ,
     "WATER_GROUP_HOME": str(_SCRATCH / "home"),
     "IDLEJOT_WG_MEMORY_DB": str(_SCRATCH / "mem.sqlite3"),
 }
-atexit.register(shutil.rmtree, _SCRATCH, True)
 
 # Files whose only job is to import through the bridge; a top-level import here
 # would be the bug this suite exists to catch.

@@ -21,15 +21,15 @@ import json
 import os
 import sqlite3
 import sys
-import tempfile
 from pathlib import Path
 
 import check_fixture_support as fs  # noqa: E402  (先钉数据根，见 issue #79/#89)
+from check_fixture_support import scratch_dir  # noqa: E402
 ROOT = fs.bootstrap_paths()
 
 # 记忆库必须在 import 任何 daemon 模块之前钉走：memory_store 的路径是 import
 # 期求值的（与 check_sixty 同一理由）。
-_SCRATCH = Path(tempfile.mkdtemp(prefix="wg_alias_"))
+_SCRATCH = scratch_dir(prefix="wg_alias_")
 os.environ["WATER_GROUP_HOME"] = str(_SCRATCH / "home")
 os.environ["IDLEJOT_WG_MEMORY_DB"] = str(_SCRATCH / "mem.sqlite3")
 (_SCRATCH / "home").mkdir(parents=True, exist_ok=True)

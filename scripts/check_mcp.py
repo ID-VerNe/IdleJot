@@ -5,7 +5,6 @@ import json
 import logging
 import socket
 import sys
-import tempfile
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -23,6 +22,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from chatlocal.store import Store
 from chatlocal.mcp_access import MCPAccess
+from check_fixture_support import temp_dir  # noqa: E402
 from chatlocal.mcp_routes import install_mcp_routes
 from chatlocal.agent_tools import ChatTools
 from chatlocal.artifacts import Artifacts
@@ -205,8 +205,8 @@ async def optional_tools(url, service, store, folder):
 
 
 def main():
-    with tempfile.TemporaryDirectory(dir=ROOT/'.tmp',prefix='mcp-check-') as tmp:
-        folder=Path(tmp);store=Store(folder/'chats.sqlite3')
+    with temp_dir(dir=ROOT/'.tmp',prefix='mcp-check-') as tmp:
+        folder=tmp;store=Store(folder/'chats.sqlite3')
         raw=folder/'任务书.txt';raw.write_text('课程设计：交付源码和报告。截止10月15日。','utf-8')
         rows=[dict(platform='qq',conversation_id='course',conversation='课程群',conversation_type='group',sender='老师',sender_id='teacher',source_id=str(i),timestamp='2026-10-01 10:00:00',content=f'课程设计讨论 {i}',is_self=False) for i in range(520)]
         rows[0]['content']='课程设计'+('说明'*3000)

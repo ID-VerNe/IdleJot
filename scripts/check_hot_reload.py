@@ -11,18 +11,15 @@ new-before-old, watchdog deferred) do not need a real process.
 from __future__ import annotations
 
 import ast
-import atexit
 import json
 import os
-import shutil
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TMP = Path(tempfile.mkdtemp(prefix="wg_hot_reload_"))
-atexit.register(shutil.rmtree, TMP, True)
+from check_fixture_support import scratch_dir  # noqa: E402
+TMP = scratch_dir(prefix="wg_hot_reload_")
 os.environ["WATER_GROUP_HOME"] = str(TMP)
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 

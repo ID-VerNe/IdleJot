@@ -1,18 +1,19 @@
 """Peer-language evidence vs bot-policy regressions. Entirely synthetic."""
 from copy import deepcopy
 from pathlib import Path
-import json,sqlite3,sys,tempfile
+import json,sqlite3,sys
 sys.path.insert(0,str(Path(__file__).parent))
 from check_mcp_language_learning import ROOT,Clock,review_fixture,ground_fixture_rows
 from chatlocal.mcp_language_store import LanguageStore,LearningError
 from chatlocal.mcp_expression_evidence import VERSION,check_expression
+from check_fixture_support import temp_dir  # noqa: E402
 
 
 def main():
     assert Path(__import__('chatlocal.mcp_expression_evidence',fromlist=['VERSION']).__file__).resolve()==ROOT/'chatlocal/mcp_expression_evidence.py'
     clock=Clock();b=dict(scope='qq:111:group:222',gid='grant-a',sid='session-a',epoch='epoch-a')
-    with tempfile.TemporaryDirectory() as tmp:
-        path=Path(tmp)/'language.sqlite3';s=LanguageStore(path,clock=clock);s.attach(b)
+    with temp_dir() as tmp:
+        path=tmp/'language.sqlite3';s=LanguageStore(path,clock=clock);s.attach(b)
         samples=['不然你来？','又聊起来了','好好好，又开始了','一张接一张地画','🧐🧐🧐','/合成指令 随机参数']+['合成材料']*4
         for i,line in enumerate(samples):s.observe(b,dict(source_id=str(i),text=line,peer=True,at=clock()))
         clock.advance(30);t=s.claim(b,'fixture-context');messages=t['material']['messages']

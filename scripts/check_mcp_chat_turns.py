@@ -12,7 +12,6 @@ import json
 from pathlib import Path
 import socket
 import sys
-import tempfile
 import threading
 import time
 from unittest.mock import patch

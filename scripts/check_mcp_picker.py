@@ -2,17 +2,18 @@
 import sys
 from pathlib import Path
 sys.path[:0]=[str(Path(__file__).resolve().parent),str(Path(__file__).resolve().parents[1])]
-import json,tempfile
+import json
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from chatlocal.store import Store
 from chatlocal.mcp_routes import install_mcp_routes
+from check_fixture_support import temp_dir  # noqa: E402
 
 def main():
     ROOT=Path(__file__).resolve().parents[1]
     (ROOT/'.tmp').mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=ROOT/'.tmp',prefix='mcp-picker-') as tmp:
-        root=Path(tmp);store=Store(root/'chats.sqlite3')
+    with temp_dir(dir=ROOT/'.tmp',prefix='mcp-picker-') as tmp:
+        root=tmp;store=Store(root/'chats.sqlite3')
         rows=[dict(platform=p,conversation_id=f'{p}-{i}',conversation=f'合成群{i:03}',
                    conversation_type='group',sender_id='fixture',sender='合成成员',
                    timestamp='2026-10-01 10:00:00',content='合成消息',source_id=f'{p}-{i}',is_self=False)

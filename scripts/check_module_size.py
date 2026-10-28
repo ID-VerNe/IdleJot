@@ -24,10 +24,11 @@ means issue #11's split work is done.
 import argparse
 import ast
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+from check_fixture_support import temp_dir  # noqa: E402
 
 SCAN_DIRS = ('chatlocal', 'water-group', 'water_group', 'scripts')
 MAX_FILE_LINES = 1000
@@ -167,8 +168,7 @@ def self_test():
 def _self_test_body():
     global EXEMPTIONS
     failures = []
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
+    with temp_dir() as root:
         (root / 'chatlocal').mkdir()
         big = root / 'chatlocal' / 'big_file.py'
         _make_file(big, MAX_FILE_LINES + 1)

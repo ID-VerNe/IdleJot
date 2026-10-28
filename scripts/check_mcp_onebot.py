@@ -12,14 +12,13 @@ import asyncio
 import json
 import socket
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT=Path(sys.argv[sys.argv.index('--package')+1]).resolve() if '--package' in sys.argv else Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from check_fixture_support import isolated_env
+from check_fixture_support import isolated_env, temp_dir
 from fixture_server import FixtureHandler,fixture_server
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -69,8 +68,8 @@ def write_onebot_env(folder,url,token):
 
 def main():
     try:
-        with fixture_server(Fixture) as server,tempfile.TemporaryDirectory(dir=ROOT/'.tmp',prefix='mcp-onebot-') as tmp,patch.dict('os.environ',isolated_env(),clear=True):
-            folder=Path(tmp);(folder/'.tmp').mkdir();store=Store(folder/'chats.sqlite3')
+        with fixture_server(Fixture) as server,temp_dir(dir=ROOT/'.tmp',prefix='mcp-onebot-') as tmp,patch.dict('os.environ',isolated_env(),clear=True):
+            folder=tmp;(folder/'.tmp').mkdir();store=Store(folder/'chats.sqlite3')
             imported=folder/'fixture.json';imported.write_text(json.dumps([dict(platform='qq',conversation_id='111:group:222',conversation='Fixture group',conversation_type='group',sender='Fixture',source_id='1',content='测试资料',timestamp='2026-10-01')]),'utf-8');store.import_file(imported)
             app=FastAPI();service=install_mcp_routes(app,store)
             headers={'X-ChatWeave-UI':'1'}

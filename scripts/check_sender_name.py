@@ -24,20 +24,18 @@ the bubble:
 import ast
 import json
 import os
-import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
+from check_fixture_support import scratch_dir  # noqa: E402
+
 # Pin the data root before anything resolves it (same class of bug as #79/#89:
 # a fixture profile must never reach the live library).
-_SCRATCH = Path(tempfile.mkdtemp(prefix="tulpa-sender-"))
-import atexit
-atexit.register(lambda: shutil.rmtree(_SCRATCH, True))
+_SCRATCH = scratch_dir(prefix="tulpa-sender-")
 (_SCRATCH / "home").mkdir(parents=True, exist_ok=True)
 os.environ["WATER_GROUP_HOME"] = str(_SCRATCH / "home")
 os.environ["IDLEJOT_WG_MEMORY_DB"] = str(_SCRATCH / "mem.sqlite3")

@@ -7,7 +7,6 @@ import shutil
 import socket
 import ssl
 import sys
-import tempfile
 import threading
 import time
 from unittest.mock import patch
@@ -19,7 +18,7 @@ from websockets.exceptions import ConnectionClosed
 ssl.create_default_context()
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from check_fixture_support import isolated_env
+from check_fixture_support import isolated_env, temp_dir
 from fixture_server import FixtureHandler,fixture_server
 ROOT=Path(sys.argv[sys.argv.index('--package')+1]).resolve() if '--package' in sys.argv else Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
@@ -171,8 +170,8 @@ def main():
     (ROOT/'.tmp').mkdir(exist_ok=True)
     events=Events()
     try:
-        with fixture_server(OneBot) as upstream,tempfile.TemporaryDirectory(dir=ROOT/'.tmp',prefix='mcp-chat-') as tmp,patch.dict('os.environ',isolated_env(tmp),clear=True):
-            folder=Path(tmp);store=Store(folder/'chats.sqlite3');serial=0
+        with fixture_server(OneBot) as upstream,temp_dir(dir=ROOT/'.tmp',prefix='mcp-chat-') as tmp,patch.dict('os.environ',isolated_env(tmp),clear=True):
+            folder=tmp;store=Store(folder/'chats.sqlite3');serial=0
             persona_dir=folder/'personas';persona_dir.mkdir()
             for name in ('little_whale.md','little_whale.source.json','behavior.md'):
                 shutil.copy2(prompts.ROOT/name,persona_dir/name)

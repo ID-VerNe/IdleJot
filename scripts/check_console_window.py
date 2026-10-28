@@ -33,7 +33,6 @@ import ctypes
 import json
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -44,6 +43,8 @@ else:  # --help must still work; main() refuses to run off Windows
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'water-group' / 'daemon'))
+
+from check_fixture_support import temp_dir  # noqa: E402
 
 EVENT_OBJECT_SHOW = 0x8002
 WINEVENT_OUTOFCONTEXT = 0x0000
@@ -248,7 +249,7 @@ def self_test():
 
     print('自测会故意闪 2 次黑框（visible / detached-cmd 两组对照），这是对照组，不是 bug。', flush=True)
     results = {}
-    with tempfile.TemporaryDirectory(prefix='console-window-') as tmp:
+    with temp_dir(prefix='console-window-') as tmp:
         for mode in PROBE_MODES:
             out_path = Path(tmp) / f'{mode}.json'
             child = subprocess.Popen([str(pythonw), str(Path(__file__).resolve()),

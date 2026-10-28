@@ -4,11 +4,11 @@ import copy
 import json
 from pathlib import Path
 import sys
-import tempfile
 
 sys.path.insert(0,str(Path(__file__).parent))
 from check_mcp_language_learning import Clock,ROOT,jargon_fixture,meaning_fixture,expression_fixture,review_fixture
 from chatlocal.mcp_language_store import LanguageStore,LearningError
+from check_fixture_support import temp_dir  # noqa: E402
 
 
 def rejected(code,fn):
@@ -20,8 +20,8 @@ def rejected(code,fn):
 def main():
     assert Path(__import__('chatlocal.mcp_jargon_learning',fromlist=['x']).__file__).resolve()==ROOT/'chatlocal/mcp_jargon_learning.py'
     clock=Clock();b=dict(scope='qq:111:group:222',gid='grant-a',sid='session-a',epoch='epoch-a')
-    with tempfile.TemporaryDirectory(prefix='tulpa-jargon-pipeline-') as tmp:
-        store=LanguageStore(Path(tmp)/'learning.sqlite3',clock=clock,policy=dict(hourly_calls=100))
+    with temp_dir(prefix='tulpa-jargon-pipeline-') as tmp:
+        store=LanguageStore(tmp/'learning.sqlite3',clock=clock,policy=dict(hourly_calls=100))
         store.attach(b);serial=0;phases=[]
         def feed(tag):
             clock.advance(31)

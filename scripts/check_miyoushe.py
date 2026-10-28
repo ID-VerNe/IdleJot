@@ -10,7 +10,6 @@ import hashlib
 import json
 import re
 import sys
-import tempfile
 import time
 import urllib.parse
 from pathlib import Path
@@ -21,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
 from fixture_server import FixtureHandler, fixture_server  # noqa: E402
-from check_fixture_support import network_guard  # noqa: E402
+from check_fixture_support import network_guard, temp_dir  # noqa: E402
 
 import miyoushe  # noqa: E402
 import commands  # noqa: E402
@@ -507,25 +506,24 @@ def main():
         # commands.LOG 同理：_note_risk 会打「risk cooldown」——写进真的守护日志，
         # 以后排查风控时会看到一堆根本没发生过的命中（与 check_qr_login 同一手法）
         real_cmd_log = commands.LOG
-        tmpdir = tempfile.TemporaryDirectory()
-        miyoushe.DEVICE_FILE = Path(tmpdir.name) / "device.json"
-        commands.LOG = Path(tmpdir.name) / "wg_commands.log"
-        restrict, _ = network_guard({server.server_port})
-        try:
-            with patch("socket.create_connection", restrict):
-                for fn in (test_ds_and_headers, test_character_post_body, test_news,
-                           test_search_encoding, test_live_codes, test_gacha,
-                           test_exploration_and_abyss, test_daily_note_fp, test_ledger_month,
-                           test_zzz_and_gcg, test_weapons, test_cache, test_retcode_map,
-                           test_cn_only_and_missing_ck, test_clip, test_handlers_registry,
-                           test_commands_wiring, test_device_fp_body, test_device_register,
-                           test_risk_cooldown, test_commands_risk_guard):
-                    fn()
-        finally:
-            miyoushe.HOSTS = real
-            miyoushe.DEVICE_FILE = real_device_file
-            commands.LOG = real_cmd_log
-            tmpdir.cleanup()
+        with temp_dir() as tmpdir:
+            miyoushe.DEVICE_FILE = tmpdir / "device.json"
+            commands.LOG = tmpdir / "wg_commands.log"
+            restrict, _ = network_guard({server.server_port})
+            try:
+                with patch("socket.create_connection", restrict):
+                    for fn in (test_ds_and_headers, test_character_post_body, test_news,
+                               test_search_encoding, test_live_codes, test_gacha,
+                               test_exploration_and_abyss, test_daily_note_fp, test_ledger_month,
+                               test_zzz_and_gcg, test_weapons, test_cache, test_retcode_map,
+                               test_cn_only_and_missing_ck, test_clip, test_handlers_registry,
+                               test_commands_wiring, test_device_fp_body, test_device_register,
+                               test_risk_cooldown, test_commands_risk_guard):
+                        fn()
+            finally:
+                miyoushe.HOSTS = real
+                miyoushe.DEVICE_FILE = real_device_file
+                commands.LOG = real_cmd_log
     print()
     if FAILED:
         print(f"{len(FAILED)} 项失败: {', '.join(FAILED)}")

@@ -4,17 +4,17 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
 from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts'))
 import diagnose_qq_accounts as d
+from check_fixture_support import temp_dir  # noqa: E402
 
 
 def main():
-    with tempfile.TemporaryDirectory(prefix='qq-account-diagnostic-') as tmp:
-        folder=Path(tmp);install=folder/'private-install';install.mkdir()
+    with temp_dir(prefix='qq-account-diagnostic-') as folder:
+        install=folder/'private-install';install.mkdir()
         data=folder/'private-dataset';data.mkdir()
         known=data/'12345678912'/'nt_qq/nt_db/nt_msg.db'
         changed=data/'nt_qq_private-owner'/'nt_db/nt_msg.db'

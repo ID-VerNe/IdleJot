@@ -4,19 +4,19 @@ import hashlib
 import os
 from pathlib import Path
 import sys
-import tempfile
 from unittest.mock import patch
 
 ROOT=Path(sys.argv[sys.argv.index('--package')+1]).resolve() if '--package' in sys.argv else Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from chatlocal import mcp_chat_prompts as p
+from check_fixture_support import temp_dir  # noqa: E402
 
 
 def hot_personas():
-    with tempfile.TemporaryDirectory(prefix='tulpa-personas-') as tmp, \
-            patch.object(p, 'ROOT', Path(tmp)), \
-            patch.object(p, 'private_root', lambda: Path(tmp) / 'private'):
-        root = Path(tmp)
+    with temp_dir(prefix='tulpa-personas-') as tmp, \
+            patch.object(p, 'ROOT', tmp), \
+            patch.object(p, 'private_root', lambda: tmp / 'private'):
+        root = tmp
         (root/'behavior.md').write_text('# Not a persona', 'utf-8')
         (root/'README.md').write_text('# Instructions', 'utf-8')
         (root/'.draft.md').write_text('# Hidden draft', 'utf-8')

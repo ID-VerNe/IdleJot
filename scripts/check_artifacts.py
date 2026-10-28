@@ -2,7 +2,6 @@
 import hashlib
 import json
 import sys
-import tempfile
 from pathlib import Path
 ROOT=Path(__file__).resolve().parent.parent
 sys.path.insert(0,str(ROOT))
@@ -13,12 +12,13 @@ from chatlocal.agent_tools import ChatTools
 from chatlocal.llm import validate_answer
 from chatlocal.artifact_onebot import OneBot
 from chatlocal.artifact_metadata import wechat_file
+from check_fixture_support import temp_dir  # noqa: E402
 
 
 def main():
     (ROOT/'.tmp').mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=ROOT/'.tmp',prefix='artifact-check-') as tmp:
-        root=Path(tmp);s=Store(root/'test.sqlite3');a=Artifacts(s)
+    with temp_dir(prefix='artifact-check-',dir=ROOT/'.tmp') as tmp:
+        root=tmp;s=Store(root/'test.sqlite3');a=Artifacts(s)
         body='课程任务书\n截止时间是10月15日。\n端云协同需要本地Router选择推理节点。\n'
         raw=(root/'任务书.txt');raw.write_text(body,'utf-8')
         a._roots=lambda p:[root]

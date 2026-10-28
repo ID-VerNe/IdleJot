@@ -2,13 +2,14 @@
 import json
 from pathlib import Path
 import sys
-import tempfile
 from concurrent.futures import ThreadPoolExecutor
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
 if '--package' in sys.argv:ROOT=Path(sys.argv[sys.argv.index('--package')+1]).resolve()
 sys.path.insert(0, str(ROOT))
+
+from check_fixture_support import temp_dir  # noqa: E402
 
 
 class Clock:
@@ -57,8 +58,8 @@ def main():
     from chatlocal.mcp_language_store import LanguageStore, LearningError
     assert Path(__import__('chatlocal.mcp_language_store',fromlist=['LanguageStore']).__file__).resolve()==ROOT/'chatlocal/mcp_language_store.py'
     clock = Clock()
-    with tempfile.TemporaryDirectory(prefix='tulpa-language-') as tmp:
-        store = LanguageStore(Path(tmp)/'learning.sqlite3', clock=clock,policy=dict(hourly_calls=100))
+    with temp_dir(prefix='tulpa-language-') as tmp:
+        store = LanguageStore(tmp/'learning.sqlite3', clock=clock,policy=dict(hourly_calls=100))
         scope = 'qq:111:group:222'
         binding = dict(scope=scope, gid='grant-a', sid='session-a', epoch='connection-a')
         store.configure(binding, enabled=True, allow_degraded=True)

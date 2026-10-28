@@ -17,20 +17,18 @@ issue #37 把 `up.py` 从一个 1063 行的杂物间拆成「三个模块 + 门�
     .venv/Scripts/python.exe scripts/check_up_facade.py
 """
 import ast
-import atexit
 import os
-import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DAEMON = ROOT / "water-group" / "daemon"
 sys.path.insert(0, str(DAEMON))
 
+from check_fixture_support import scratch_dir  # noqa: E402
+
 # 数据根在 import 前隔离：up/wg_up_wake 都在模块级求 state_dir()。
-HOME = Path(tempfile.mkdtemp(prefix="tulpa-facade-gate-"))
-atexit.register(shutil.rmtree, HOME, True)
+HOME = scratch_dir(prefix="tulpa-facade-gate-")
 os.environ["WATER_GROUP_HOME"] = str(HOME)
 
 import up  # noqa: E402

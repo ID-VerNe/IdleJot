@@ -31,12 +31,12 @@ import json
 import os
 import socket
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
+from check_fixture_support import scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False)
 
 # 数据根 / 配置 / 库全部钉进临时目录，import 任何 daemon 模块之前完成：
@@ -45,7 +45,7 @@ fs.bootstrap_paths(scripts=False)
 # `IDLEJOT_WG_STATE or TULPA_WG_STATE`，只钉后者会被外部环境穿透——那正是
 # 「测试写生产状态」的口子（#145 的账本复查上线后，穿透就意味着向实机 OneBot
 # 发查询、把结论写进实机账本）。
-_SCRATCH = Path(tempfile.mkdtemp(prefix="wg_send_failure_"))
+_SCRATCH = scratch_dir(prefix="wg_send_failure_")
 os.environ["WATER_GROUP_HOME"] = str(_SCRATCH / "home")
 os.environ["TULPA_WG_STATE"] = str(_SCRATCH / "state")
 os.environ["IDLEJOT_WG_STATE"] = str(_SCRATCH / "state")

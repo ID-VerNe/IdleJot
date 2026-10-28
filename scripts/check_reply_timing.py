@@ -3,11 +3,11 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import sys
-import tempfile
 from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from chatlocal import reply_timing as timing
+from check_fixture_support import temp_dir  # noqa: E402
 
 
 def main():
@@ -26,8 +26,8 @@ def main():
             raise ValueError(secret)
         return dict(state='SUCCEEDED', text=secret, url=secret)
 
-    with tempfile.TemporaryDirectory() as temp:
-        path=Path(temp)/'timing.jsonl'
+    with temp_dir() as temp:
+        path=temp/'timing.jsonl'
         with patch.object(timing,'PATH',path):
             def run(i):
                 return call('send_chat_reply',dict(plan_id=str(i),text=secret),secret)
@@ -58,8 +58,8 @@ def main():
             assert run(30)['state']=='SUCCEEDED'
     print('PASS: isolated concurrent traces, no secrets, nested timing, long-poll aggregation, rotation, original exceptions and unwritable-log safety.')
     from scripts.reply_timing_report import report
-    with tempfile.TemporaryDirectory() as temp:
-        path=Path(temp)/'report.jsonl'
+    with temp_dir() as temp:
+        path=temp/'report.jsonl'
         def row(tool,start,end,marks,result,spans=()):
             return dict(trace_id=tool,tool=tool,started_at=start,finished_at=end,seconds=end-start,
                         marks=marks,result=result,spans=list(spans),links={'session_id':'fixture'},status='returned')
@@ -85,8 +85,8 @@ def main():
     from chatlocal.mcp_chat_media import public_addresses
     @timing.trace('dns.fixture')
     def resolve():return public_addresses('fixture.qq.com',443)
-    with tempfile.TemporaryDirectory() as temp:
-        path=Path(temp)/'dns.jsonl'
+    with temp_dir() as temp:
+        path=temp/'dns.jsonl'
         public=[(socket.AF_INET,socket.SOCK_STREAM,6,'',('175.27.35.211',443))]
         fake=[(socket.AF_INET,socket.SOCK_STREAM,6,'',('198.18.0.97',443))]
         with patch.object(timing,'PATH',path):

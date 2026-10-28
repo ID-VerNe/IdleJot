@@ -3,13 +3,13 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import sys
-import tempfile
 import time
 
 sys.path.insert(0,str(Path(__file__).parent))
 from check_mcp_language_learning import Clock, ROOT, jargon_fixture, meaning_fixture
 from chatlocal.mcp_jargon_match import find_known_terms
 from chatlocal.mcp_language_store import LanguageStore, LearningError
+from check_fixture_support import temp_dir  # noqa: E402
 
 
 def main():
@@ -19,8 +19,8 @@ def main():
         dict(term='C++',source_id='1'),dict(term='云朵开机',source_id='1'),dict(term='ABC',source_id='1')]
     assert not find_known_terms(['abc'],[dict(source_id='1',text='xabc abc_ 中文abc中文')])
     clock=Clock()
-    with tempfile.TemporaryDirectory(prefix='tulpa-jargon-matching-') as tmp:
-        store=LanguageStore(Path(tmp)/'language.sqlite3',clock=clock)
+    with temp_dir(prefix='tulpa-jargon-matching-') as tmp:
+        store=LanguageStore(tmp/'language.sqlite3',clock=clock)
         b=dict(scope='qq:111:group:222',gid='a',sid='a',epoch='a')
         store.attach(b);serial=0
         def batch(body='云朵开机',terms=(),binding=None):

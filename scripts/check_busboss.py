@@ -21,13 +21,10 @@
 
     .venv/Scripts/python.exe scripts/check_busboss.py
 """
-import atexit
 import datetime
 import json
 import os
-import shutil
 import sys
-import tempfile
 import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
@@ -36,13 +33,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
-from check_fixture_support import network_guard  # noqa: E402
+from check_fixture_support import network_guard, scratch_dir  # noqa: E402
 from fixture_server import FixtureHandler, fixture_server  # noqa: E402
 
 # 路径必须在 import busboss **之前**钉到临时目录：TOKEN_FILE / CITY_FILE 是
 # 模块级常量，import 期就求值完了（与 check_sixty 同款约束）。
-_SCRATCH = Path(tempfile.mkdtemp(prefix="tulpa-busboss-"))
-atexit.register(shutil.rmtree, _SCRATCH, True)
+_SCRATCH = scratch_dir(prefix="tulpa-busboss-")
 os.environ["WATER_GROUP_HOME"] = str(_SCRATCH / "home")
 (_SCRATCH / "home").mkdir(parents=True, exist_ok=True)
 

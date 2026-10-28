@@ -9,14 +9,13 @@ from pathlib import Path
 import socket
 import ssl
 import sys
-import tempfile
 import threading
 import time
 import warnings
 from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from check_fixture_support import isolated_env
+from check_fixture_support import isolated_env, temp_dir
 from fixture_server import fixture_server
 from check_mcp_reactions import ReactionBot, Events, eventually, ROOT
 from chatlocal.mcp_routes import install_mcp_routes
@@ -566,8 +565,8 @@ def main():
     out=io.BytesIO();Image.new('RGB',(64,48),'blue').save(out,'PNG');raw=out.getvalue()
     with fixture_server(DetailBot) as upstream:
         try:
-            with tempfile.TemporaryDirectory(prefix='tulpa-enrichment-') as tmp,patch.dict('os.environ',isolated_env(),clear=True):
-                folder=Path(tmp);store=Store(folder/'chats.sqlite3')
+            with temp_dir(prefix='tulpa-enrichment-') as tmp,patch.dict('os.environ',isolated_env(),clear=True):
+                folder=tmp;store=Store(folder/'chats.sqlite3')
                 (folder/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{upstream.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n','utf-8')
                 cache=folder/'trusted';cache.mkdir()
                 (folder/'mcp-chat-media-policy.json').write_text(json.dumps(dict(local_roots={'111':[str(cache)]})),'utf-8')

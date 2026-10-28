@@ -10,13 +10,12 @@ import json
 from pathlib import Path
 import socket
 import sys
-import tempfile
 import threading
 import time
 from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from check_fixture_support import isolated_env, network_guard
+from check_fixture_support import isolated_env, network_guard, temp_dir
 from fixture_server import fixture_server
 from check_mcp_chat_targets import TargetBot, text_segment
 from check_mcp_chat import Events, eventually, ROOT
@@ -109,8 +108,8 @@ def main():
     with fixture_server(ReactionBot, ports=allowed_ports) as upstream:
         restricted_connect,connections=network_guard(allowed_ports)
         try:
-            with tempfile.TemporaryDirectory(prefix='tulpa-reactions-') as tmp,patch.dict('os.environ',isolated_env(),clear=True),patch('socket.create_connection',restricted_connect):
-                root=Path(tmp);store=Store(root/'chats.sqlite3')
+            with temp_dir(prefix='tulpa-reactions-') as tmp,patch.dict('os.environ',isolated_env(),clear=True),patch('socket.create_connection',restricted_connect):
+                root=tmp;store=Store(root/'chats.sqlite3')
                 (root/'.env').write_text(f'REPLY_ONEBOT_URL=http://127.0.0.1:{upstream.server_port}\nREPLY_ONEBOT_WS_URL=ws://127.0.0.1:{events.port}\nREPLY_ONEBOT_WS_TOKEN=event-fixture\n','utf-8')
                 with patch('chatlocal.onebot.ROOT',root),patch('chatlocal.message_sender.ROOT',root):
                     app=FastAPI();service=install_mcp_routes(app,store);access=service.access;tools=service.tools

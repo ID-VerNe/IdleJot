@@ -5,14 +5,13 @@ import json
 from pathlib import Path
 import socket
 import sys
-import tempfile
 import threading
 from unittest.mock import patch
 
 ROOT=Path(sys.argv[sys.argv.index('--package')+1]).resolve() if '--package' in sys.argv else Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from check_fixture_support import isolated_env
+from check_fixture_support import isolated_env, temp_dir
 from fixture_server import FixtureHandler,fixture_server
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -60,8 +59,8 @@ async def protocol(url,token):
 
 def main():
     try:
-        with fixture_server(Fixture) as server,tempfile.TemporaryDirectory(dir=ROOT/'.tmp',prefix='mcp-actions-') as tmp,patch.dict('os.environ',isolated_env(),clear=True):
-            folder=Path(tmp);store=Store(folder/'chats.sqlite3')
+        with fixture_server(Fixture) as server,temp_dir(dir=ROOT/'.tmp',prefix='mcp-actions-') as tmp,patch.dict('os.environ',isolated_env(),clear=True):
+            folder=tmp;store=Store(folder/'chats.sqlite3')
             file=folder/'fixture.json';file.write_text(json.dumps([dict(platform='qq',conversation_id=cid,conversation='Isolated test',conversation_type='group',sender_id='333',sender='Fixture',source_id=cid,content='Fixture data',timestamp='2026-10-01') for cid in ['111:group:222','111:group:444']]),'utf-8');store.import_file(file)
             # Token is optional on the server; no illegal empty Bearer header.
             (folder/'.env').write_text('REPLY_ONEBOT_URL=http://127.0.0.1:'+str(server.server_port)+'\n','utf-8')

@@ -11,13 +11,10 @@ Run with the repo venv:
 """
 from __future__ import annotations
 
-import atexit
 import json
 import re
-import shutil
 import sqlite3
 import sys
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -32,8 +29,8 @@ from chatlocal.app_plugins.reactions import ChatReactions          # noqa: E402
 from chatlocal.mcp_access import CHAT_EXTRA_FLAGS, PERMISSION_FLAGS  # noqa: E402
 from chatlocal.mcp_chat import CHAT_TOOLS                          # noqa: E402
 
-TMP = Path(tempfile.mkdtemp(prefix='wg_app_plugins_'))
-atexit.register(shutil.rmtree, TMP, True)
+from check_fixture_support import scratch_dir  # noqa: E402
+TMP = scratch_dir(prefix='wg_app_plugins_')
 
 # Expressions the host dispatches itself; a plugin may not claim one of these.
 BUILTIN_EXPRESSIONS = frozenset(('text', 'sticker', 'voice', 'ai_voice', 'video', 'file', 'qq_action'))

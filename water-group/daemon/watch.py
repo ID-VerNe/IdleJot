@@ -38,6 +38,14 @@ anyone on watch" has to be answerable from a file afterwards, and this poll loop
 is the only thing running during the long quiet stretches. Bare ``watch.py`` runs
 (no listener started the record) leave the ledger untouched.
 
+The ledger can also hold an unresolved mute (issue #192). A bot muted for ten
+minutes is never woken by the mute ending -- the group said nothing, and the wake
+it needs is a state change, not a message. So the poll loop re-checks the mute
+every ``PROBE_INTERVAL`` and prints ``UNMUTED:`` plus the usual closing ``WAKE``
+the moment it is lifted, which sends the caller back to re-hang the listener and
+pick up whatever piled up meanwhile. Only a confirmed release is printed: "still
+muted" once a minute would bury the lines worth reading.
+
 Exit codes:
   0  a wake was printed
   2  timed out with nothing new (call again)
@@ -63,6 +71,7 @@ import wg_images  # noqa: E402  (图片标记渲染)
 import wg_isolation  # noqa: E402  (本会话只管一个群，issue #164 PA)
 import wg_listener_state  # noqa: E402  (监听存亡账本的续心跳，issue #112)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
+import wg_send_failure  # noqa: E402  (禁言账本的现查与解禁唤醒，issue #192)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
 import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收口)
 
@@ -158,6 +167,50 @@ def report_expired(rows, start_cursor):
     print(f"EXPIRED: {len(expired)} 条未回唤醒已超过待回时效"
           f"（TTL {up.pending_reply_ttl()}s），未计入唤醒：{ids}")
     print("         要补旧话题就单独回：reply.py <id> --force")
+
+
+def _unmute_line(rec):
+    """解禁那一行：实测解禁时刻 + 账本原判（账本没写进时刻就不带）。
+
+    「原判」两个字是刻意的：`mute_until` 是失败那一刻的预测，可能被管理员提前
+    解禁，也可能被重新禁了一次。写成「禁言至 X」会把它读成此刻的事实。
+    """
+    at = rec.get("recovered_at")
+    line = (f"UNMUTED: 禁言已于 {wg_clock.clock(at)} 实测解除" if at
+            else "UNMUTED: 禁言已实测解除")
+    try:
+        until = int(rec.get("mute_until") or 0)
+    except (TypeError, ValueError):
+        until = 0
+    if until:
+        line += f"（账本原判 {wg_clock.clock(until)}）"
+    return line
+
+
+def poll_unmute():
+    """账本上压着未定论的禁言时现查一次；确认解禁就打出唤醒块（issue #192）。
+
+    返回是否解禁（调用方据此结束本轮等待）。四档结论里只有 `released` 出声：
+    `muted` / `unknown` 静默——探测每 `PROBE_INTERVAL` 秒一次，若每次都打印一句
+    「仍然禁言」，监听输出的每一屏都会被它占满，恰好盖掉真正要看的东西。
+
+    **放在 fresh 与追问窗口之后是刻意的**：有人 @ 时先回人。那条发送成功本身就是
+    「禁言不再是障碍」的最强证据（`handle()` 会写 `recovered=True`），不必先报一句
+    环境变化；`UNMUTED` 只在没人叫的空窗发声，正是 issue 描述的场景。
+
+    节流状态存在账本里（`rechecked_at`），所以监听与 `reply.py --list` 共用同一份
+    事实：谁先查过，另一个不会紧接着再打一遍接口。
+    """
+    conclusion, _ = wg_send_failure.probe(min_interval=wg_send_failure.PROBE_INTERVAL)
+    if conclusion != "released":
+        return False
+    print(wg_clock.now_line())
+    print(_unmute_line(wg_send_failure.read() or {}))
+    # 点明下一步而不是只说「解禁了」：Agent 被叫醒后要做的事有两件——先看谁在等
+    # （`--list`），再把监听重挂回来（首轮的 `rewind_for_backlog` 会补扫积压）。
+    print("  重挂监听会自动补扫禁言期间积压的未回唤醒（BACKFILL），也可先看 reply.py --list")
+    print("WAKE")
+    return True
 
 
 def require_wake_identity():
@@ -326,6 +379,13 @@ def main():
             if moved != cursor:
                 cursor = moved
                 write_cursor(cursor)
+
+        # 没人叫我们，但可能「叫得动」了（issue #192）：账本上压着未定论的禁言时
+        # 现查一次解禁状态，确认解禁就立刻唤醒——不再等下一条消息，也不再指望
+        # 有人想起来跑一次 `reply.py --list`。游标已推进过，所以下一轮监听不会
+        # 把这次唤醒之前的事件当成新唤醒重放。
+        if poll_unmute():
+            return 0
 
         if time.time() >= deadline:
             report_expired(rows, start_cursor)

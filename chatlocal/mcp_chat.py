@@ -130,6 +130,8 @@ class MCPChat(ChatWaitMixin):
         self.turns = ChatTurns(self)
         from .mcp_chat_details import ChatDetails
         self.details = ChatDetails(self)
+        from .mcp_chat_dossier import ChatDossiers
+        self.dossiers = ChatDossiers(self)
         from .mcp_qq import QQExtensions
         self.qq = QQExtensions(self)
 
@@ -744,87 +746,8 @@ class MCPChat(ChatWaitMixin):
         if name=='plan_chat_reply':return self.turns.plan(grant,args,cancel)
         if name=='send_chat_reply':return self.turns.submit(grant,args,cancel)
         if name=='send_chat_message' or self.apps.tool_owner(name):return self.turns.single(grant,name,args,cancel)
-        if name=='query_member_dossier':return self.query_member_dossier(grant,args)
-        if name=='update_member_dossier':return self.update_member_dossier(grant,args)
-        if name=='consolidate_chat_memory':return self.consolidate_chat_memory(grant,args)
-        if name=='query_group_notes':return self.query_group_notes(grant,args)
+        if name=='query_member_dossier':return self.dossiers.query_member_dossier(grant,args)
+        if name=='update_member_dossier':return self.dossiers.update_member_dossier(grant,args)
+        if name=='consolidate_chat_memory':return self.dossiers.consolidate_chat_memory(grant,args)
+        if name=='query_group_notes':return self.dossiers.query_group_notes(grant,args)
         raise ValueError('未知持续聊天操作。')
-
-    def query_member_dossier(self, grant, args):
-        self.permission(grant)
-        from water_group.memory_engine import get_memory_engine
-        engine = get_memory_engine()
-        gid = args.get('group_id')
-        if not gid and args.get('session_id'):
-            try:
-                row = self.row(args['session_id'], grant['id'])
-                gid = row['conversation_id'].split(':')[-1]
-            except Exception:
-                pass
-        return engine.query_member_dossier(str(args.get('identifier', '')), group_id=str(gid) if gid else None)
-
-    def update_member_dossier(self, grant, args):
-        self.permission(grant)
-        from water_group.memory_engine import get_memory_engine
-        engine = get_memory_engine()
-        gid = args.get('group_id')
-        if not gid and args.get('session_id'):
-            try:
-                row = self.row(args['session_id'], grant['id'])
-                gid = row['conversation_id'].split(':')[-1]
-            except Exception:
-                pass
-        return engine.update_member_dossier(
-            identifier=str(args.get('identifier', '')),
-            key_memories=args.get('key_memories'),
-            traits=args.get('traits'),
-            aliases=args.get('aliases'),
-            interests=args.get('interests'),
-            tone_style=args.get('tone_style'),
-            role=args.get('role'),
-            primary_name=args.get('primary_name'),
-            overwrite=bool(args.get('overwrite', False)),
-            group_id=str(gid) if gid else None,
-        )
-
-    def consolidate_chat_memory(self, grant, args):
-        self.permission(grant)
-        from water_group.memory_engine import get_memory_engine
-        engine = get_memory_engine()
-        gid = args.get('group_id')
-        if not gid and args.get('session_id'):
-            try:
-                row = self.row(args['session_id'], grant['id'])
-                gid = row['conversation_id'].split(':')[-1]
-            except Exception:
-                pass
-        return engine.consolidate_chat_memory(
-            group_id=str(gid) if gid else None,
-            session_id=args.get('session_id'),
-            records=args.get('records'),
-            events=args.get('events'),
-            messages=args.get('messages'),
-            summary=args.get('summary'),
-            notes=args.get('notes'),
-        )
-
-    def query_group_notes(self, grant, args):
-        self.permission(grant)
-        from water_group.memory_engine import get_memory_engine
-        engine = get_memory_engine()
-        gid = args.get('group_id')
-        if not gid and args.get('session_id'):
-            try:
-                row = self.row(args['session_id'], grant['id'])
-                gid = row['conversation_id'].split(':')[-1]
-            except Exception:
-                pass
-        notes = engine.query_group_notes(
-            str(gid) if gid else '',
-            query=args.get('query'),
-            limit=args.get('limit', 20),
-        )
-        return {"group_id": str(gid) if gid else None, "notes": notes}
-
-
-

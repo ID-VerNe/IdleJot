@@ -261,6 +261,36 @@ def read():
     return data if isinstance(data, dict) else None
 
 
+def muted_now(now=None):
+    """账本上现在是否还压着未解除的禁言（纯读，零请求）。
+
+    口径与 `_mute_tail()` 的「仍在禁言」三档一致，不另造一套判断：
+
+      - `mute_until` 在未来：失败那一刻的预测，或复查时现查到的新时刻；
+      - `group_shut is True`：全员禁言没有解禁时刻（NapCat 常常不给成员写
+        `shut_up_timestamp`），账本明确记着就仍算禁言；
+      - `recheck_result == "muted"`：预测已过点，但最后一次复查实测仍禁言。
+
+    `recovered is True`（实测解禁 / 补发成功）、无账本、非禁言类失败（参数错、
+    网络错）一律 False。**不探测**：打接口的是 `probe()`；调用方（`watch.py` 的
+    追问扫描，issue #197）每轮都要问一次，问一次就打一次接口会把监听变成轮询器。
+    「是不是真的解禁了」由 `poll_unmute()` 按 `PROBE_INTERVAL` 节流负责。
+    """
+    moment = time.time() if now is None else float(now)
+    rec = read()
+    if not rec or rec.get("recovered") is True:
+        return False
+    try:
+        until = int(rec.get("mute_until") or 0)
+    except (TypeError, ValueError):
+        until = 0
+    if until > moment:
+        return True
+    if rec.get("group_shut") is True:
+        return True
+    return rec.get("recheck_result") == "muted"
+
+
 def clear():
     """删掉记录（测试用；生产路径只写不删）。"""
     try:

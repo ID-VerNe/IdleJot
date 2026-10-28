@@ -22,7 +22,14 @@ issue #192 的现场：机器人被禁言 10 分钟，`watch.py` 的轮询循环
      （`RECHECK_AFTER=60`）；
   6. 端到端接线：`listen.py` 起 `watch.py`（`run_passthrough`）时 `UNMUTED` 块要被
      转述出来，`RESTART:` 仍是末行——只测 `watch.py` 会漏掉「参数没传下去 /
-     输出被吞掉」这一类（issue #162 的教训）。
+     输出被吞掉」这一类（issue #162 的教训）；
+  7. 禁言期间不扫追问窗口（issue #197）：账本压着未解除的禁言时，窗口里的闲聊
+     **不许**把监听叫醒——那一轮一个字都发不出去，叫醒只是白烧一轮。判据是
+     `rc=2` + 无 `[追问]` + 无 `WAKE` + 一行「暂停追问窗口扫描」，并且窗口的
+     `after_id` / `budget` 一个都没动（跳过 ≠ 扫了再丢，后者会推进游标、扣额度）。
+     两条对照组钉住「抑制不能把追问关死」：`recovered=True`（真实时序里
+     `UNMUTED` 之后重挂的监听就是这个状态）与**完全没有账本**都必须照常
+     `[追问]` + `WAKE`。
 
 已知边界：本门禁不覆盖「解禁与有人 @ 同时发生」的先后顺序——那时普通唤醒先走，
 `handle()` 的成功发送会写 `recovered=True`，`UNMUTED` 不出现是设计（`watch.py`
@@ -34,6 +41,7 @@ import contextlib
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -59,13 +67,16 @@ for path in ("home", "state"):
     (_SCRATCH / path).mkdir(parents=True, exist_ok=True)
 
 from fixture_server import FixtureHandler, fixture_server  # noqa: E402
+import followup  # noqa: E402  (追问窗口机件：窗口由它开，不手写 JSON)
 import reply  # noqa: E402
 import wg_send_failure  # noqa: E402
 
 GROUP = "777000111"
 SELF = "99999"
-LEDGER = _SCRATCH / "state" / "wg_send_failure.json"
-EVENTS = _SCRATCH / "state" / "wg_events.jsonl"
+STATE = _SCRATCH / "state"
+LEDGER = STATE / "wg_send_failure.json"
+EVENTS = STATE / "wg_events.jsonl"
+WINDOW = STATE / "wg_followup.json"
 DAEMON = ROOT / "water-group" / "daemon"
 
 # 夹具状态：每个用例自己写，Handler 只读。
@@ -102,10 +113,16 @@ def _write_config(base):
 
 
 def _reset(now, shut_up=0, all_shut=False, member_fails=False, group_fails=False):
-    """清账本 / 清事件 / 复位假 OneBot 的应答。"""
+    """清账本 / 清事件 / 关窗口 / 复位假 OneBot 的应答。"""
     wg_send_failure.clear()
     try:
         EVENTS.unlink()
+    except OSError:
+        pass
+    # 窗口不关会串到下一个用例：追问唤醒（rc=0）与「禁言期静默」（rc=2）互斥，
+    # 残留窗口会让下一条用例红在与判据无关的地方（issue #197）。
+    try:
+        WINDOW.unlink()
     except OSError:
         pass
     FIX["member_fails"] = member_fails
@@ -114,6 +131,37 @@ def _reset(now, shut_up=0, all_shut=False, member_fails=False, group_fails=False
     FIX["member"] = {"user_id": int(SELF), "card": "机器人", "nickname": "bot",
                      "role": "member", "shut_up_timestamp": shut_up or 0}
     FIX["group"] = {"group_id": int(GROUP), "group_all_shut": all_shut}
+
+
+def _followup_window(after_id=5, session="fixture-session"):
+    """开一个真实的追问窗口，并往 chat_inbox 塞一条窗口之后的闲聊（issue #197）。
+
+    与 `check_followup.py` 同一套口径：窗口走 `followup.open()`，不手写 JSON——
+    字段一改就跟着变，否则夹具与实现会各自漂。`after_id` 那条是被回复的消息
+    （`open()` 从它往后看），它的下一条是群友接话，也就是追问唤醒的燃料。
+    """
+    db = sqlite3.connect(followup.DB)
+    db.execute("CREATE TABLE IF NOT EXISTS chat_sessions "
+               "(id TEXT, conversation_id TEXT, active INTEGER)")
+    db.execute("CREATE TABLE IF NOT EXISTS chat_inbox "
+               "(id INTEGER PRIMARY KEY, session_id TEXT, payload TEXT,"
+               " at REAL NOT NULL, media TEXT NOT NULL DEFAULT '[]')")
+    db.execute("DELETE FROM chat_sessions")
+    db.execute("DELETE FROM chat_inbox")
+    db.execute("INSERT INTO chat_sessions VALUES (?, ?, 1)",
+               (session, f"111:group:{GROUP}"))
+    now = time.time()
+    for eid, who, text in ((after_id, "甲", "@机器人 在吗"),
+                           (after_id + 1, "乙", "在的在的")):
+        payload = {"sender": who, "content": text, "timestamp": now * 1000,
+                   "conversation_id": f"111:group:{GROUP}",
+                   "onebot_message_id": str(7000 + eid)}
+        db.execute("INSERT INTO chat_inbox VALUES (?, ?, ?, ?, '[]')",
+                   (eid, session, json.dumps(payload, ensure_ascii=False),
+                    now - 10 + eid))
+    db.commit()
+    db.close()
+    return followup.open(after_id, max_messages=10, idle_seconds=600, session=session)
 
 
 def _ledger(mute_until=None, at=None, recovered=None, group_shut=None, **extra):
@@ -134,6 +182,14 @@ def _ledger(mute_until=None, at=None, recovered=None, group_shut=None, **extra):
 def _read_ledger():
     try:
         return json.loads(LEDGER.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _read_window():
+    """当前追问窗口；被关掉 / 没开都是 {}（两者靠「文件在不在」区分，见调用点）。"""
+    try:
+        return json.loads(WINDOW.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
@@ -329,6 +385,68 @@ def 只读入口仍是六十秒口径():
     with contextlib.redirect_stdout(buf):
         reply.list_wakes()
     return FIX["member_queries"] == 0 and "UNMUTED" not in buf.getvalue()
+
+
+@case
+def 禁言期间不扫追问窗口():
+    """账本压着未解除的禁言时，窗口里的闲聊不许把监听叫醒（issue #197）。
+
+    改前：`wake_scan` 照扫，`consume()` 扣额度、推游标，返回 0 让 `listen.py`
+    重挂一轮——可那一轮里一个字都发不出去，Agent 白起一轮还被算作「有人叫」。
+    改后：跳过扫描并留一行说明；窗口本身不动（不关、不推游标、不扣额度），
+    解禁后照旧可用、过期照旧自关。
+    """
+    now = int(time.time())
+    _reset(now, shut_up=now + 600, all_shut=False)
+    _ledger(now + 600, at=now - 3600)
+    _followup_window()
+    before = _read_window()
+    r = _run("watch.py", "--timeout", "2")
+    after = _read_window()
+    return (r.returncode == 2 and "TIMEOUT" in r.stdout
+            and "[追问]" not in r.stdout and "WAKE" not in r.stdout
+            and "暂停追问窗口扫描" in r.stdout
+            and before.get("after_id") == 5
+            and after.get("after_id") == 5          # 游标没被推
+            and after.get("budget") == before.get("budget"))
+
+
+@case
+def 解禁后追问窗口照旧唤醒():
+    """对照组：`recovered=True` 之后同一份窗口必须照常唤醒（抑制不能关死追问）。
+
+    这也是真实时序：`poll_unmute()` 返回 0 → Agent 重挂监听 → 新监听在账本上
+    读到「已解禁」，窗口里积压的接话照旧叫醒它。断言 `after_id` 推到 6 才说明
+    真的扫了，不只是把「暂停」那句话摘掉。
+    """
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=False)
+    _ledger(now + 600, at=now - 3600, recovered=True, recovered_at=now - 5,
+            recheck_result="released")
+    _followup_window()
+    r = _run("watch.py", "--timeout", "5")
+    after = _read_window()
+    return (r.returncode == 0 and "[追问]" in r.stdout
+            and "乙" in r.stdout
+            and _last_line(r.stdout) == "WAKE"
+            and "UNMUTED" not in r.stdout
+            and after.get("after_id") == 6)
+
+
+@case
+def 无禁言账本时追问正常唤醒():
+    """对照组：完全没有禁言账本（日常值守）时，追问窗口一行都不能少。
+
+    与上一条配对排掉「`muted_now()` 恒 True」——那种实现下前一条与这一条都红。
+    `_reset()` 已经 `clear()` 过账本，这里不再写任何记录。
+    """
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=False)
+    _followup_window()
+    r = _run("watch.py", "--timeout", "5")
+    return (r.returncode == 0 and "[追问]" in r.stdout
+            and _last_line(r.stdout) == "WAKE"
+            and "暂停追问窗口扫描" not in r.stdout)
 
 
 @case

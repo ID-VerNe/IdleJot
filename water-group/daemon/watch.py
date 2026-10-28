@@ -46,6 +46,13 @@ the moment it is lifted, which sends the caller back to re-hang the listener and
 pick up whatever piled up meanwhile. Only a confirmed release is printed: "still
 muted" once a minute would bury the lines worth reading.
 
+While that mute is in force the follow-up window is left unscanned (issue #197):
+nothing said there can be answered, so waking up for it only burns a round and
+resets the quiet counter. The window keeps its cursor and expires on its own; the
+moment the mute lifts the next listener finds it again. A mute does not silence
+a real mention -- somebody is looking for the bot, and `--wait-unmute` can wait
+inside the budget.
+
 Exit codes:
   0  a wake was printed
   2  timed out with nothing new (call again)
@@ -281,6 +288,9 @@ def main():
     # 的起点是调用方显式给的，不许被改写。start_cursor 已是回退前的值，
     # report_expired 的口径不受影响。
     check_backlog = args.after is None and not args.replay
+    # 禁言期间的暂停说明只打一次（issue #197）：这句是「为什么没动静」的解释，
+    # 不是唤醒内容；按轮重复会把它变成噪声，恰好盖住真正要看的东西。
+    mute_paused = False
 
     while True:
         raw_rows = up.events()
@@ -341,7 +351,16 @@ def main():
         # natural 群普通消息已走 wg_events.jsonl 唤醒，不靠这路），顺带查一眼。
         # 窗口自己会过期；路上撞见了就顺手关掉，不用另起进程打扫。
         # 查窗口、判三态、收窗都在插件里（issue #4 PD2a）；宿主只负责渲染。
-        scan = plugins.emit("wake_scan", {"settings": _plugin_settings()})
+        # 禁言期间不扫追问窗口（issue #197）：群里闲聊没有一句发得出去，把 Agent
+        # 叫醒只会白烧一轮，`listen.py` 还会把这一轮算成「有人叫」。窗口本身不动
+        # ——不关、不推进 `consume()` 游标，解禁后照旧可用、过期照旧自关；`@` 唤醒
+        # 也不受影响（有人明确找，`--wait-unmute` 能在等待预算内等）。
+        muted = wg_send_failure.muted_now()
+        if muted and not mute_paused:
+            mute_paused = True
+            print("# 禁言中：暂停追问窗口扫描（解禁后自动恢复，窗口过期照旧自关）")
+        scan = None if muted else plugins.emit("wake_scan",
+                                               {"settings": _plugin_settings()})
         if scan and scan.get("closed"):
             print(f"[追问] 窗口关闭（{scan['closed']}）")
         elif scan and scan.get("woke"):

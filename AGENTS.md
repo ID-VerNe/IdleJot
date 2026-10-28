@@ -95,6 +95,12 @@
 （`enabled` 三态 + `groups` 白名单 + `options.max_messages` / `idle_seconds`），
 旧写法顶层 `followup` 段仍逐字段兼容；详见 `~/.water-group/rules/water_group.md`。
 
+**禁言期间不扫追问窗口（issue #197）**：账本上压着未解除的禁言时，那一轮一个字都发不
+出去，`watch.py` 跳过追问扫描并打一行 `# 禁言中：暂停追问窗口扫描（…）`；窗口本身不动
+（不关、不推游标、不扣额度），解禁后照旧唤醒、过期照旧自关。`@` 唤醒不受影响——有人
+明确在找，`--wait-unmute` 能在等待预算内等。判据只看账本、不打接口（`muted_now()` 纯读）；
+「是不是真解禁了」仍归上面那条 15 秒探测。
+
 > **职责边界（issue #83 / #160）**：接管后主 Agent 只水群——白名单是 `listen.py` / `reply.py` / `up.py --status`（只读）/ 追问窗口接话 / `tail` 一行日志。
 > 改仓库、跑测试门禁、写文档、审 PR、排查**一律立 issue 后停手，不派 subagent、不亲手做**；执行交给用户启动的独立会话（issue #160 撤掉「必须派活」，保留「必须留证据」）。
 >
@@ -465,7 +471,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 68 | `reply` | `check_bubble_cap.py` | 单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131） |
 | 69 | `reply` | `check_reply_quote.py` | OneBot mention 与引用预检 |
 | 70 | `reply` | `check_reply_send_failure.py` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）；禁言到点必须复查，过期预测不许继续当此刻事实（#145） |
-| 71 | `reply` | `check_unmute_probe.py` | 禁言解禁要叫醒值守的监听：解禁瞬时 WAKE、仍禁言/探测失败/全员禁言静默且不冒充解禁、节流两档、只读入口口径不变、listen 转述完整（#192） |
+| 71 | `reply` | `check_unmute_probe.py` | 禁言解禁要叫醒值守的监听：解禁瞬时 WAKE、仍禁言/探测失败/全员禁言静默且不冒充解禁、节流两档、只读入口口径不变、listen 转述完整（#192）；禁言期间不扫追问窗口、窗口原封不动、解禁与无账本两组对照照常 [追问] 唤醒（#197） |
 | 72 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
 | 73 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
 | 74 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、四种格式都真能发、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度（超了拒、额度内照发）、不回退计划通道、发图也记账（#128） |

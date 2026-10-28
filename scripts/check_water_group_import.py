@@ -41,7 +41,7 @@ def test_imports():
     assert sorted(water_group.__all__) == sorted([
         "memory_engine", "memory_commands", "memory_format",
         "memory_store", "memory_profile", "memory_observe", "memory_dossier",
-        "bootstrap", "sync_groups"])
+        "memory_pollution", "bootstrap", "sync_groups"])
     local_ns = {}
     exec("from water_group import *", local_ns)
     for expected in water_group.__all__:

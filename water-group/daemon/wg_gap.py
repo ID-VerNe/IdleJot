@@ -4,7 +4,8 @@ issue #112 修了「监听退不退」——存亡账本回答「上一轮几点
 但监听在不在与「这段时间消息有没有漏收」是两件事：后端（server_wg.py + NapCat）
 停机跨过一段时间再拉起，窗口内的群消息不进任何本地存储——`chat_inbox` 由服务端
 `chatlocal/mcp_chat.py` 在收到 OneBot 事件时写（NapCat 没收到就不写），`wg_events.jsonl`
-由 `collector.capture_events` 写（`mention_only=True`，只投递 @，且停机时根本没投递）。
+由 `collector.capture_events` 写（`mention_only` 按本群 `trigger_mode` 取，#188；
+停机时根本没投递）。
 于是 daemon 侧所有入口（`up.py --status` / `reply.py --list` / `listen.py NO_WORK`）
 都报告「一切正常」，「没人叫我」与「有人叫过但机器不在」无法区分——2026-10-26 那条
 08:04 的 @ 就是这样丢的，直到人肉翻 `get_group_msg_history` 才发现。

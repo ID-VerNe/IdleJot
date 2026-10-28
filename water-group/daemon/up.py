@@ -100,6 +100,7 @@ from wg_up_wake import (  # noqa: E402,F401  (分节 PC：配置/账号/唤醒�
     replied_after,
     replied_ids,
     self_account,
+    trigger_mode,
     wake_expired,
     wake_reason,
     wake_state,

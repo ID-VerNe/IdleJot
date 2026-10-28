@@ -24,6 +24,10 @@ issue #132 的现场是机器人被禁言，`reply.py <id> "..." --at <花名>` 
    在就睡过去补发一次，不在就如实报「需等 N 秒」。硬等会被宿主在 120s 处砍掉整棵
    进程树，而那条路径上一个字都不打印（#79）。
 
+4. **解禁探测**：`probe()` 把第 2 条的现查抽成可复用的四档结论，账本上压着未定论
+   的禁言时（无论有没有解禁时刻）现查一次并写回；`reply.py --list` 与 `watch.py`
+   的轮询循环各按自己的间隔调它（#145 / #192）。
+
 明确不做：禁言期间改走计划通道（最终也是 `send_group_msg`，同样被拦）、全局 OneBot
 错误码映射表、自动解除禁言。`onebot_send_bubbles()` 的「中途失败即停」语义不变——
 `handle()` 只在一条都没发出去时才补发，绝不把已落地的气泡再发一遍。
@@ -45,6 +49,11 @@ LEDGER = state_dir() / "wg_send_failure.json"
 UNMUTE_MARGIN = 5
 # 只读入口的复查最短间隔（issue #145）：同一分钟内被反复叫起时不再重复打接口。
 RECHECK_AFTER = 60
+# 监听轮询的探测间隔（issue #192）：解禁的价值在「立刻知道」，所以比只读入口密；
+# 节流状态存在账本里（`rechecked_at`），两个入口共用同一份事实，不会各探一份。
+PROBE_INTERVAL = 15
+# 探测请求自己的超时：一轮值守只有 90s，两次查询都按 10s 等就会啃掉四分之一。
+PROBE_TIMEOUT = 5
 # 打桩点：`--wait-unmute` 的睡眠由这里走，门禁按调用记录判定「预算内不硬等」。
 SLEEP = time.sleep
 
@@ -133,24 +142,29 @@ def _all_shut(post, group_id):
 
 
 def diagnose(group_id, failure, post=None, now=None):
-    """失败之后的禁言诊断：(剩余秒数 or None, 待打印行)。
+    """失败之后的禁言诊断：(剩余秒数 or None, 待打印行, group_all_shut)。
 
     只在失败路径上跑，成功路径零额外延迟。四档结论互不冒充：单人/全员禁言（求出
     解禁时刻，全员禁言时解禁时刻可能取不到）、未禁言（成员与群两个探测都成功）、
     状态未知（探测本身失败）——第三、四档不说「未禁言」。
+
+    第三个返回值是那一次现查到的 `group_all_shut`（True / False / None），由
+    `handle()` 交给 `record()` 落盘。全员禁言时 NapCat 常常不给成员写
+    `shut_up_timestamp`，账本若只认解禁时刻，那条记录就永远进不了复查
+    （`probe()` 的前置是「有时刻」或「明确记着全员禁言」，issue #192）。
     """
     post = post or _post
     moment = time.time() if now is None else float(now)
     if (failure or {}).get("kind") == "network":
-        return None, ["  未探测禁言：请求在拿到响应之前就失败了，不是 OneBot 的业务拒绝"]
+        return None, ["  未探测禁言：请求在拿到响应之前就失败了，不是 OneBot 的业务拒绝"], None
     account = str(wg_config.config().get("self_account") or "")
     if not account:
-        return None, ["  未探测禁言：config.json 缺 self_account"]
+        return None, ["  未探测禁言：config.json 缺 self_account"], None
     try:
         member = post("get_group_member_info",
                       {"group_id": int(group_id), "user_id": int(account), "no_cache": True})
     except Exception as exc:  # noqa: BLE001  探测失败不许拖垮诊断
-        return None, [f"  禁言状态未知：{type(exc).__name__}: {exc}"]
+        return None, [f"  禁言状态未知：{type(exc).__name__}: {exc}"], None
     try:
         until = int(member.get("shut_up_timestamp") or 0)
     except (TypeError, ValueError):
@@ -160,12 +174,12 @@ def diagnose(group_id, failure, post=None, now=None):
     if seconds is None:
         if scope is True:
             return None, ["  全员禁言：整个群都发不出去"
-                          f"（本机 shut_up_timestamp={until}，解禁时刻以管理员解禁为准）"]
+                          f"（本机 shut_up_timestamp={until}，解禁时刻以管理员解禁为准）"], True
         if scope is False:
             return None, [f"  未检出禁言（shut_up_timestamp={until}，group_all_shut=False）："
-                          "失败来自 OneBot 的其它原因，见上一行原文"]
+                          "失败来自 OneBot 的其它原因，见上一行原文"], False
         return None, [f"  禁言状态未知：读不到 group_all_shut（查询失败或响应缺字段），"
-                      f"本机 shut_up_timestamp={until}"]
+                      f"本机 shut_up_timestamp={until}"], None
     lines = [f"  机器人被禁言至 {wg_clock.clock(until)}（还剩 {seconds} 秒），"
              f"期间任何通道都发不出去"]
     if scope is True:
@@ -174,7 +188,7 @@ def diagnose(group_id, failure, post=None, now=None):
         lines.append("  单人禁言：其他成员仍能发言，只有本机被拦")
     lines.append(f"  建议：等 {seconds + UNMUTE_MARGIN} 秒后重发"
                  "（--wait-unmute 在等待预算内会自动等）")
-    return seconds, lines
+    return seconds, lines, scope
 
 
 def wait_plan(mute, budget=None, elapsed=0.0):
@@ -197,11 +211,16 @@ def wait_plan(mute, budget=None, elapsed=0.0):
     return need, [f"  等 {need} 秒解禁后补发（--wait-unmute，等待预算 {budget}s 内）…"]
 
 
-def record(group_id, failure, mute=None, mute_until=None, recovered=None, now=None):
+def record(group_id, failure, mute=None, mute_until=None, recovered=None, now=None,
+           group_shut=None):
     """落盘上一次发送失败（原子写）。写不进不崩——账本不该让 reply.py 挂。
 
     `mute_until` 是**绝对时刻**，由调用方算一次传进来：账本如果每写一次就拿
     「现在 + 剩余秒数」重算，睡过一轮后那个时刻会往后漂（独立复核抓到的问题）。
+
+    `group_shut` 是失败那一刻现查到的 `group_all_shut`（True / False / None）。
+    全员禁言时解禁时刻常常取不到，只有把它记下来，`probe()` 才有复查对象
+    （issue #192）；`None` 是「不知道」，与「明确没有全员禁言」不是一回事。
     """
     moment = int(time.time() if now is None else now)
     if mute_until is None and mute:
@@ -215,11 +234,12 @@ def record(group_id, failure, mute=None, mute_until=None, recovered=None, now=No
              # 复查四件套（issue #145）：`recheck_result` 是结论记号
              # （`muted` / `released` / `unknown`），`recovered_at` 是「实测解禁」
              # 的时刻，`rechecked_at` 是最后一次复查尝试（成功与否都写，用来限流），
-             # `group_shut` 是那次复查读到的 group_all_shut。新失败从零开始记。
+             # `group_shut` 是那次复查读到的 group_all_shut。新失败从失败那一刻的
+             # 探测结果起记（issue #192：全员禁言只有这个字段能进复查）。
              "recheck_result": None,
              "recovered_at": None,
              "rechecked_at": None,
-             "group_shut": None}
+             "group_shut": group_shut}
     _write(entry)
 
 
@@ -317,66 +337,74 @@ def _mute_tail(rec, moment):
     return ""
 
 
-def recheck(post=None, now=None):
-    """账本上的禁言还没定论，就现查一次 OneBot 并把结论写回账本（issue #145）。
+def probe(post=None, now=None, min_interval=None):
+    """账本上的禁言还没定论，就现查一次 OneBot 并把结论写回：(结论, 是否写回)。
 
-    issue #145 的现场：账本把禁言时刻冻结在失败那一刻，管理员**提前**解禁后没有任何
-    入口会重新探测；`reply.py --list` 继续报「禁言至 11:18:29」（那个时刻还在未来），
-    Agent 据此放弃回待回的唤醒，而此刻 `send_group_msg` 完全能发出去。`recovered`
-    字段从 #132 起就写着「供以后核对」，却只有读、没有写。
+    结论四档，调用方按需要取舍：
 
-    **触发条件不能只看「已到点」**：提前解禁时 `mute_until` 必然还在未来，那正是
-    issue 的实机症状（账本 11:18 解禁、10:24 实测已是 0）。所以按「这个预测还新不新」
-    判：账本写入（`at`）距今超过 `RECHECK_AFTER` 秒就复查一次，与 `mute_until` 在
-    未来还是过去无关——预测越老越不可信，而它恰好是 Agent 判断能不能发的唯一依据。
+      - `idle`：不需要探测——没账本 / 已有结论（`recovered is True`）/ 不是禁言类
+        记录 / 距上次探测不足 `min_interval`；
+      - `muted`：仍禁言。`shut_up_timestamp` 在未来时以现查为准写回（可能被重新
+        禁了一次，也可能账本记早了）；全员禁言（`group_all_shut=True`）也算这一档，
+        只是没有解禁时刻；
+      - `released`：**实测**解禁——现查 `shut_up_timestamp` 已过期且
+        `group_all_shut` 明确为 False，写 `recovered=True` + `recovered_at`；
+      - `unknown`：探测失败 / `group_all_shut` 读不到，措辞降级成「复查未能确认」，
+        不冒充解禁（#132 的纪律：假事实比没有输出更坏）。
 
-    三个前置（全满足才发请求，只读入口不能变成轮询器）：账本存在且没有定论
-    （`recovered is not True`）、是禁言类记录（有 `mute_until`）、距上次复查超过
-    `RECHECK_AFTER` 秒。**探测失败同样写 `rechecked_at`**，所以一直失败时也是每分钟
-    最多重试一次，不会每次 `--list` 都打接口。
+    issue #145 的现场是「只读入口会把冻结的预测当此刻的事实」：管理员**提前**解禁后
+    `reply.py --list` 继续报「禁言至 11:18:29」，Agent 据此放弃回待回的唤醒。所以
+    触发条件不能只看「已到点」——提前解禁时 `mute_until` 必然还在未来。判据是
+    「这个预测还新不新」：账本写入（`at`）或上次探测距今超过 `min_interval` 就查
+    一次，与 `mute_until` 在未来还是过去无关。
 
-    三档结论互不冒充，沿用 #132 的纪律（假事实比没有输出更坏）：
-      - 现查 `shut_up_timestamp` 仍在未来 → `muted`，以现查到的时刻为准（可能被
-        重新禁了一次，也可能账本记早了）；
-      - 现查为 0 且 `group_all_shut` 明确为 False → `released`，写 `recovered=True`
-        + `recovered_at`，这是**实测**解禁，不是推断；
-      - 探测失败 / `group_all_shut` 读不到 / 全员禁言 → `unknown`，措辞降级成
-        「复查未能确认」，不冒充解禁。
+    issue #192 加的是第二个调用方：监听轮询（`watch.py`）用 `PROBE_INTERVAL`（15s）
+    调它，解禁那一刻就能唤醒，不必等下一条消息或人工 `--list`。两个入口共用账本里的
+    `rechecked_at` 节流，所以谁先查过，另一个就不会紧接着再打一遍接口。
 
-    返回是否改写了账本；任何异常都吞掉——只读入口不许因为一次探测失败整条崩。
+    **全员禁言也有复查对象**：NapCat 在全员禁言时常常不给成员写
+    `shut_up_timestamp`，账本里只有 `mute_until=None`。只认「有时刻」会把这条记录
+    永远挡在探测之外，管理员解禁后也没人知道。所以前置放宽成「有时刻 **或** 账本
+    明确记着 `group_shut is True`」——`None` 仍是「不知道」，普通失败（参数错、
+    网络错）不会被变成轮询对象。
+
+    任何异常都吞掉：只读入口与值守循环都不许因为一次探测失败整条崩。
     """
     moment = time.time() if now is None else float(now)
+    gap = RECHECK_AFTER if min_interval is None else int(min_interval)
     rec = read()
     if not rec or rec.get("recovered") is True:
-        return False
+        return "idle", False
     try:
         until = int(rec.get("mute_until") or 0)
     except (TypeError, ValueError):
-        return False
-    if not until:
-        return False  # 不是禁言类失败（参数错 / 网络错），复查没有对象
+        return "idle", False
+    if not until and rec.get("group_shut") is not True:
+        return "idle", False  # 不是禁言类失败（参数错 / 网络错 / 状态未知），没有对象
     try:
         wrote_at = int(rec.get("at") or 0)
     except (TypeError, ValueError):
         wrote_at = 0
     # 账本刚写：diagnose() 那一刻已经查过，别紧接着再问一遍。
-    if wrote_at and moment - wrote_at < RECHECK_AFTER:
-        return False
+    if wrote_at and moment - wrote_at < gap:
+        return "idle", False
     last_try = rec.get("rechecked_at")
     try:
-        if last_try and moment - float(last_try) < RECHECK_AFTER:
-            return False
+        if last_try and moment - float(last_try) < gap:
+            return "idle", False
     except (TypeError, ValueError):
         pass
     group_id = str(rec.get("group_id") or "")
     account = str(wg_config.config().get("self_account") or "")
     if not group_id or not account:
-        return False
+        return "idle", False
     try:
         gid, uid = int(group_id), int(account)
     except (TypeError, ValueError):
-        return False
-    post = post or _post
+        return "idle", False
+    if post is None:
+        def post(action, payload):  # noqa: F811  探测自带更短的超时（PROBE_TIMEOUT）
+            return _post(action, payload, timeout=PROBE_TIMEOUT)
     fresh = dict(rec)
     fresh["rechecked_at"] = int(moment)
     # 先清掉上一轮的结论再探：探测失败时不许让旧的 group_shut 顶着**本次**复查的
@@ -387,7 +415,7 @@ def recheck(post=None, now=None):
         member = post("get_group_member_info",
                       {"group_id": gid, "user_id": uid, "no_cache": True})
     except Exception:  # noqa: BLE001  复查失败只留时间戳，措辞降级成「未能确认」
-        return _write(fresh)
+        return "unknown", _write(fresh)
     try:
         shut = int(member.get("shut_up_timestamp") or 0)
     except (TypeError, ValueError):
@@ -398,11 +426,27 @@ def recheck(post=None, now=None):
         # 现查比账本更新：以现查为准，别拿过期时刻继续骗自己。
         fresh["mute_until"] = shut
         fresh["recheck_result"] = "muted"
-    elif scope is False:
+        return "muted", _write(fresh)
+    if scope is False:
         fresh["recovered"] = True
         fresh["recovered_at"] = int(moment)
         fresh["recheck_result"] = "released"
-    return _write(fresh)
+        return "released", _write(fresh)
+    if scope is True:
+        # 明确读到了「全群仍禁言」：是禁言，只是没有时刻可报。
+        fresh["recheck_result"] = "muted"
+        return "muted", _write(fresh)
+    return "unknown", _write(fresh)
+
+
+def recheck(post=None, now=None):
+    """只读入口的复查（issue #145）：返回这次是否真的探测了（`idle` 之外都算）。
+
+    只读入口（`reply.py --list` 表头）沿用 `RECHECK_AFTER`（60s）的节流，与监听
+    轮询的 15s 分开——查阅不必这么勤，而值守的 15s 也经同一个 `rechecked_at`
+    生效，谁先查过另一个就跳过。
+    """
+    return probe(post=post, now=now, min_interval=RECHECK_AFTER)[0] != "idle"
 
 
 def print_last():
@@ -455,14 +499,16 @@ def handle(sent, attempt, failure, *, group_id, bubbles, has_at, unmute=False):
         return sent
     print(f"SEND_FAILED: {describe(failure)}")
     started = time.time()
-    mute, lines = diagnose(group_id, failure)
+    mute, lines, scope = diagnose(group_id, failure)
     for line in lines:
         print(line)
     if has_at:
         print("  未退回计划通道：带 @ 的消息只能走 OneBot（计划通道会降级成纯文本）")
     # 解禁时刻只算一次（绝对时刻），睡完再记账也不会漂。
     mute_until = (started + int(mute)) if mute else None
-    record(group_id, failure, mute_until=mute_until)
+    # `scope` 一起落盘：全员禁言没有解禁时刻，只有 `group_shut=True` 能让账本
+    # 在监听侧仍有可复查的对象（issue #192）。
+    record(group_id, failure, mute_until=mute_until, group_shut=scope)
     if not mute or not unmute:
         return sent
     # 诊断的两次探测已经吃掉几秒，额度要按**实际已用**算（#88 的总额口径）。
@@ -477,5 +523,6 @@ def handle(sent, attempt, failure, *, group_id, bubbles, has_at, unmute=False):
     print(f"  补发：{retried}/{bubbles} 条已发出")
     if retried != bubbles:
         print(f"  补发失败原因：{describe(retry_failure)}")
-    record(group_id, failure, mute_until=mute_until, recovered=retried == bubbles)
+    record(group_id, failure, mute_until=mute_until, recovered=retried == bubbles,
+           group_shut=scope)
     return retried

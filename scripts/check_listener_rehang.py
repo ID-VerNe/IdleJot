@@ -140,6 +140,11 @@
 43. 账本的历史分支（心跳过期没退出记录 / 已退出）必须自带「仅供参考」：监听行
     前半句是现刻事实、后半句是上一轮历史，两者同形时一个陈旧的槽会被读成刚刚
     发生（issue #142）。仍在值守的账本不得带这个标记（对照组）。
+44. 重挂的监听要补扫游标之前的未回唤醒（issue #182）：宿主截断那一轮已经推进过
+    游标，此前的 @ 若仍 `[待回]`（`wake_reason` 真、账本未记、未过 TTL），
+    `watch.py` 启动时必须把游标退到最老一条之前重新扫，并打印 `BACKFILL:` 说明；
+    已回的不回溯、过期的不回溯（两条对照组），`--after` / `--replay` 显式起点的
+    语义不变。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_CONFIG`，不碰实机状态：
 
@@ -568,6 +573,59 @@ def 冷启动不翻历史积压():
     return (proc.returncode == 2 and "TIMEOUT" in lines(out)
             and index_of(out, "EXPIRED:") < 0
             and not any(ln == "WAKE" for ln in lines(out)))
+
+
+# ---------- watch.py：游标之前的未回唤醒要回溯补扫（issue #182） ----------
+
+
+@case
+def 游标前未回唤醒重挂后补扫():
+    """监听中断后重挂，游标之前的未回 @ 仍要被扫成唤醒（issue #182）。
+
+    修复前 `fresh` 只认 `id > cursor`：被宿主截断的那一轮已经推进过游标，
+    这些 @ 在 `--list` 里永远停 `[待回]`，监听再怎么重挂都不再提。
+    """
+    with temp_dir(prefix="wg-rehang-") as home:
+        fixture_home(home)
+        write_events(home, [event(9, 20, "@机器人 漏掉的@")])
+        (home / "state" / "wg_watch.txt").write_text("10", encoding="utf-8")
+        proc = run_script(home, "watch.py", "--timeout", "2")
+    out = proc.stdout
+    return (proc.returncode == 0
+            and any(ln == "WAKE" for ln in lines(out))
+            and any(ln.startswith("id=9 ") for ln in lines(out))
+            and index_of(out, "BACKFILL:") >= 0)
+
+
+@case
+def 已回唤醒不回溯():
+    """已回的 @ 不许被回溯补扫重新叫醒（issue #182 对照组）。"""
+    with temp_dir(prefix="wg-rehang-") as home:
+        fixture_home(home)
+        write_events(home, [event(9, 20, "@机器人 已经回过")])
+        (home / "state" / "wg_watch.txt").write_text("10", encoding="utf-8")
+        (home / "state" / "wg_replied.jsonl").write_text(
+            json.dumps({"id": 9, "ts": time.time()}, ensure_ascii=False) + "\n",
+            encoding="utf-8")
+        proc = run_script(home, "watch.py", "--timeout", "2")
+    out = proc.stdout
+    return (proc.returncode == 2 and "TIMEOUT" in lines(out)
+            and not any(ln == "WAKE" for ln in lines(out))
+            and index_of(out, "BACKFILL:") < 0)
+
+
+@case
+def 过期唤醒在游标之前也不回溯():
+    """过了待回时效的旧 @ 不因为回溯补扫又被翻出来（issue #182 对照组）。"""
+    with temp_dir(prefix="wg-rehang-") as home:
+        fixture_home(home)
+        write_events(home, [event(9, 3 * 3600, "@机器人 陈年旧账")])
+        (home / "state" / "wg_watch.txt").write_text("10", encoding="utf-8")
+        proc = run_script(home, "watch.py", "--timeout", "2")
+    out = proc.stdout
+    return (proc.returncode == 2 and "TIMEOUT" in lines(out)
+            and not any(ln == "WAKE" for ln in lines(out))
+            and index_of(out, "BACKFILL:") < 0)
 
 
 # ---------- reply.py：默认续挂 ----------

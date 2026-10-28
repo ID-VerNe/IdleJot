@@ -122,7 +122,7 @@
 | `commands.py` / `sixty.py` / `miyoushe.py` / `qr_login.py` 等 handler 代码 | `.\reload.ps1`：按 AST 闭包只重启 `commands`（`HANDLERS` 是 import 期合成的，进程级重启才会换模块） |
 | `daemon/plugins/*.py`（插件适配器，issue #4 PA） | `.\reload.ps1`：`commands.py:85` 是模块级 `import plugins`、`load_all` 在 import 期跑，所以插件文件在 `commands` 的 AST 闭包里，不用手写映射 |
 | `chatlocal/app_plugins/*.py`（app 侧插件，issue #4 PD2b） | `.\reload.ps1`：`chatlocal/mcp_chat.py:14-15` 模块级 import，闭包命中 `app`（`server_wg`） |
-| `memory_engine.py` 及四个分层模块 | `.\reload.ps1`：闭包会命中 `app` / `commands` / `watchdog`，自动重启对应子进程 |
+| `memory_engine.py` 及五个分层模块 | `.\reload.ps1`：闭包会命中 `app` / `commands` / `watchdog`，自动重启对应子进程 |
 | `up.py` / `wg_up_probe.py` / `wg_up_wake.py` / `wg_up_stack.py` / `bootstrap.py` / `reload.py` / `winconsole.py` / `watchdog.py` / `supervisor.py` / `start-bot.pyw`（启动链、控制台、NapCat 注入） | **必须整栈重启**：`.\stop.ps1`（或 `up.py --stop`）后从 explorer 启动 `start-bot.pyw`；`reload.ps1` 会把 guard-owned 代码拒绝掉，普通重载不会替换已运行的 `up.py` 和它拉起的 NapCat（#4 的旧乱码控制台窗口就是这么留下的） |
 
 > 启动链没有热重载：旧 `up.py` 会一直用它启动时 import 的模块，NapCat 也是它的子进程。判断是否旧进程，看 `up.py --status` 里的守护 pid 对应进程的启动时间是否早于 `up.py` 的 mtime；是就整栈重启。
@@ -175,8 +175,8 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
       │          water-group (水群子系统)              │
       │  memory_engine.py(门面) · memory_store.py      │
       │  memory_profile.py · memory_observe.py          │
-      │  memory_dossier.py · memory_commands.py          │
-      │  memory_format.py · bootstrap.py               │
+      │  memory_dossier.py · memory_pollution.py        │
+      │  memory_commands.py · memory_format.py · bootstrap.py │
       │  sync_groups.py · personas/                   │
       │  daemon/plugins/（# 指令 + 事件插件，issue #4）  │
       │  ⇅ chatlocal/app_plugins/（app 侧插件，PD2b）   │
@@ -189,7 +189,7 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
 |------|------|
 | `chatlocal/` | 应用核心：`store.py`（SQLite/WAL 连接策略）、`mcp_*` MCP 工具与路由层（`mcp_server.py`、`mcp_tools.py`、`mcp_chat*.py`、`mcp_qq*.py`、`mcp_reactions.py`、`mcp_sticker_library.py` 等）、`agent*.py` 会话与人格、`onebot*.py` 网关、`voice.py` 云端 ASR。人格卡模板在 `water-group/personas/`（公开）与 `~/.water-group/personas/`（私有，同名优先），`chatlocal/mcp_chat_prompts.py` 负责发现与加载；`app_plugins/` 是 app 侧插件插座（MCP 工具 + 实时事件，见 §1.1） |
 | `server_wg.py` | 后端唯一入口：FastAPI，HTTP `47860` / MCP `48777`，`install_mcp_routes` 挂载 MCP；不 import `app.py`/Gradio（已删） |
-| `water-group/` | QQ 群水群专属自闭环模块：`bootstrap.py`（一键后台启动、端口屏障与自检）、`memory_engine.py`（群友小本本动态记忆门面，issue #11 PA 起拆为 `memory_store` 存储层 / `memory_profile` 画像层 / `memory_observe` 观察层 / `memory_dossier` 档案层，对外 API 不变）、`memory_commands.py`（指令语法解析）、`memory_format.py`（L1 画像卡渲染）、`sync_groups.py`（群列表/名片同步）、`daemon/sixty.py`（60s 资讯指令取数，issue #53 方案 A）、`personas/` 角色人格卡。`daemon/` 是常驻守护与 Agent 侧 CLI（**逐文件职责见 `water-group/daemon/README.md`，本表不再重列**），其中 `daemon/plugins/` 是指令与事件插件的注册表（§1.1） |
+| `water-group/` | QQ 群水群专属自闭环模块：`bootstrap.py`（一键后台启动、端口屏障与自检）、`memory_engine.py`（群友小本本动态记忆门面，issue #11 PA 起拆为 `memory_store` 存储层 / `memory_profile` 画像层 / `memory_observe` 观察层 / `memory_dossier` 档案层 / `memory_pollution` 跨群污染审计层，对外 API 不变）、`memory_commands.py`（指令语法解析）、`memory_format.py`（L1 画像卡渲染）、`sync_groups.py`（群列表/名片同步）、`daemon/sixty.py`（60s 资讯指令取数，issue #53 方案 A）、`personas/` 角色人格卡。`daemon/` 是常驻守护与 Agent 侧 CLI（**逐文件职责见 `water-group/daemon/README.md`，本表不再重列**），其中 `daemon/plugins/` 是指令与事件插件的注册表（§1.1） |
 | `water_group/` | 根目录标准 Python 模块兼容桥接 shim（连字符目录不可直接 import）。**它是唯一知道连字符目录存在的 water-group 文件**：通过扩展自身 `__path__` 使每个文件以 `water_group.<name>` 恰好可达一次；子模块经 PEP 562 懒加载解析。**严禁把连字符目录加入 `sys.path`**——同一文件以两个名字加载会拆分状态（记忆引擎单例曾因此损坏） |
 | `scripts/` | 检查与辅助脚本，以及共享基建：`fixture_server.py`（假服务器样板基类）、`check_fixture_support.py`（隔离环境/临时目录/网络护栏）、`incremental_common.py`（增量游标指纹）、`setup-napcat.ps1`（NapCat Shell 拉取器，pinned + sha256 校验）；门禁清单与执行器是 `gates.json` + `run_gates.py`（**唯一事实来源**，§5.1），对账与设置类还有 `check_pr_parity.py` / `check_repo_settings.py` / `check_gate_change_review.py` |
 | `doc/` | 水群与 MCP 协议文档：`MCP_CHAT*`、`MCP_REACTIONS*`、`GROUP_MANAGEMENT`、`REPLY_TIMING`、`WATER_GROUP_ONLY_PLAN`、`SECURITY`、`THIRD_PARTY`、`SLASH_COMMANDS`（`#` 指令体系）、`HOT_RELOAD`、`NAPCAT_TROUBLESHOOTING`、`MCP_TOOL_RELIABILITY`，以及流程指引 `ISSUE_GUIDE` / `PR_GUIDE`，及两轮 DRY/SRP 审计报告（具体篇目以磁盘为准，不在此穷举） |

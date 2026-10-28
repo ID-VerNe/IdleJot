@@ -23,11 +23,13 @@ Layers (see each module's docstring):
     memory_profile.py  profiles, seeding, matching, sync, #5 read-side union
     memory_observe.py  events, banter commands, idle digestion
     memory_dossier.py  L1 cards, L2 dossier reads/writes, consolidation
+    memory_pollution.py  cross-group pollution audit/scrub/restore (#34)
 """
 import threading
 
 from .memory_dossier import MemoryDossierMixin
 from .memory_observe import MemoryObserveMixin
+from .memory_pollution import MemoryPollutionMixin
 from .memory_profile import MemoryProfileMixin
 from .memory_store import (
     DEFAULT_DB_PATH,
@@ -46,6 +48,7 @@ __all__ = [
     "MemoryProfileMixin",
     "MemoryObserveMixin",
     "MemoryDossierMixin",
+    "MemoryPollutionMixin",
     "WG_HOME",
     "DEFAULT_DB_PATH",
     "MEMORY_SLOTS",
@@ -55,8 +58,8 @@ __all__ = [
 ]
 
 
-class MemoryEngine(MemoryStoreMixin, MemoryProfileMixin, MemoryObserveMixin, MemoryDossierMixin):
-    """Group member dynamic memory engine (facade over the four layers)."""
+class MemoryEngine(MemoryStoreMixin, MemoryProfileMixin, MemoryObserveMixin, MemoryDossierMixin, MemoryPollutionMixin):
+    """Group member dynamic memory engine (facade over the five layers)."""
 
 
 # Global engine singleton

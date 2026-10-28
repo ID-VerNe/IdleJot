@@ -3,8 +3,9 @@
 背景：磁盘 88 个 `scripts/check_*.py`、`ci.yml` 61 条数组、AGENTS §5.1 37 个引用，
 三套口径已经漂移（issue #59）。本节把「哪个脚本算什么」收进清单，并断言：
 
-1. 每个条目 `name` 形如 `check_*.py`、全清单无重名（一项只归一档）；
-2. 磁盘 `scripts/check_*.py` 集合 == `ci` / `manual` / `stale` / `dead` / `support` 并集；
+1. 每个条目 `name` 形如 `check_*.py`（文件门禁）或 `check_*`（包门禁，issue #169 PF-2：
+   `scripts/check_listener_rehang/` 经 `python -m scripts.<name>` 调起）、全清单无重名（一项只归一档）；
+2. 磁盘 `scripts/check_*.py` 文件与 `scripts/check_*/` 包目录的集合 == `ci` / `manual` / `stale` / `dead` / `support` 并集；
 3. 每个条目在磁盘存在（`dead` 在删除前也必须存在，删完即出列）；
 4. `manual` / `stale` / `dead` / `support` 必须写 `why`，`stale` 还必须带跟进 `issue` 号
    ——「人工跑的」和「红的」都要留下理由，不许把门禁藏进没有解释的档位；
@@ -37,7 +38,7 @@ BEGIN = '<!-- gates:ci:begin -->'
 END = '<!-- gates:ci:end -->'
 BUCKETS = ('ci', 'manual', 'stale', 'dead', 'support')
 REASONED = ('manual', 'stale', 'dead', 'support')
-NAME = re.compile(r'^check_[a-z0-9_]+\.py$')
+NAME = re.compile(r'^check_[a-z0-9_]+(?:\.py)?$')
 SHARD_NAME = re.compile(r'^[a-z][a-z0-9_]*$')
 MATRIX = re.compile(r'shard:\s*\[([^\]]*)\]')
 COUNT_RE = re.compile(r'`([a-z_]+)`\s*(\d+)')
@@ -350,6 +351,10 @@ def main():
     print('  ok  ci.yml 的 matrix.shard 与清单一致')
 
     disk = {path.name for path in (ROOT / 'scripts').glob('check_*.py')}
+    # 包式门禁（issue #169 PF-2）：`scripts/check_listener_rehang/` 这种目录也算
+    # 磁盘事实，`Path.name` 自动剥尾斜杠成 `check_listener_rehang`，与清单里去 `.py`
+    # 的 `name` 对齐。
+    disk |= {path.name for path in (ROOT / 'scripts').glob('check_*/')}
     listed = set(seen)
     missing = sorted(disk - listed)
     extra = sorted(listed - disk)

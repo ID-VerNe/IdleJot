@@ -140,7 +140,7 @@ def ledger_at(home):
     `STATE_DIR`（新）与 `LEGACY_STATE`（旧，只读兼容）；更早的 #112 布局只有
     `STATE`。三套名字都用 `hasattr` 探测后改写：跑新模块时 `STATE` 不存在，
     跑旧基线时 `STATE_DIR` 不存在——基线复跑（新门禁跑未打补丁的模块）两套
-    路径都指到 `home`，否则旧模块会读写实机账本。与 `check_listener_rehang.py`
+    路径都指到 `home`，否则旧模块会读写实机账本。与 `check_listener_rehang`
     的 `ledger_at` 同款（同一次 #119 改动）。
     """
     names = ("STATE", "STATE_DIR", "LEGACY_STATE")
@@ -362,7 +362,7 @@ def status_无缺口时不加缺口行():
 def listen_NO_WORK路径带缺口提示且RESTART仍是末行():
     """缺口非空时 NO_WORK 与 RESTART: 之间插一行 ⚠ 缺口提示。
 
-    复用 `check_listener_rehang.py` 已钉的「NO_WORK 后跟 RESTART:」契约的现场，
+    复用 `check_listener_rehang` 已钉的「NO_WORK 后跟 RESTART:」契约的现场，
     但这里多验一桩：两者之间有缺口提示。`_no_work` 是新拆出的 NO_WORK 路径收尾，
     直接调它（不真跑 watch.py）；WAKE 路径仍走 `_finish`，不带提示。
     """

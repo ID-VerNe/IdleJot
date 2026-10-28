@@ -67,7 +67,15 @@ def list_gates(manifest):
 
 
 def command_of(row):
-    return [sys.executable, str(ROOT / 'scripts' / row['name']), *(row.get('args') or [])]
+    name = row['name']
+    if name.endswith('.py'):
+        # File-as-script：清单里 80 个文件门禁仍走 path-as-script（cwd=ROOT 时
+        # sys.path[0] 已是 scripts/，`import check_fixture_support` 能直接解析）。
+        return [sys.executable, str(ROOT / 'scripts' / name), *(row.get('args') or [])]
+    # Package gate：`name` 不带 `.py` 即一个 `scripts/` 下的包目录，用 `-m` 调起
+    # 其 `__main__.py`（issue #169 PF-2）。`-m` 会把 `cwd=ROOT` 加进子进程
+    # `sys.path[0]`，`scripts` 作为命名空间包即解析——无需父进程动 sys.path。
+    return [sys.executable, '-m', f'scripts.{name}', *(row.get('args') or [])]
 
 
 def run_rows(rows, fail_fast):

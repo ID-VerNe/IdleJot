@@ -77,11 +77,11 @@ TEAM_PROTECTION_FIX = (
 )
 TEAM_CODEOWNERS_FIX = (
     '并新增 .github/CODEOWNERS（占位符换成真实 GitHub handle）：\n'
-    '  /scripts/check_*.py        @<维护者一> @<第二个维护者>\n'
-    '  /scripts/gates.json        @<维护者一> @<第二个维护者>\n'
-    '  /scripts/run_gates.py      @<维护者一> @<第二个维护者>\n'
-    '  /.github/workflows/ci.yml  @<维护者一> @<第二个维护者>\n'
-    '  /.githooks/                @<维护者一> @<第二个维护者>'
+    '  /scripts/check_*/         @<维护者一> @<第二个维护者>\n'
+    '  /scripts/gates.json       @<维护者一> @<第二个维护者>\n'
+    '  /scripts/run_gates.py     @<维护者一> @<第二个维护者>\n'
+    '  /.github/workflows/ci.yml @<维护者一> @<第二个维护者>\n'
+    '  /.githooks/               @<维护者一> @<第二个维护者>'
 )
 
 
@@ -186,10 +186,12 @@ def hooks_problems():
 
 
 def gate_paths(root=ROOT):
-    """门禁执行链路径：`scripts/check_*.py` 按磁盘展开成逐个脚本，另三个是单文件，
+    """门禁执行链路径：`scripts/check_*.py` 按磁盘展开成逐个脚本，包式门禁
+    （`scripts/check_*/` 目录，issue #169 PF-2）同枚举，另三个是单文件，
     再加 `.githooks/` 下全部钩子（issue #78：钩子是门禁的执行入口，改它同样能
     静默削弱门禁链）。钩子按磁盘枚举，将来加钩子自动进链；目录不存在返回空。"""
     paths = [f'scripts/{path.name}' for path in sorted((root / 'scripts').glob('check_*.py'))]
+    paths += [f'scripts/{path.name}' for path in sorted((root / 'scripts').glob('check_*/'))]
     paths += ['scripts/gates.json', 'scripts/run_gates.py', '.github/workflows/ci.yml']
     hooks = root / '.githooks'
     if hooks.is_dir():

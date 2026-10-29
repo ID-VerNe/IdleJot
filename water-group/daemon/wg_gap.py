@@ -80,18 +80,27 @@ def _local_state(group_id):
     """该群在 chat_inbox 里已有的 onebot_message_id 集合 + 最新一条 epoch 秒。
 
     与 issue #114 现象段那条复现命令同款 diff：`conversation_id` 形如 `1:group:123`，
-    按 `endswith(':' + group_id)` 认群。`at` 是 chat_inbox 的 REAL 列（epoch 秒），
-    不从 payload 解析——`max(at)` 就是窗口左边界。
+    按 `wg_event_ref.group_of(cid) == group_id` 认群（字段结构判定，issue #211）。
+    `at` 是 chat_inbox 的 REAL 列（epoch 秒），不从 payload 解析——`max(at)` 就是
+    窗口左边界。
 
-    群号走 `wg_event_ref.row_conversation()`（payload 优先、会话行兜底，issue #219）：
+    会话号走 `wg_event_ref.row_conversation()`（payload 优先、会话行兜底，issue #219）：
     只读 payload 时，缺这个键的行会被静默判成别的群，缺口于是报得比实际大。
+
+    issue #211：认群用 `group_of(cid) == gid` 而不是 `endswith(':' + gid)`。`row_conversation`
+    取回的是完整 cid（`<account>:group:<gid>` 或 `<account>:direct:<uid>`），`endswith`
+    不校验字段结构——同库里一个 `:direct:<user_id>` 会话的 user_id 恰好等于某群号时
+    （`100000:direct:12345` 同样以 `:12345` 结尾），私聊消息会被当成「本机已收的群消息」，
+    缺口少报、`last_time` 取到别会话的时间。`group_of` 按 `split(':')` 取
+    `parts[1]=='group'` 才认，私聊返回空串不串。`group_of` 与 `row_conversation` 同在
+    `wg_event_ref`，无新 import。
     """
+    gid = str(group_id or "")
     ids = set()
     last_time = None
     con = _db()
     if con is None:
         return ids, last_time
-    suffix = ":" + str(group_id)
     # 会话号一并取回（LEFT JOIN，issue #219）：payload 缺 `conversation_id` 的行
     # 以前在这里被判成「不是这个群」，那一批消息既不算进 ids，也推不动窗口左边界
     # ——缺口会被报成比实际更大。口径同 `wg_event_ref.row_conversation()`。
@@ -119,7 +128,7 @@ def _local_state(group_id):
                 continue
             cid = wg_event_ref.row_conversation(
                 {"payload": pl, "conversation_id": session_cid})
-            if not cid.endswith(suffix):
+            if wg_event_ref.group_of(cid) != gid:
                 continue
             if pl.get("onebot_message_id"):
                 ids.add(str(pl["onebot_message_id"]))

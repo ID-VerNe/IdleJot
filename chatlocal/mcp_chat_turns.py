@@ -30,6 +30,17 @@ RANGES = dict(quiet_seconds=(.1,5), max_collect_seconds=(1,30), reply_cooldown_s
               batch_ttl_seconds=(10,300), plan_ttl_seconds=(5,180), bubble_min_seconds=(.1,5),
               bubble_max_seconds=(.1,10), bubble_seconds_per_char=(0,.2),
               quote_threshold=(1,100), detail_budget_seconds=(.1,10))
+# 计划通道里所有「等待秒数」上限的同源常量（issue #221）。过去三处各写一个 30：
+# `plan_chat_reply.wait_seconds` 的 schema maximum、recovery 夹 `needs_wait`/
+# `reply_cooldown` 给出的指导值用的 `min(30,…)`、`wait_chat_messages.
+# minimum_wait_seconds` 的 schema maximum——而 `reply_cooldown` 抛出的
+# `wait_seconds` 按 `reply_cooldown_seconds-(now-prev)` 算，最大可达 RANGES 的上
+# 限 60。三个 30 没有一个是从 60 推出来的，于是冷却配成 45 时指导值被静默压成 30、
+# schema 也只接 30，变成「等 30、被拒、再等」两步空转。上限就取冷却的上限：`needs_wait`
+# /`reply_cooldown` 算出来的 `wait_seconds` 不会超过它，按它夹就是「等到能再试」，而
+# 不是「等一半又被拒」。schema 与 recovery 都从它取值，`check_mcp_chat_turns.py`
+# 门禁钉住冷却超 30 时指导值不被压成 30。
+TURN_MAX_WAIT_SECONDS = RANGES['reply_cooldown_seconds'][1]
 
 
 class TurnRejected(ValueError):
@@ -65,7 +76,8 @@ def schema(tool):
              topic_terms=dict(type='array',maxItems=6,uniqueItems=True,items=dict(type='string',minLength=2,maxLength=24)),
              expressions=dict(type='array',maxItems=3,uniqueItems=True,description='action=reply 时非空；ask/wait/silence 省略或传 []。',items=dict(type='string',enum=['text','sticker','reaction','voice','video','file','ai_voice','qq_action'])),
              intent=dict(type='string',minLength=1,maxLength=200),
-             wait_seconds=dict(type='number',minimum=0,maximum=30)),
+             wait_seconds=dict(type='number',minimum=0,maximum=TURN_MAX_WAIT_SECONDS,
+                description='action=wait 时计划内的推迟秒数，只推迟本轮发送决定，不承诺到点自动叫醒；上限与冷却同源（见 TURN_MAX_WAIT_SECONDS）。')),
         ['session_id','batch_id','action','intent']),
         tool('send_chat_reply',
         'Replyer 阶段：按 READY 计划一次提交 1–12 个语义气泡，不按标点机械拆句。'
@@ -145,7 +157,11 @@ class ChatTurns:
             result['recovery']=dict(action='refresh_and_replan',automatic_write_retry=False,
                 next_call=self.recovery_read(sid))
         elif exc.code in {'needs_wait','reply_cooldown','source_unavailable','queue_busy'}:
-            delay=min(30,max(1,exc.details.get('wait_seconds',2)))
+            # `needs_wait`/`reply_cooldown` 给出的 `wait_seconds` 可达冷却上限 60（issue
+            # #221）：夹到 TURN_MAX_WAIT_SECONDS 是「等到能再试」，夹到写死的 30 是
+            # 「等一半又被拒」——后者让冷却配成 45 时变成固定的两步空转。缺省 2 是
+            # details 里没有 wait_seconds 时的兜底（source_unavailable/queue_busy）。
+            delay=min(TURN_MAX_WAIT_SECONDS,max(1,exc.details.get('wait_seconds',2)))
             continuation=self.chat.continuation(sid)
             continuation['arguments']['minimum_wait_seconds']=delay
             result['recovery']=dict(action='wait',automatic_write_retry=False,

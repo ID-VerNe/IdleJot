@@ -8,7 +8,7 @@ language learning) are not listed here: ``mcp_tools`` fans them out through
 the app plugin registry after these rows.
 """
 from .mcp_chat_limits import WAIT_TIMEOUT_SECONDS
-from .mcp_chat_turns import schema as turn_schemas
+from .mcp_chat_turns import TURN_MAX_WAIT_SECONDS, schema as turn_schemas
 from .mcp_schemas import SESSION_ID_DESCRIPTION, event_id, idempotency_key, session_id
 
 
@@ -44,7 +44,7 @@ def schemas(tool):
                   known_prompt_version=dict(type='string', maxLength=120),
                   response_format=dict(type='string',enum=['compact','full'],default='compact',description='默认只返回动态参与信息；完整人格和规则由 start/get 提供。排查时可选 full。'),
                   timeout_seconds=dict(type='number', minimum=1, maximum=180, default=WAIT_TIMEOUT_SECONDS),
-                  minimum_wait_seconds=dict(type='number',minimum=0,maximum=30,default=0,description='通常沿用 recovery.next_call；重试前在程序内等待，避免旧批次立即返回造成忙等。可被停止或取消打断，不超过 timeout_seconds。'),
+                  minimum_wait_seconds=dict(type='number',minimum=0,maximum=TURN_MAX_WAIT_SECONDS,default=0,description='本次调用的等待下限，通常沿用 recovery.next_call；重试前在程序内等待，避免旧批次立即返回造成忙等。上限与冷却同源（见 TURN_MAX_WAIT_SECONDS）：recovery 按冷却给出的等待秒数可达 60，schema 只接 30 会让冷却配大时指导值被静默压小（issue #221）。可被停止或取消打断，不超过 timeout_seconds。'),
                   quiet_seconds=dict(type='number', minimum=0, maximum=5, default=2),
                   limit=dict(type='integer', minimum=1, maximum=50, default=30),
                   mention_only=dict(type='boolean', default=False, description='设为 true 时，仅在收到明确 @ 机器人账号或引用机器人的消息时才唤醒返回；普通群友闲聊在后台保持静默等待并维护上下文窗口，极大节省 Token。'),

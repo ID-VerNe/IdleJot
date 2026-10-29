@@ -37,6 +37,7 @@ import sys
 import time
 
 from wg_daemon import pid_alive, read_json  # noqa: E402  (issue #11 PB: 助手收口)
+import wg_budget  # noqa: E402  (issue #230：--wait 默认走预算口径)
 from reload_exec import (  # noqa: E402  (issue #11 PD: 执行层)
     Reloader,
     _heartbeat_age,
@@ -175,7 +176,8 @@ def main(argv=None):
     parser.add_argument("--only", metavar="app,commands", help="只处理指定 target")
     parser.add_argument("--dry-run", action="store_true", help="只打印计划，不执行")
     parser.add_argument("--full", action="store_true", help="P0 未支持：连 guard 一起换")
-    parser.add_argument("--wait", type=float, default=120, help="等待结果秒数（默认 120）")
+    parser.add_argument("--wait", type=float, default=wg_budget.WAIT_BUDGET,
+                        help=f"等待结果秒数（默认 {wg_budget.WAIT_BUDGET}，= WAIT_BUDGET，issue #230）")
     parser.add_argument("--status", action="store_true", help="读取上次重载状态")
     parser.add_argument("--config", action="store_true", help="只重启吃 config 的进程")
     parser.add_argument("--requested-by", default="agent")
@@ -228,6 +230,18 @@ def main(argv=None):
     print(f"已投递 nonce={request['nonce']} mode={mode} guard={guard}")
     if args.wait <= 0:
         return 0
+    # 超预算的显式取值自己说一声（issue #230）。reload 与 listen/reply 不同：等待是「等
+    # 满 / 不等」二选一，没有「压回预算后继续等」的语义——静默夹断会把用户「我就是要
+    # 等 120s」改成另一个数，是谎言；所以这里**不 clamp**，只把事实说在前头。WARN 必须
+    # 打在等待之前：被宿主在 AGENT_TOOL_TIMEOUT 处截断进程树时，_wait_result 的超时
+    # 分支（:151-152、:233-234）来不及执行，Agent 看到的最后一行就停在这里，分不清被
+    # 杀还是还在等。默认值 = WAIT_BUDGET，不打 WARN。逃生口是 --wait 0（只投递）+
+    # --status 轮询，与 reply.py:713-717 的 shorter_hint 同一个思路。
+    if wg_budget.over_budget(args.wait):
+        print(f"WARN: --wait {args.wait}s 加上发送余量 {wg_budget.SEND_BUDGET}s 已超过常见工具调用"
+              f"超时 {wg_budget.AGENT_TOOL_TIMEOUT}s；guard 可能在写回结果前被宿主截断进程树，"
+              f"这条路径上不会打印结果。要只投递不等待：--wait 0（再 --status 轮询）",
+              flush=True)
     result = _wait_result(request["nonce"], args.wait, guard)
     _print_result(result)
     if result is None:

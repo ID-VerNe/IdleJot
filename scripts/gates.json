@@ -68,7 +68,7 @@
     {"name": "check_pollution_scrub.py", "shard": "storage", "why": "跨群主档污染审计、清理与还原（#34）"},
     {"name": "check_qr_login.py", "shard": "storage", "why": "每用户扫码登录：passport 双流、DPAPI、限流、隐私（#6）"},
     {"name": "check_upgrade.py", "shard": "storage", "why": "升级用真实 SQLite/WAL 夹具"},
-    {"name": "check_hot_reload.py", "shard": "storage", "why": "全栈热重载：闭包覆盖、target 映射、debounce、quarantine、不 spawn（#58）"},
+    {"name": "check_hot_reload.py", "shard": "storage", "why": "全栈热重载：闭包覆盖、target 映射、debounce、quarantine、不 spawn（#58）；--wait 默认走 wg_budget.WAIT_BUDGET、reload.ps1 不补发字面量、over_budget(120) 反例（#230）"},
     {"name": "check_anti_habituation.py", "shard": "reply", "why": "反语癖固化与多样性提示词注入"},
     {"name": "check_plan_recovery.py", "shard": "reply", "why": "stale 拒绝后的重规划（plan_id 为 None 也不崩）"},
     {"name": "check_wake_ledger.py", "shard": "reply", "why": "已回判定：一条回复不得把后续 @ 洗成已回"},

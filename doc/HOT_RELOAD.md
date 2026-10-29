@@ -5,7 +5,7 @@
 ## 快速使用
 
 ```powershell
-# 改完代码，默认等待 120 秒
+# 改完代码，默认等待预算秒数（90，= wg_budget.WAIT_BUDGET，issue #230）
 .\reload.ps1
 
 # 只看计划，不执行

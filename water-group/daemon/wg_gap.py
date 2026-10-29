@@ -37,6 +37,7 @@ from pathlib import Path
 
 import wg_clock  # noqa: E402  (漏掉的 @ 的时间戳按同一份渲染口径)
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #4 PA0)
+import wg_isolation  # noqa: E402  (group_of：本群认群的全仓唯一口径，issue #211)
 import wg_text  # noqa: E402  (issue #169 PC：connect_ro 延迟导入门面)
 from wg_paths import data_dir, state_dir  # noqa: E402
 
@@ -79,23 +80,30 @@ def _local_state(group_id):
     """该群在 chat_inbox 里已有的 onebot_message_id 集合 + 最新一条 epoch 秒。
 
     与 issue #114 现象段那条复现命令同款 diff：`conversation_id` 形如 `1:group:123`，
-    按 `endswith(':' + group_id)` 认群。`at` 是 chat_inbox 的 REAL 列（epoch 秒），
-    不从 payload 解析——`max(at)` 就是窗口左边界。
+    按 `wg_isolation.group_of(cid) == group_id` 认群（全仓唯一口径，issue #211）。
+    `at` 是 chat_inbox 的 REAL 列（epoch 秒），不从 payload 解析——`max(at)` 就是
+    窗口左边界。
+
+    issue #211：改前用 `endswith(':' + group_id)`，不校验 cid 的字段结构。群号互为
+    后缀（`12345` / `2345`）**不会**串——`<account>:group:12345` 整串以 `:12345`
+    结尾、不以 `:2345` 结尾。真正串的是同库里的 `:direct:<user_id>` 会话：user_id
+    恰好等于某群号时（`100000:direct:12345` 同样以 `:12345` 结尾），私聊消息被当成
+    「本机已收的群消息」，缺口少报、`last_time` 取到别会话的时间。`group_of` 按
+    `split(':')` 取 `parts[1]=='group'` 才认，私聊返回空串，不串。
     """
+    gid = str(group_id or "")
     ids = set()
     last_time = None
     con = _db()
     if con is None:
         return ids, last_time
-    suffix = ":" + str(group_id)
     try:
         for at, payload in con.execute("SELECT at, payload FROM chat_inbox ORDER BY at"):
             try:
                 pl = json.loads(payload)
             except (ValueError, TypeError):
                 continue
-            cid = str(pl.get("conversation_id") or "")
-            if not cid.endswith(suffix):
+            if wg_isolation.group_of(pl.get("conversation_id")) != gid:
                 continue
             if pl.get("onebot_message_id"):
                 ids.add(str(pl["onebot_message_id"]))

@@ -7,17 +7,18 @@
 报 `NO_WORK`——「没人叫我」与「有人叫过但机器不在」无法区分，直到人肉翻
 `get_group_msg_history` 才发现窗口内 33 条、其中 1 条 @ 本机。
 
+
 这条门禁钉住下面这些契约（编号是分组），任何一处退回旧行为都红：
 
 1. `wg_gap.compute()` 的 diff 正确：夹具 `chat_inbox` 有 a/b/c，假
    `get_group_msg_history` 返回 a/b/c/d/e（d/e 在停机窗口内、e 是 @ 本机），
    返回 `missing=2, at_me=1`，`at_me_lines` 含 e 的 sender + 时间 + 正文片段。
-2. `wg_gap.describe()` 在缺口非空时报出 missing / at_me 计数；无记录或缺口为空
-   时返回空串（排除型对照：恒加注脚的实现红在后半条，与 #112 同口径）。
-3. `up.py --status` 的「缺口」行在缺口非空时出现、为空时不加字（只读 `wg_gap.json`，
-   不联网、不写——保住 `--status`「只看不动」契约）。
+2. `wg_gap.describe()` 在缺口非空时报 missing / at_me 计数；无记录或缺口为空时
+   返回空串（排除型对照：恒加注脚的实现红在后半条，与 #112 同口径）。
+3. `up.py --status` 的「缺口」行在缺口非空时出现、为空时不加字（只读
+   `wg_gap.json`，不联网、不写——保住「只看不动」契约）。
 4. `listen.py` 的 NO_WORK 路径在缺口非空时插一行提示，且 `RESTART:` 仍是末行
-   （#69 / #112 契约 1/9 不变）。WAKE 路径不插提示（Agent 已被叫醒）。
+   （#69/#112 契约 1/9 不变）。WAKE 路径不插提示（Agent 已被叫醒）。
 5. `reply.py --list` 在缺口非空时列出漏掉的 @ 本机消息（行首 `id=-`，区别于真
    唤醒行），为空时不加段。
 6. `get_group_msg_history` 单次 200 上限语义（候选 4）：返回的最老一条仍新于
@@ -29,18 +30,15 @@
 9. 本地一条都没有（首次部署 / 换群）不报缺口——与「停机漏收」区分，否则新部署
    会把群里全部历史都算成「漏的」。
 10. 窗口右边界取 `napcat_launch.json:started_epoch`，读不到时回落 `computed_at`。
-11. 缺口非空时 `describe()` 必须带上**窗口起止**与**账本计算时刻**，且明写「仅供参考」
-    （issue #148）：账本只在 collector 启动时算一次，不带时刻时三小时前的早晨停机
-    账本与几分钟前的新缺口同形，Agent 会把旧账读成现刻事故。无缺口时仍返回空串
-    （排除型对照：恒加注脚的实现红在后半条）。
-12. 窗口**跨天**时两端补 `MM-DD`，同一天**不**补（issue #148）：只写 `07:21–09:30`
-    的话，下午读起来像今天早上漏的，而它可能是前一夜。对照：恒带日期的实现红在
-    同一天那条，恒不带的红在跨天那条。
-13. `at_me_lines()` 的时间戳带日期（`YYYY-MM-DD HH:MM:SS`），与唤醒行的
-    `HH:MM:SS` 不同形（issue #148）——漏掉的 @ 可能是昨夜停机时段的。
-14. `reply.py --list` 的缺口段标题下面紧跟窗口上下文（与 `--status` 同一份措辞），
-    且排在 `id=-` 行之前（issue #148）：只列漏掉的 @ 而不给窗口时，读者仍然分不清
-    这是昨夜停机账本还是刚发生的事故。
+11. 缺口非空时 `describe()` 带窗口起止 + 账本计算时刻 + 明写「仅供参考」（#148）：
+    账本只在 collector 启动时算一次，不带时刻时旧账与新缺口同形。无缺口时仍空串。
+12. 跨天窗口两端补 `MM-DD`，同一天不补（#148）。13. `at_me_lines()` 时间戳带
+    日期，与唤醒行的 `HH:MM:SS` 不同形（#148）。14. `--list` 缺口段标题下紧跟
+    窗口上下文、排在 `id=-` 行之前（#148）。
+15. 认群按 `wg_isolation.group_of()`，不按 `endswith(':' + gid)`（#211）：同一本
+    `chat_inbox` 里群号互为后缀的两群 + 一本 user_id 等于群号的私聊会话，旧后缀
+    匹配把私聊串进群、`local_ids` 与 `window_start` 都错，缺口少报；`group_of`
+    按 cid 字段结构认群不串。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_DB`，不碰实机状态：
 
@@ -76,6 +74,7 @@ import up  # noqa: E402
 import wg_clock  # noqa: E402
 import wg_config  # noqa: E402  (config.json 的唯一读取口；CONFIG 在 import 期求值，需打桩)
 import wg_gap  # noqa: E402
+import wg_isolation  # noqa: E402  (group_of：认群口径的 oracle，issue #211)
 import wg_listener_state  # noqa: E402  (与 #112 账本同构，对照用)
 import reply  # noqa: E402  (list_wakes 用例需要；模块级 import 触发不进 daemon loop)
 
@@ -846,23 +845,16 @@ def 漏收at的时间戳带日期():
        这类实现的消息可能距 now 只有几十秒、却仍属「今天」，第 3 组够不着。
 
     第 3、4 组互补且不可互替：第 3 组的消息时刻是**固定**的（当天 00:01:01），
-    距 now 多远完全取决于运行时刻——只有在 00:01–01:01 之间跑时才恰好紧贴
-    now，其余时间它离 now 几小时到二十几小时；第 4 组的消息时刻是**相对 now
-    构造**的（`now - 60`），永远紧贴 now。`57b8ccc` 曾把第 4 组整个换成第 3 组，
-    结果 recency 类实现在 288 个时刻里 275 个假绿。
+    距 now 多远完全取决于运行时刻——只有在 00:01–01:01 之间跑时才恰好紧贴 now，
+    其余时间它离 now 几小时到二十几小时；第 4 组的消息时刻是**相对 now 构造**的
+    （`now - 60`），永远紧贴 now。`57b8ccc` 曾把第 4 组整个换成第 3 组，结果
+    recency 类实现在 288 个时刻里 275 个假绿。
 
     本用例仍覆盖不到的（都是固定夹具的已知边界，base 与本 PR 同假绿，非本 PR
-    引入，`#154` 复核逐条列出）：
-
-    - 把日期**硬编码**成某一组固定夹具那一天的实现。多组夹具提高了它的成本但
-      没根除（两组固定日期 + 两组运行日构造）。
-    - `missing == 0` 时省掉日期的实现。`at_me_lines()` 的契约是「漏收行必须带
-      日期」，与「本群是否真漏了消息」无关；夹具固定 `missing=1`，该分支不触发。
-    - 把未来时刻 `min(msg, now)` 夹到 now 的实现。夹具消息恒在过去或恰在 now
-      附近，夹取后与正确实现同形。
-
-    所以本用例的判据是「这四类条件式退化必红」，不是「任何错日期都会红」——
-    docstring 不这么声称。
+    引入，`#154` 复核逐条列出）：硬编码成某组固定夹具那一天；`missing==0` 时省日期
+    （夹具固定 `missing=1`，该分支不触发）；把未来时刻 `min(msg, now)` 夹到 now
+    （夹具消息恒在过去或恰在 now 附近，夹取后与正确实现同形）。所以判据是「这四类
+    条件式退化必红」，不是「任何错日期都会红」——docstring 不这么声称。
     """
     for _name, s, e, missed in GAP_FIXTURES:
         start, end, msg_at = local_epoch(*s), local_epoch(*e), local_epoch(*missed)
@@ -877,16 +869,12 @@ def 漏收at的时间戳带日期():
         if not _gap_line_ok(start, end, msg_at):
             return False
     # 第 3 组（当天零点后，运行日构造）：专抓「今天的消息不带日期」这类条件式
-    # stamp（#153 J）。
-    #
-    # 为什么这组必须存在：J 的坏行为只在「消息日 == 实现读到的今天」时出现，固定
-    # 日期夹具只能靠「运行日恰好等于那个固定日」撞上，撞不上就假绿（`447ca55` 上
-    # J 今天恰好 `False` 就是这个巧合）。
-    #
-    # 窗口必须**落在同一个自然日**，否则「跨天才补日期」那类实现会走 `stamp()`
-    # 分支、输出恰好正确，这组就抓不住它。用固定偏移做不到（`now - 1800` 在
-    # 00:29 跑就跨天），所以取「运行日当天零点后 1 秒 → +120 秒」，消息落在
-    # 中间。三者必然同一天、必然都在「今天」，与运行时刻无关。
+    # stamp（#153 J）。J 的坏行为只在「消息日 == 实现读到的今天」时出现，固定日期
+    # 夹具只能靠「运行日恰好等于那个固定日」撞上，撞不上就假绿（`447ca55` 上 J 今天
+    # 恰好 `False` 就是这个巧合）。窗口必须落在同一个自然日，否则「跨天才补日期」
+    # 那类实现会走 `stamp()` 分支、输出恰好正确，这组抓不住它。用固定偏移做不到
+    # （`now - 1800` 在 00:29 跑就跨天），所以取「运行日当天零点后 1 秒 → +120 秒」，
+    # 消息落在中间。三者必然同一天、必然都在「今天」，与运行时刻无关。
     now = int(time.time())
     day_start = int(time.mktime(tuple(time.localtime(now)[:3]) + (0, 0, 1, 0, 0, -1)))
     win_start, win_end = day_start, day_start + 120
@@ -899,17 +887,105 @@ def 漏收at的时间戳带日期():
 
     # 第 4 组（相对 now）：专抓「最近 N 小时内退回 `clock()`」这类**按消息新旧**
     # 判定的实现（#153 复核 `recency-1h`）。第 3 组的消息离 now 最远可达 23 小时，
-    # 一个「1 小时内算刚漏的」实现完全可以在那组上走 `stamp()` 分支、输出正确，
-    # 却在真正紧贴 now 的消息上退回 `clock()`——而那正是生产里最常出现的情形。
-    #
-    # 偏移取 `now - 7200 → now`（消息 `now - 60`）而不是更小：窗口两端差 2 小时，
-    # 消息落在其中，仍属「今天」的概率高；窗口跨午夜时「跨天才补日期」类实现会
-    # 走 `stamp()` 分支输出正确，但那一类已被第 2 组（同日固定窗口）堵住，这里
-    # 只需保证 recency 维度被覆盖，不必也不该再要求「窗口同一天」（那会让 00:00
-    # 附近跑时这组直接失效，正是 `57b8ccc` 之前 `now-1800` 踩过的坑）。
+    # 一个「1 小时内算刚漏的」实现完全可以在那组上走 `stamp()` 分支、输出正确，却在
+    # 真正紧贴 now 的消息上退回 `clock()`——而那正是生产里最常出现的情形。偏移取
+    # `now - 7200 → now`（消息 `now - 60`）而不是更小：窗口两端差 2 小时，消息落在
+    # 其中，仍属「今天」的概率高；窗口跨午夜时「跨天才补日期」类实现会走 `stamp()`
+    # 分支输出正确，但那一类已被第 2 组（同日固定窗口）堵住，这里只需保证 recency
+    # 维度被覆盖，不必也不该再要求「窗口同一天」（那会让 00:00 附近跑时这组直接
+    # 失效，正是 `57b8ccc` 之前 `now-1800` 踩过的坑）。
     if not _gap_line_ok(now - 7200, now, now - 60):
         return False
     return True
+
+
+# ---------- 契约 15：认群按 group_of，不按 endswith（issue #211）----------
+
+
+def _oracle_local_state(home, gid):
+    """以 `wg_isolation.group_of()` 为 oracle 算期望的 `(ids, last_time)`：与
+    `_local_state` 同一份 `chat_inbox`、同一份 `json.loads`，只换认群判定。钉的是
+    「`_local_state` 真用了 group_of、没退回 `endswith`」，不是 group_of 本身对不对。
+    """
+    gid = str(gid)
+    ids = set()
+    last_time = None
+    db = sqlite3.connect(str(home / "data" / "mcp-access.sqlite3"))
+    try:
+        for at, payload in db.execute("SELECT at, payload FROM chat_inbox ORDER BY at"):
+            try:
+                pl = json.loads(payload)
+            except (ValueError, TypeError):
+                continue
+            if wg_isolation.group_of(pl.get("conversation_id")) != gid:
+                continue
+            if pl.get("onebot_message_id"):
+                ids.add(str(pl["onebot_message_id"]))
+            if at:
+                last_time = int(at)
+    finally:
+        db.close()
+    return ids, last_time
+
+
+@case
+def 认群按group_of不按endswith():
+    """issue #211：`_local_state` 按 cid 字段结构认群，不按后缀。同一本 `chat_inbox`
+    三本会话：群 A（`12345`，`gA`）、群 B（`2345`，与 A 互为后缀，`gB`）、私聊
+    （`direct:12345`，user_id 等于群 A 号，`dA`）。旧 `endswith` 在群 A 上把私聊
+    `dA` 串进来（`100000:direct:12345` 同样以 `:12345` 结尾）；群 B 互为后缀**不**
+    串（整串后缀匹配挡住）。两群都查、以 `group_of` 为 oracle 断言 `ids` 与
+    `last_time` 一致——旧实现必须在群 A 的 `ids`（多出 `dA`）与 `last_time`（取到
+    私聊时间）上红。`last_time` 是 `window_start`，串错会把窗口左边界拉错。
+    """
+    acct = "100000"
+    gid_a, gid_b = "12345", "2345"
+    rows = [("gA", 1793000000, f"{acct}:group:{gid_a}"),
+            ("gB", 1793000500, f"{acct}:group:{gid_b}"),
+            # 私聊 user_id 等于群 A 号：endswith 会把它算进群 A
+            ("dA", 1793000900, f"{acct}:direct:{gid_a}")]
+    with temp_dir(prefix="wg-gap-") as home:
+        fixture_home(home)
+        restore = gap_at(home)
+        try:
+            seed_inbox(home, rows)
+            got_a, got_b = wg_gap._local_state(gid_a), wg_gap._local_state(gid_b)
+            exp_a, exp_b = _oracle_local_state(home, gid_a), _oracle_local_state(home, gid_b)
+        finally:
+            restore()
+    return got_a == exp_a and got_b == exp_b
+
+
+@case
+def 私聊同号不串入群缺口():
+    """issue #211 下游：私聊串进 `local_ids` 让 `compute()` 少报缺口。chat_inbox：
+    群 A 收过 `g0`（now-3600）；私聊 user_id=群号 有 `gA`（now-1800，更晚——同时
+    污染 `last_time`/`window_start`）。history 一条 `gA`（now-600，窗口内）——群 A
+    真没收到，应当 missing=1。旧 `endswith` 把私聊 `gA` 算进 `local_ids` 且
+    `last_time` 取到 now-1800：`gA` 被判「已收」→ missing=0。新实现
+    `local_ids={g0}`、`last_time=now-3600`：missing=1。OneBot 消息 id 是按会话递增
+    的序列号，私聊与群消息撞同一数字 id 在真实数据里不罕见——这正是串扰能少报缺口
+    的现实路径。
+    """
+    acct = "100000"
+    gid = "12345"
+    now = int(time.time())
+    with temp_dir(prefix="wg-gap-") as home:
+        fixture_home(home)
+        restore = gap_at(home)
+        try:
+            write_launch(home, now)
+            seed_inbox(home, [
+                ("g0", now - 3600, f"{acct}:group:{gid}"),
+                # 私聊 user_id 等于群号：endswith 会把 gA 算进群 local_ids
+                ("gA", now - 1800, f"{acct}:direct:{gid}"),
+            ])
+            # history 里群 A 真没收到 gA（窗口内）——应当 missing=1
+            msgs = [onebot_msg("gA", now - 600, "乙", "在吗", at_qq=acct)]
+            g = wg_gap.compute(group_ids=[gid], fetch=make_fetcher(msgs), now=now)["groups"][gid]
+        finally:
+            restore()
+    return g["missing"] == 1 and g["window_start"] == now - 3600
 
 
 def main():

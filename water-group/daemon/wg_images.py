@@ -20,15 +20,23 @@ import base64
 import hashlib
 import io
 import json
+import os
+import secrets
 import stat
 import time
 import warnings
+from contextlib import contextmanager
 from pathlib import Path
 
 from wg_paths import state_dir
 
 IMAGES = state_dir() / "images"
 INDEX = IMAGES / "index.jsonl"
+# 与索引文件分属两个文件的锁：读侧 ``load_index()`` 不碰锁、永不阻塞。锁的是「读-改-
+# 写整段」的互斥（issue #228），不是单实例占位——后者用 ``commands.py`` 的 O_EXCL
+# 文件锁，留下死锁文件要手删；这里用 ``msvcrt.locking`` 锁首字节，持锁进程被硬杀
+# （``taskkill /F``）时 Windows 关闭其句柄、字节锁自动释放，新进程立刻接管。
+LOCK = IMAGES / "index.lock"
 MAX_BYTES = 6 * 1024 * 1024       # 与 MCP 单张图上限一致
 # 一次回复最多几张图：每条气泡之间 `reply.BUBBLE_GAP` 睡 1.2s，25 张就吃满
 # `wg_budget.SEND_BUDGET`，宿主 120s 超时会把整条调用连同输出一起砍掉——那种
@@ -91,19 +99,80 @@ def find_local_by_sha(sha):
     return ""
 
 
+# ``msvcrt`` 是 Windows 标准库；仓库 Windows-only（CI ``windows-latest``，daemon 脚本
+# 在非 Windows 上由 ``reload_plan``/``supervisor``/``watchdog`` 直接拒绝启动），所以不
+# 引入 POSIX ``fcntl`` 分支、也不留 ``O_EXCL`` 兜底——后者被硬杀后留死锁文件、正是本
+# 场景要避开的失败模式。模块级 import 守住 ``import wg_images`` 在非 Windows 上不炸，
+# 真正进 ``_locked()`` 时给一个明确错误而非静默退化。
+try:
+    import msvcrt
+except ImportError:  # 非 Windows：不会跑到（上游已拒绝），留 None 让 _locked 明确报错
+    msvcrt = None
+
+
+@contextmanager
+def _locked():
+    """跨进程互斥锁住 ``index.jsonl`` 的读-改-写（issue #228）。
+
+    锁的是 ``index.lock`` 的首字节，不是索引文件本身——读侧 ``load_index()`` 不进锁、
+    永不阻塞。``msvcrt.LK_LOCK`` 自旋阻塞到拿到锁。锁内只做本地文件 I/O，无网络/sleep/
+    MCP 调用，持锁时长毫秒级。
+
+    持锁进程被 ``taskkill /F`` 硬杀时，Windows 关闭其文件句柄、字节锁自动释放——本机
+    实测 ``terminate()`` 后新进程立刻拿到锁。这不像 ``O_EXCL`` 文件锁那样留下死锁文件
+    要 ``clear_stale_lock()`` 手删（``commands.py`` 那套是「单实例占位」，本场景要的是
+    「互斥」，不沿用）。
+    """
+    if msvcrt is None:
+        raise RuntimeError("wg_images index lock requires Windows (msvcrt); "
+                           "the water-group daemon is Windows-only")
+    IMAGES.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(LOCK), os.O_CREAT | os.O_RDWR)
+    try:
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        yield
+        try:
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+    finally:
+        os.close(fd)
+
+
 def upsert(rows):
-    """追加索引行；超过上限时重写为最近 MAX_INDEX_ROWS 条。"""
+    """追加索引行；超过上限时在锁内压实为最近 ``MAX_INDEX_ROWS`` 条。
+
+    旧实现是无锁读-改-写：``read_text`` 全文 → ``extend`` → ``tmp.replace(INDEX)``。
+    两个写者进程（collector 落盘、``look.py`` 补读）时间重叠时各自读到同一份旧文、各自
+    加自己那行再整份 ``replace``，后完成者把先写者刚落盘的行整个抹掉（issue #228）；
+    固定名 ``index.jsonl.tmp`` 还让两个写者互踩临时文件。
+
+    现在 ``_locked()`` 把读-改-写整段串起来：未超 ``MAX_INDEX_ROWS`` 时只追加新行（省掉
+    全文重写，直击「读满 4000 行拼串 + 写 tmp + replace」的成本），超限时在锁内压实重写
+    （读→留末尾 MAX→``replace``）。锁内只做本地 I/O，持锁毫秒级，不会挂死。
+    """
     rows = [r for r in rows if r.get("event_id") is not None]
     if not rows:
         return
     IMAGES.mkdir(parents=True, exist_ok=True)
-    existing = INDEX.read_text(encoding="utf-8").splitlines() if INDEX.exists() else []
-    existing.extend(json.dumps(r, ensure_ascii=False) for r in rows)
-    if len(existing) > MAX_INDEX_ROWS:
-        existing = existing[-MAX_INDEX_ROWS:]
-    tmp = INDEX.with_suffix(".jsonl.tmp")
-    tmp.write_text("\n".join(existing) + "\n", encoding="utf-8")
-    tmp.replace(INDEX)
+    payload = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+    with _locked():
+        if not INDEX.exists():
+            INDEX.write_text(payload, encoding="utf-8")
+            return
+        existing = INDEX.read_text(encoding="utf-8").splitlines()
+        total = len(existing) + len(rows)
+        if total <= MAX_INDEX_ROWS:
+            with open(INDEX, "a", encoding="utf-8") as fh:
+                fh.write(payload)
+            return
+        # 超上限：在锁内压实。留末尾 MAX_INDEX_ROWS 条（含本轮新行）。tmp 名带 pid + 随机
+        # 后缀，与 ``wg_daemon.write_json`` 一致，杜绝两写者互踩临时文件。
+        existing.extend(payload.splitlines())
+        compacted = existing[-MAX_INDEX_ROWS:]
+        tmp = INDEX.with_name(f"{INDEX.name}.tmp.{os.getpid()}.{secrets.token_hex(4)}")
+        tmp.write_text("\n".join(compacted) + "\n", encoding="utf-8")
+        tmp.replace(INDEX)
 
 
 def save_pixels(event_id, image_index, blocks, *, sender="", ts=None, quote_of=None,

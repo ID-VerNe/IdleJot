@@ -11,6 +11,8 @@ new-before-old, watchdog deferred) do not need a real process.
 from __future__ import annotations
 
 import ast
+import contextlib
+import io
 import json
 import os
 import sys
@@ -158,6 +160,66 @@ def check_watchdog_deferred():
     print("  ok  watchdog：NapCat 不健康时 deferred，不 terminate")
 
 
+def check_deferred_reports_failure():
+    """issue #229：推迟不是成功——code/ok/输出/state 四层都要说「未生效」。
+
+    老用例只测了 ``_restart_watchdog`` 的返回值，``_execute`` 里那个
+    ``code = 0 if not failed and not deferred else ...`` 从来没被跑过，
+    于是 deferred 一直拿到 code=0、ok=True，reload.ps1 退出 0。
+    """
+    reloader = reload.Reloader(
+        spawn=lambda name: None, healthy=lambda: False, verify=False)
+    plan = reload_plan.RestartPlan(
+        changed=["water-group/daemon/watchdog.py"], targets=["watchdog"])
+    result = reloader._execute(
+        "deferred-nonce", "reload", plan, {}, lambda name: None, time.monotonic())
+    assert result["deferred"] == ["watchdog"], result
+    assert result["restarted"] == [], result
+    assert result["ok"] is False, result
+    assert result["code"] == 5, result
+
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        reload._print_result(result)
+    out = printed.getvalue()
+    assert "未生效（推迟）: watchdog" in out, out
+    assert "not healthy" in out, out
+
+    reloader._write_state(last_result=result)
+    state = wg_daemon.read_json(reload._state(reload.STATE_NAME)) or {}
+    assert state.get("last_deferred") == ["watchdog"], state
+    assert state.get("last_deferred_at"), state
+    assert "推迟未生效：watchdog" in reload.status_line(), reload.status_line()
+
+    # 补做成功后要把「还欠一次」的记录撤掉，否则 --status 永远说上次推迟。
+    flip = {"healthy": False}
+    retry = reload.Reloader(
+        spawn=lambda name: FakeProc(name), healthy=lambda: flip["healthy"], verify=False)
+    retry._write_state(last_result=result)
+    retry.deferred.add("watchdog")
+    flip["healthy"] = True
+    retry._retry_deferred({"watchdog": FakeProc("old")}, lambda name: FakeProc(name))
+    assert "watchdog" not in retry.deferred, retry.deferred
+    state = wg_daemon.read_json(reload._state(reload.STATE_NAME)) or {}
+    assert not state.get("last_deferred"), state
+
+    # 对照组：全部成功仍然必须是 code=0 / ok=True，成功路径没被改坏。
+    ok_reloader = reload.Reloader(
+        spawn=lambda name: FakeProc(name), verify=False)
+    ok_plan = reload_plan.RestartPlan(
+        changed=["water-group/daemon/watchdog.py"], targets=["watchdog"])
+    ok_result = ok_reloader._execute(
+        "ok-nonce", "reload", ok_plan, {"watchdog": FakeProc("old")},
+        lambda name: FakeProc(name), time.monotonic())
+    assert ok_result["ok"] is True and ok_result["code"] == 0, ok_result
+    assert ok_result["restarted"] == ["watchdog"], ok_result
+    ok_reloader._write_state(last_result=ok_result)
+    state = wg_daemon.read_json(reload._state(reload.STATE_NAME)) or {}
+    assert not state.get("last_deferred"), state
+    assert "推迟未生效" not in reload.status_line(), reload.status_line()
+    print("  ok  推迟：code=5 / ok=False / 输出「未生效」/ state 记 last_deferred，补做后清账")
+
+
 def check_db_keeper_order():
     events = []
     old = FakeProc("old", events)
@@ -270,6 +332,7 @@ def main():
     check_debounce()
     check_single_flight()
     check_watchdog_deferred()
+    check_deferred_reports_failure()
     check_db_keeper_order()
     check_quarantine()
     check_no_port_spawn()

@@ -74,7 +74,7 @@ CLI 只做两件事：写 `~/.water-group/state/wg_reload.request`，轮询结�
 ## 状态与日志
 
 - `~/.water-group/state/wg_guard.json`：guard pid / 启动时间 / sandbox / build。
-- `~/.water-group/state/wg_reload_state.json`：watch 开关、上次时间/耗时/文件/重启 target，以及 `last_deferred` / `last_deferred_at`（推迟未生效的 target，补做成功后清掉；issue #229）。
+- `~/.water-group/state/wg_reload_state.json`：watch 开关、上次时间/耗时/文件/重启 target，以及 `last_deferred` / `last_deferred_at`——**还欠着、仍是旧代码**的 target。只有该 target 自己被成功重启（无论是这次请求还是下一 tick 的补做）才会从里面消失；别的 target 成功重载、或只切 `--watch` 开关，都不会抹掉它（issue #229）。
 - `~/.water-group/state/wg_reload_failed.json`：quarantine 状态。
 - `~/.water-group/state/wg_reload_snapshot.json`：上次成功重载后的文件指纹。
 - `~/.water-group/logs/wg-reload.log`：每次重载一行（含 `deferred=`）。

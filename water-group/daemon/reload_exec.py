@@ -506,14 +506,16 @@ class Reloader:
             if status == "ok":
                 self.deferred.discard(target)
                 self._clear_failure(target)
-                # 补上了就不再欠着：状态文件里那条「推迟未生效」要跟着撤掉，
+                # 补上了才清账：状态文件里那条「推迟未生效」要跟着撤掉，
                 # 否则 --status 会永远说上一次没做完（issue #229）。
                 self._clear_deferred(target)
                 _log(f"[reload] deferred retry ok {target}")
             elif status == "failed":
                 self.deferred.discard(target)
                 self._record_failure(target, why or "deferred retry failed")
-                self._clear_deferred(target)
+                # 失败说明代码还是旧的：账不能清。清掉的话 --status 立刻回到
+                # 「重启 -」，而跑的还是旧代码——正是 issue #229 要消灭的沉默
+                # （复核意见 2）。真正的失败由 quarantine 面另行报出。
 
     def tick(self, procs, spawn=None):
         spawn = spawn or self.spawn
@@ -610,29 +612,37 @@ class Reloader:
         write_json(_state(STATE_NAME), self.state)
 
     def _note_deferred(self, result):
-        """Remember which targets did not take effect (issue #229).
+        """Track which targets are still running old code (issue #229).
 
-        A deferred target means the changed code is still running the old
-        version.  ``self.deferred`` retries it inside a live guard; the state
-        file is what survives a guard restart, so ``--status`` can report the
-        fact instead of showing ``重启 -``.
+        This is a **debt set**, not a snapshot of the last result.  A target
+        leaves it only when that same target is restarted successfully; a clean
+        reload of some *other* target, or a ``--watch`` toggle that restarts
+        nothing, must not erase a debt that is still outstanding.  The record is
+        what survives a guard restart (``self.deferred`` does not), so
+        ``--status`` can keep saying "未生效" instead of "重启 -".
         """
-        deferred = [str(name) for name in (result.get("deferred") or [])]
-        if deferred:
-            self.state["last_deferred"] = deferred
-            self.state["last_deferred_at"] = time.time()
-        elif result.get("ok"):
-            # 一次干净的成功才清账；失败结果里的 target 已经由 failed 报出，
-            # 不该顺手把上一轮的推迟记录抹掉。
-            self.state["last_deferred"] = []
+        previous = [str(name) for name in (self.state.get("last_deferred") or [])]
+        pending = set(previous)
+        pending.difference_update(str(name) for name in (result.get("restarted") or []))
+        pending.update(str(name) for name in (result.get("deferred") or []))
+        self.state["last_deferred"] = sorted(pending)
+        if pending:
+            # 欠账起始时刻：只在「本来没欠」变「欠了」时记一次。
+            if not previous:
+                self.state["last_deferred_at"] = time.time()
+        else:
             self.state["last_deferred_at"] = None
 
     def _clear_deferred(self, target):
-        """Drop one target from the persisted deferral record (issue #229)."""
+        """Settle one target: it was restarted, so the debt is paid (issue #229)."""
         pending = [name for name in (self.state.get("last_deferred") or [])
                    if name != target]
-        if pending != list(self.state.get("last_deferred") or []):
-            self.state["last_deferred"] = pending
-            if not pending:
-                self.state["last_deferred_at"] = None
-            self._write_state()
+        restarted = [str(name) for name in (self.state.get("last_restarted") or [])]
+        if target not in restarted:
+            restarted.append(target)
+        self.state["last_restarted"] = restarted
+        self.state["last_at"] = time.time()
+        self.state["last_deferred"] = pending
+        if not pending:
+            self.state["last_deferred_at"] = None
+        self._write_state()

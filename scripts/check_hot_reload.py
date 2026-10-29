@@ -191,7 +191,34 @@ def check_deferred_reports_failure():
     assert state.get("last_deferred_at"), state
     assert "推迟未生效：watchdog" in reload.status_line(), reload.status_line()
 
-    # 补做成功后要把「还欠一次」的记录撤掉，否则 --status 永远说上次推迟。
+    # 欠账不是「上一次结果快照」：别的 target 干净成功、或只切 watch 开关，
+    # 都不能把还欠着的 watchdog 抹掉——否则 --status 又回到「重启 -」，而
+    # 跑的还是旧代码（复核意见 1）。
+    other_ok = reloader._result(
+        "other-nonce", "reload", time.monotonic(), ["commands"], [], [], [], [])
+    assert other_ok["code"] == 0 and other_ok["ok"] is True, other_ok
+    reloader._write_state(last_result=other_ok)
+    state = wg_daemon.read_json(reload._state(reload.STATE_NAME)) or {}
+    assert state.get("last_deferred") == ["watchdog"], state
+
+    watch_on = reloader._result(
+        "watch-nonce", "watch-on", time.monotonic(), [], [], [], [], [])
+    reloader._write_state(last_result=watch_on)
+    state = wg_daemon.read_json(reload._state(reload.STATE_NAME)) or {}
+    assert state.get("last_deferred") == ["watchdog"], state
+    assert "推迟未生效：watchdog" in reload.status_line(), reload.status_line()
+
+    # 补做失败：代码还是旧的，账不能清（复核意见 2）。
+    failing = reload.Reloader(spawn=lambda name: None, healthy=lambda: True, verify=False)
+    failing._write_state(last_result=result)
+    failing.deferred.add("watchdog")
+    failing._retry_deferred({"watchdog": FakeProc("old")}, lambda name: None)
+    assert "watchdog" not in failing.deferred, failing.deferred
+    state = wg_daemon.read_json(reload._state(reload.STATE_NAME)) or {}
+    assert state.get("last_deferred") == ["watchdog"], state
+
+    # 补做成功后要把「还欠一次」的记录撤掉，否则 --status 永远说上次推迟；
+    # 同时把这次重启记进 last_restarted，免得账清了却读成「什么都没重启」。
     flip = {"healthy": False}
     retry = reload.Reloader(
         spawn=lambda name: FakeProc(name), healthy=lambda: flip["healthy"], verify=False)
@@ -202,6 +229,8 @@ def check_deferred_reports_failure():
     assert "watchdog" not in retry.deferred, retry.deferred
     state = wg_daemon.read_json(reload._state(reload.STATE_NAME)) or {}
     assert not state.get("last_deferred"), state
+    assert "watchdog" in (state.get("last_restarted") or []), state
+    assert "推迟未生效" not in reload.status_line(), reload.status_line()
 
     # 对照组：全部成功仍然必须是 code=0 / ok=True，成功路径没被改坏。
     ok_reloader = reload.Reloader(
@@ -217,7 +246,7 @@ def check_deferred_reports_failure():
     state = wg_daemon.read_json(reload._state(reload.STATE_NAME)) or {}
     assert not state.get("last_deferred"), state
     assert "推迟未生效" not in reload.status_line(), reload.status_line()
-    print("  ok  推迟：code=5 / ok=False / 输出「未生效」/ state 记 last_deferred，补做后清账")
+    print("  ok  推迟：code=5 / ok=False / 输出「未生效」/ 欠账只被该 target 的成功清掉")
 
 
 def check_db_keeper_order():

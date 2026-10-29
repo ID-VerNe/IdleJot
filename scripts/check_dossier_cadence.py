@@ -53,6 +53,10 @@ issue #162 的现象：`dossier.py --check` 只有两条阈值（攒够 `burst_m
     抓不住（复核发现）。
 22. `due_at` 在未来（时钟回拨 / 手改 mark）不许把 DUE 永久压住，也不许让
     `--reap` 卡在 `stalled=0`（复核发现）。
+23. **下限的读法与机器速度无关**（issue #196）：同一份 mark、同一组**模拟**时刻，
+    只把下限从「已过」换到「未过」，跨度读数必须一正一反。用例 13 走真实子进程，
+    它的跨度必然掺进进程启动耗时；这条把那一维搬进进程内 patch 时钟，快慢都红
+    不了，也挡住「把下限调松换绿」的修法。
 
 已知边界（这条门禁**不**声称能抓住的）：
 
@@ -588,14 +592,27 @@ def test_default_config_fires_on_round_three(home):
             f"应约等于 3 × 90s = 4.5min；"
             f"若约 3.0min 说明 quiet_since 记的是首轮结束（N 轮只跨 N-1 个间隔）")
 
-    # 端到端那一维用真实子进程 + 缩短的轮长：三个 1s 轮次 = 3s，把下限临时
-    # 压到 0.02min（1.2s）就等价于「3 个间隔已过下限」。这里验的是默认
+    # 端到端那一维用真实子进程 + 合成轮长：`quiet_since` 只在首轮写入
+    # （`dossier.py:500-508`），所以 `--check` 看到的下限跨度 = 首轮回推的
+    # `--round-seconds` + 首轮 tick 到 `--check` 的真实耗时。这里验的是默认
     # `quiet_minutes` 与默认 `quiet_rounds` 的**关系**能真的触发，不是数字本身。
-    write_config(home, {"quiet_minutes": 0.02})
+    #
+    # 真实耗时那一截必须**不是必要条件**（issue #196）。早先写成
+    # `--round-seconds 1` + 下限 0.02min（1.2s），跨度 = 1s 回推 + 耗时：
+    # 首轮落盘之后只要再快 0.2s 就翻红，CI 快 runner 正是这样红的
+    # （PR #194 的 storage 分片 48 秒那趟），本机重跑又绿。
+    # 现在回推 30s、下限 0.5min（30s）：跨度 >= 30s，耗时压到 0 也不低于下限。
+    # `--round-seconds` 只写进 mark、不 sleep，进程开销与原来一样。
+    round_seconds = 30
+    floor_minutes = 0.5
+    assert round_seconds / 60.0 >= floor_minutes, (
+        f"夹具自相矛盾：单轮回推 {round_seconds}s 不足下限 {floor_minutes}min，"
+        f"结论又变成机器速度的函数了（issue #196）")
+    write_config(home, {"quiet_minutes": floor_minutes})
     reset = tick(home, "reset")
     assert reset.returncode == 0, (reset.returncode, reset.stdout, reset.stderr)
     for _ in range(3):
-        done = tick(home, "--round-seconds", "1")
+        done = tick(home, "--round-seconds", str(round_seconds))
         assert done.returncode == 0, (done.returncode, done.stdout, done.stderr)
     state = mark(home)
     assert state.get("quiet_rounds") == 3, state
@@ -606,6 +623,47 @@ def test_default_config_fires_on_round_three(home):
     assert line.startswith("YES quiet"), line
     print(f"✓ 13. 默认轮次=3 + 下限 {cfg['quiet_minutes']}min < 3×90s={span:.1f}min，"
           f"第 3 轮 DUE（{line}）")
+
+
+def test_floor_reading_survives_a_slow_host():
+    """同一份 mark、同一组时刻，只改下限，`--check` 的结论必须翻转（issue #196）。
+
+    用例 13 走真实子进程，它的跨度必然掺进「进程启动 + 落盘」的真实耗时；一旦
+    夹具把余量留到零点几秒，结论就变成机器速度的函数——CI 快 runner 上间歇翻红，
+    本机重跑又绿（PR #194 的 storage 分片就是这么红的）。这条用进程内 patch 时钟
+    把「跨度」与「下限」都变成合成量：同一组 `quiet_since` 与 `now`，下限取
+    「已过」与「未过」两档，`quiet_minutes_elapsed()` 必须一正一反。它不读真实
+    时钟，所以快慢都红不了，同时挡住「把下限调松以换绿」的修法——调松之后第二档
+    对照组就翻不过来了。
+    """
+    dossier = _dossier_module()
+    start = 1_700_000_000.0
+    round_seconds = 30
+    with temp_dir(prefix="wg-cadence-") as home, \
+            patch.object(dossier, "MARK", home / MARK_REL):
+        for index in range(3):
+            moment = start + index
+            with patch.object(dossier.time, "time", lambda moment=moment: moment):
+                assert dossier.cmd_tick(False, round_seconds) == 0
+        rounds, since = dossier.quiet_state()
+        assert rounds == 3, (rounds, since)
+        assert since == start - round_seconds, (
+            f"首轮没按 --round-seconds 回推：since={since}，应为 {start - round_seconds}")
+        # `--check` 判 DUE 的那一刻：首轮 tick 之后 >= 30s。
+        now = start + round_seconds
+        elapsed = dossier.quiet_minutes_elapsed(now)
+        assert elapsed >= round_seconds / 60.0, (
+            f"跨度算错了：{elapsed:.3f}min，应 >= {round_seconds / 60.0:.3f}min")
+        passed = dict(dossier.DEFAULTS, quiet_minutes=0.5)   # 30s：刚好够
+        blocked = dict(dossier.DEFAULTS, quiet_minutes=1.5)  # 90s：不够
+        # 判据是 `elapsed >= cfg["quiet_minutes"]`（`dossier.py:438-440`），这里
+        # 直接比同一对量，不调 cmd_check（那要真实会话与库）。
+        assert elapsed >= passed["quiet_minutes"], (
+            f"下限 0.5min 应已过，实际跨度 {elapsed:.3f}min")
+        assert elapsed < blocked["quiet_minutes"], (
+            f"对照组失效：跨度 {elapsed:.3f}min 也过了 1.5min 下限，这条就只剩一半")
+    print(f"✓ 23. 同一份 mark、同一组时刻：下限 0.5min 已过、1.5min 未过"
+          f"（跨度 {elapsed:.3f}min，不读真实时钟）")
 
 
 def test_listen_backdates_first_round(home):
@@ -914,8 +972,9 @@ def main():
     with temp_dir(prefix="wg-cadence-") as home:
         write_config(home)
         test_future_due_does_not_hold_forever(home)
+    test_floor_reading_survives_a_slow_host()
     print("=" * 72)
-    print("✓ dossier 沉淀时机（连续 N 轮无人指名 + 积压归因 + 游标兜底）22 项门禁全部通过")
+    print("✓ dossier 沉淀时机（连续 N 轮无人指名 + 积压归因 + 游标兜底）23 项门禁全部通过")
     print("=" * 72)
 
 

@@ -173,10 +173,16 @@ def media_兜底也带命令():
 
 @case
 def 追问行带图片提示():
-    """追问窗里收到的图以前零信息（watch 追问分支不渲染图片）。"""
+    """追问窗里收到的图以前零信息（watch 追问分支不渲染图片）。
+
+    补读命令打 ``q<n>``：追问行是 ``chat_inbox`` 的 rowid，与事件流 id 撞号时
+    裸数字会指向另一次事件的图（issue #203）。
+    """
     rows = followup.since(0, SID)
     hit = [r for r in rows if r.get("id") == EID_MEDIA]
-    return bool(hit) and f"look.py --event {EID_MEDIA} --index 0" in (hit[0].get("images") or "")
+    text = (hit[0].get("images") or "") if hit else ""
+    return (bool(hit) and f"look.py --event q{EID_MEDIA} --index 0" in text
+            and f"look.py --event {EID_MEDIA} " not in text)
 
 
 @case

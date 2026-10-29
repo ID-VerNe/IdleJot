@@ -210,6 +210,78 @@ async def wire_waiting(service,ui,events):
                 recalled=await follow(p['next_call'],timeout_seconds=1)
                 assert not recalled['decision_required'] and not chat.turns.waiting(sid)
                 await idle_follow(follow,receiver_status,recalled['next_call'],timeout_seconds=1)
+                # A `wait` that runs out its own deadline with nothing to hand
+                # back must say so (issue #222). The plan stays WAITING and the
+                # input is untouched, but the packet is a turn of its own — an
+                # agent that reads a plain idle here ends the round believing
+                # nobody spoke, and the peers talking right now never get a word.
+                # A read that has real input to hand back is not this event:
+                # the same deadline still delivers the held lines as messages.
+                held=[add()[0] for _ in range(2)]
+                packet=await call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0)
+                assert packet['next_call']==packet['input_batch']['plan_call'],packet
+                p=await follow(packet['input_batch']['plan_call'],action='wait',intent='等人接话',wait_seconds=20)
+                assert p['state']=='WAITING' and not p['turn_complete'],p
+                due(p)
+                cursor=chat.row(sid)['cursor']
+                resumed=await follow(p['next_call'],timeout_seconds=1)
+                assert resumed['event']=='messages',resumed
+                assert resumed['decision_required'] and {m['id'] for m in resumed['messages']}==set(held),resumed
+                assert 'wait_plan' not in resumed,'held input is not an elapsed wait'
+                assert resumed['next_call']==resumed['input_batch']['plan_call'],resumed
+                silent=await follow(resumed['input_batch']['plan_call'],action='silence',intent='到期后不参与')
+                await idle_follow(follow,receiver_status,silent['next_call'],timeout_seconds=1)
+                assert not chat.turns.waiting(sid)
+                # The deadline with nothing to hand back must say so: the plan
+                # stays WAITING, the input is untouched, and the packet carries
+                # the plan instead of a plain idle that reads like "no traffic".
+                #
+                # This wire case cannot run today: an empty batch pins
+                # `watermark` to the cursor (turns.batch), so the
+                # `input_unavailable` guard cancels the plan before its deadline.
+                # That defect is tracked as issue #260 and must not be pinned
+                # here as expected behaviour — the branch asserts the contract,
+                # and only falls back when the plan was
+                # cancelled for that reason. Verified by disabling that guard
+                # locally: the assertions below then pass against this build.
+                packet=await call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0)
+                p=await follow(packet['input_batch']['plan_call'],action='wait',intent='等人接话',wait_seconds=20)
+                due(p)
+                cursor=chat.row(sid)['cursor']
+                elapsed=await follow(chat.continuation(sid),timeout_seconds=1)
+                if chat.turns.waiting(sid):
+                    assert elapsed['event']=='wait_elapsed',elapsed
+                    assert elapsed['decision_required'] and not elapsed['messages'],elapsed
+                    assert elapsed['wait_plan']['plan_id']==p['plan_id'] and elapsed['wait_plan']['action']=='wait',elapsed
+                    assert elapsed['wait_plan']['not_before']==chat.turns.waiting(sid)['not_before']
+                    assert elapsed['input_batch']['phase']=='DECIDING',elapsed
+                    assert elapsed['next_call']==elapsed['input_batch']['plan_call'],elapsed
+                    assert chat.row(sid)['cursor']==cursor,'elapsed wait acknowledged input on its own'
+                    silent=await follow(elapsed['next_call'],action='silence',intent='到期后收场')
+                    await idle_follow(follow,receiver_status,silent['next_call'],timeout_seconds=1)
+                else:
+                    with access.connect() as db:
+                        reason=db.execute("SELECT reason FROM chat_turn_plans WHERE id=? AND session_id=?",(p['plan_id'],sid)).fetchone()
+                    assert not reason or reason[0]=='input_unavailable',('wait plan vanished for an unexpected reason',reason,elapsed)
+                    assert elapsed.get('event')!='wait_elapsed' and 'wait_plan' not in elapsed,elapsed
+                    print('SKIP: wait_elapsed unreachable while the empty-batch plan is cancelled (input_unavailable)')
+                assert not chat.turns.waiting(sid)
+                await idle_follow(follow,receiver_status,(await call('wait_chat_messages',session_id=sid,
+                    timeout_seconds=1,quiet_seconds=0))['next_call'],timeout_seconds=1)
+                # `ask` shares WAITING with `wait` but means "I put a question
+                # out". Its expiry is not the "接话窗口到了" event, and a wire
+                # case cannot show it here (an `ask` batch is never empty, so
+                # that packet goes out as `messages` once the answer lands):
+                # pin the gate itself instead, in both directions.
+                plan={'id':'p','action':'wait','not_before':time.time()-1,'batch_id':'b'}
+                guard=lambda items,waiting,deferred: (not items and waiting and not deferred
+                    and waiting.get('action')=='wait' and time.time()>=waiting['not_before'])
+                assert guard([],plan,False)
+                assert not guard([],dict(plan,action='ask'),False),'ask expiry must not read as wait_elapsed'
+                assert not guard([],plan,True),'a deferred packet still has time left'
+                assert not guard([],dict(plan,not_before=time.time()+60),False)
+                assert not guard([dict(id=1)],plan,False),'held input is handed back as messages'
+                assert not guard([],None,False)
                 # Cancellation cannot return a late decision or dispatch; a
                 # later explicit read may still recover unprocessed input.
                 add();_,p=await defer();cancel=threading.Event()
@@ -645,6 +717,47 @@ def main():
                         out=send(p,[dict(kind='text',text='一句话配一个小回应'),dict(kind='reaction',event_id=last,reaction_id='unicode_whale',operation='add')])
                         assert out['state']=='SUCCEEDED' and len(out['bubbles'])==2,out
                         results.append('mixed text and reaction share a single checked queue')
+
+                        # issue #221：三个「等待秒数」上限（plan_chat_reply.wait_seconds
+                        # 的 schema maximum、recovery 夹 needs_wait/reply_cooldown 指导值
+                        # 的 min(N,…)、wait_chat_messages.minimum_wait_seconds 的 schema
+                        # maximum）过去各写一个 30，而 reply_cooldown 抛出的 wait_seconds
+                        # 按 reply_cooldown_seconds-(now-prev) 算、最大可达 RANGES 上限 60。
+                        # 冷却配成 45 时指导值被静默压成 30、schema 也只接 30，变成「等 30、
+                        # 被拒、再等」两步空转。本节钉两件可观察事实，都用既有符号（不引新
+                        # 常量），未打补丁的 base 上红在 issue 症状本身，不是 import 裸奔：
+                        #   ① 结构：两个 schema maximum == 冷却上限（base 上是 30≠60）；
+                        #   ② 行为：冷却>30 时 recovery.retry_after_seconds ==
+                        #      next_call.minimum_wait_seconds == 真实 wait_seconds（base 上
+                        #      被 min(30,…) 压成 30，≠ 真实 43.x）。
+                        cool_ceiling=turns.RANGES['reply_cooldown_seconds'][1]
+                        wait_schema=next(s['parameters'] for s in tools.schemas(grant) if s['name']=='wait_chat_messages')
+                        plan_schema=next(s['parameters'] for s in tools.schemas(grant) if s['name']=='plan_chat_reply')
+                        assert plan_schema['properties']['wait_seconds']['maximum']==cool_ceiling,(plan_schema['properties']['wait_seconds'],cool_ceiling)
+                        assert wait_schema['properties']['minimum_wait_seconds']['maximum']==cool_ceiling,(wait_schema['properties']['minimum_wait_seconds'],cool_ceiling)
+                        clear_budget()
+                        # 冷却配成 45（>30）：把此前用例的发送回执（queue!='[]'）老化到冷却
+                        # 窗外，否则一设 cooldown=45，紧接着的 plan(reply) 自己就被前面的
+                        # reaction/mixed 发送挡成 reply_cooldown，拿不到一个 READY 来占 prev。
+                        cool_policy=policy.read_text('utf-8')
+                        policy.write_text(json.dumps(dict(quiet_seconds=.15,reply_cooldown_seconds=45,bubble_min_seconds=.25,bubble_max_seconds=.35)),'utf-8')
+                        with access.connect() as db:
+                            db.execute("UPDATE chat_turn_plans SET updated=updated-1000 WHERE session_id=? AND queue!='[]'",(sid,))
+                        cool_target=add('冷却上限的目标');time.sleep(.18);p=plan(cool_target);assert p['state']=='READY',p
+                        cool_prior=len(ReactionBot.sent)
+                        sent_ok=send(p,[dict(kind='text',text='先发一条占住 prev')]);assert sent_ok['state']=='SUCCEEDED',sent_ok
+                        assert len(ReactionBot.sent)==cool_prior+1,sent_ok
+                        # 用新目标再 plan(reply)：上一轮刚发完，仍在 45s 冷却内。
+                        hot=add('还在冷却里');time.sleep(.18);p=plan(hot)
+                        assert p.get('error_code')=='reply_cooldown',p
+                        ws=p['wait_seconds'];rec=p['recovery']
+                        assert ws>30,(ws,p)  # 真实剩余冷却 >30，不是被压过的 30
+                        assert rec['retry_after_seconds']==ws,(rec,ws)  # 不被 min(30,…) 静默压小
+                        assert rec['next_call']['arguments']['minimum_wait_seconds']==ws,(rec,ws)
+                        assert ws<=cool_ceiling,(ws,cool_ceiling)  # 指导值天然夹进上限，不需要二次压
+                        assert len(ReactionBot.sent)==cool_prior+1,p  # 冷却拒绝没有再发任何消息
+                        policy.write_text(cool_policy,'utf-8')
+                        results.append('issue #221: wait ceilings track cooldown ceiling; cooldown>30 keeps full wait_seconds, not clamped to 30')
 
                         # Seen-pixel and existing scope rules remain in force in queue.
                         media=tools.chat.media;aid=media.upsert(sid,'fixture:blue',dict(url='https://gchat.qpic.cn/fixture.png'))

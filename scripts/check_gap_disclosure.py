@@ -7,38 +7,32 @@
 报 `NO_WORK`——「没人叫我」与「有人叫过但机器不在」无法区分，直到人肉翻
 `get_group_msg_history` 才发现窗口内 33 条、其中 1 条 @ 本机。
 
-
-这条门禁钉住下面这些契约（编号是分组），任何一处退回旧行为都红：
-
-1. `wg_gap.compute()` 的 diff 正确：夹具 `chat_inbox` 有 a/b/c，假
-   `get_group_msg_history` 返回 a/b/c/d/e（d/e 在停机窗口内、e 是 @ 本机），
-   返回 `missing=2, at_me=1`，`at_me_lines` 含 e 的 sender + 时间 + 正文片段。
-2. `wg_gap.describe()` 在缺口非空时报 missing / at_me 计数；无记录或缺口为空时
-   返回空串（排除型对照：恒加注脚的实现红在后半条，与 #112 同口径）。
-3. `up.py --status` 的「缺口」行在缺口非空时出现、为空时不加字（只读
-   `wg_gap.json`，不联网、不写——保住「只看不动」契约）。
-4. `listen.py` 的 NO_WORK 路径在缺口非空时插一行提示，且 `RESTART:` 仍是末行
-   （#69/#112 契约 1/9 不变）。WAKE 路径不插提示（Agent 已被叫醒）。
-5. `reply.py --list` 在缺口非空时列出漏掉的 @ 本机消息（行首 `id=-`，区别于真
-   唤醒行），为空时不加段。
-6. `get_group_msg_history` 单次 200 上限语义（候选 4）：返回的最老一条仍新于
-   本地最后一条时 `truncated=True`，`describe()` 含「只能核对最近 200 条」；
-   最老一条老于本地最后一条时 `truncated=False` 且无该句。
-7. NapCat 未响应（`fetch` 抛错）→ 该群 `unreachable=True`，`describe()` 说
-   「无法核对」，不崩。
-8. @ 本机判定用 `self_account`：非本机 @ 不计入 `at_me`。
-9. 本地一条都没有（首次部署 / 换群）不报缺口——与「停机漏收」区分，否则新部署
-   会把群里全部历史都算成「漏的」。
-10. 窗口右边界取 `napcat_launch.json:started_epoch`，读不到时回落 `computed_at`。
-11. 缺口非空时 `describe()` 带窗口起止 + 账本计算时刻 + 明写「仅供参考」（#148）：
-    账本只在 collector 启动时算一次，不带时刻时旧账与新缺口同形。无缺口时仍空串。
-12. 跨天窗口两端补 `MM-DD`，同一天不补（#148）。13. `at_me_lines()` 时间戳带
-    日期，与唤醒行的 `HH:MM:SS` 不同形（#148）。14. `--list` 缺口段标题下紧跟
-    窗口上下文、排在 `id=-` 行之前（#148）。
-15. 认群按 `wg_isolation.group_of()`，不按 `endswith(':' + gid)`（#211）：同一本
-    `chat_inbox` 里群号互为后缀的两群 + 一本 user_id 等于群号的私聊会话，旧后缀
-    匹配把私聊串进群、`local_ids` 与 `window_start` 都错，缺口少报；`group_of`
-    按 cid 字段结构认群不串。
+这条门禁钉住下面这些契约（编号是分组），任何一处退回旧行为都红：1. `wg_gap.compute()`
+   的 diff 正确：夹具 `chat_inbox` 有 a/b/c，假 `get_group_msg_history` 返回 a/b/c/d/e
+   （d/e 在停机窗口内、e 是 @ 本机），返回 `missing=2, at_me=1`，`at_me_lines` 含 e 的
+   sender + 时间 + 正文片段。2. `wg_gap.describe()` 缺口非空时报 missing/at_me 计数；
+   无记录或缺口为空时返回空串（排除型对照：恒加注脚的红在后半条，与 #112 同口径）。
+   3. `up.py --status` 的「缺口」行缺口非空时出现、为空时不加字（只读 `wg_gap.json`，
+   不联网、不写——保住 `--status`「只看不动」契约）。4. `listen.py` 的 NO_WORK 路径
+   缺口非空时插一行提示、`RESTART:` 仍是末行（#69/#112 契约 1/9 不变）；WAKE 路径不插
+   （Agent 已被叫醒）。5. `reply.py --list` 缺口非空时列漏掉的 @ 本机消息（行首 `id=-`），
+   为空时不加段。6. `get_group_msg_history` 单次 200 上限（候选 4）：最老一条新于本地
+   最后一条→`truncated=True` 且 `describe()` 含「只能核对最近 200 条」；老于则
+   `truncated=False` 且无该句。7. NapCat 未响应（`fetch` 抛错）→ `unreachable=True`，
+   `describe()` 说「无法核对」，不崩。8. @ 本机判定用 `self_account`，非本机 @ 不计入
+   `at_me`。9. 本地一条都没有（首次部署/换群）不报缺口——与「停机漏收」区分。10. 窗口
+   右边界取 `napcat_launch.json:started_epoch`，读不到回落 `computed_at`。
+11. 缺口非空时 `describe()` 带**窗口起止** + **账本计算时刻** + 明写「仅供参考」（#148）：
+    账本只在 collector 启动时算一次，不带时刻时旧账与新缺口同形。无缺口时仍空串（排除型
+    对照：恒加注脚的红在这条）。12. 跨天窗口两端补 `MM-DD`，同一天不补（#148）。
+    13. `at_me_lines()` 时间戳带日期（`YYYY-MM-DD HH:MM:SS`），与唤醒行的 `HH:MM:SS`
+    不同形（#148）。14. `--list` 缺口段标题下紧跟窗口上下文、排在 `id=-` 行之前（#148）。
+15. `wg_gap._local_state` 会话号解析与 `#219` 同口径（payload 优先、会话行兜底），但缺
+    `chat_sessions` 表时（夹具/旧库）必须退回只读 payload，不得静默归零（#219）：LEFT
+    JOIN 撞缺表抛 `sqlite3.Error` 被 `except` 吞掉会让缺口报得**比实际小**，比改前的「报得
+    大」更危险。认群按 `wg_event_ref.group_of(cid) == gid`（字段结构判定），不按
+    `endswith(':' + gid)`（#211）：同库里 `:direct:<user_id>` 会话的 user_id 等于某群号时，
+    后缀匹配把私聊串进群、`local_ids` 与 `window_start` 都错，缺口少报。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_DB`，不碰实机状态：
 
@@ -61,12 +55,12 @@ import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 is
 from check_fixture_support import scratch_dir, temp_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False)
 
-# issue #145：本门禁有两处 `reply.list_wakes()`，而它现在会顺手复查发送失败账本
+# issue #145：本门禁有两处 `reply.list_wakes()`，它现在会顺手复查发送失败账本
 # （`wg_send_failure.LEDGER` 是 import 期求值的 `state_dir() / ...`）。不钉
-# `IDLEJOT_WG_STATE` 的话，外部环境带着它跑时这里会**写实机账本**
-# （`rechecked_at` / `recheck_result`），还会吃掉 60 秒复查窗口，让真正的
-# `reply.py --list` 跳过复查。`state_dir()` 的优先级是 IDLEJOT 先于 TULPA，
-# 只靠 `check_fixture_support` 的 `WATER_GROUP_HOME` 钉不住它。
+# `IDLEJOT_WG_STATE`，外部环境带着它跑时会**写实机账本**（`rechecked_at`/
+# `recheck_result`），还吃掉 60 秒复查窗口让真正的 `reply.py --list` 跳过复查。
+# `state_dir()` 优先级 IDLEJOT 先于 TULPA，只靠 `check_fixture_support` 的
+# `WATER_GROUP_HOME` 钉不住它。
 _GAP_STATE = scratch_dir(prefix="wg_gap_state_")
 os.environ["IDLEJOT_WG_STATE"] = str(_GAP_STATE / "state")
 
@@ -81,14 +75,12 @@ import reply  # noqa: E402  (list_wakes 用例需要；模块级 import 触发�
 ACCOUNT = "10001"
 GROUP = "123"
 
-# 漏收行的形态（契约 13）：`id=- msg_id=<id> YYYY-MM-DD HH:MM:SS [漏] <人>: <正文>`。
-# 唤醒行是 `id=<正数> HH:MM:SS ...`——带日期是两者的分界线，不靠「有没有时分秒」判。
-# 两个捕获组（issue #151 复核）：`(\\S+)` 是消息 id、`(...)` 是行首那个时间戳字段。
-# 判据必须比对**捕获到的那个字段**，不能在整行里找子串——子串在行尾也能命中，
-# 「头字段日期是错的、行尾补一句正确时刻」的实现在子串判据下是绿的。
+# 漏收行形态（契约 13）：`id=- msg_id=<id> YYYY-MM-DD HH:MM:SS [漏] <人>: <正文>`。
+# 唤醒行是 `id=<正数> HH:MM:SS ...`——带日期是两者的分界线。两个捕获组（#151 复核）：
+# `(\\S+)` 是消息 id、`(...)` 是行首时间戳字段。判据必须比对**捕获到的那个字段**，不能
+# 在整行找子串——子串在行尾也命中，「头字段日期错、行尾补一句正确时刻」的实现子串下绿。
 STAMPED_GAP_LINE = re.compile(
     r"^id=- msg_id=(\S+) (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[漏\] ")
-
 
 def fixture_home(home):
     """最小身份配置 + 隔离的 napcat_launch.json 与 wg_gap.json。"""
@@ -99,18 +91,16 @@ def fixture_home(home):
                     "groups": {GROUP: {"enabled": True}}}, ensure_ascii=False),
         encoding="utf-8")
 
-
 def gap_at(home):
     """把 wg_gap.STATE / DB 钉到 home 下，返回还原函数（与 #112 ledger_at 同款）。
 
-    `wg_gap` 在模块级求值 `DB`，`wg_config` 在 import 期求 `CONFIG`——这两处都得在用例
-    里临时改写指向夹具目录，与 `wg_listener_state.STATE` 的打桩同款。
-
-    `state_dir()` 读 `IDLEJOT_WG_STATE`（`wg_paths.py:35`），它**不**随 `WATER_GROUP_HOME`
-    走——`check_fixture_support` 只钉了 `WATER_GROUP_HOME`。`wg_gap._launch_epoch()`
-    从 `state_dir()` 找 `napcat_launch.json`，所以这里必须连 `IDLEJOT_WG_STATE` 也指到
-    夹具的 `state/`，否则它读的是 import 期被 `_PINNED_HOME` 钉住的那份（夹具目录），
-    永远找不到用例写的 launch 文件——`window_end` 就回落成 `now`，右边界断言假红。
+    `wg_gap` 在模块级求值 `DB`，`wg_config` 在 import 期求 `CONFIG`——两处都得在用例里
+    临时改写指向夹具目录，与 `wg_listener_state.STATE` 打桩同款。`state_dir()` 读
+    `IDLEJOT_WG_STATE`（`wg_paths.py:35`），**不**随 `WATER_GROUP_HOME` 走
+    （`check_fixture_support` 只钉 `WATER_GROUP_HOME`）。`wg_gap._launch_epoch()` 从
+    `state_dir()` 找 `napcat_launch.json`，所以这里必须连 `IDLEJOT_WG_STATE` 指到夹具
+    `state/`，否则它读 import 期被 `_PINNED_HOME` 钉住的那份、永远找不到用例写的 launch
+    文件——`window_end` 回落成 `now`，右边界断言假红。
     """
     original_state = wg_gap.STATE
     original_db = wg_gap.DB
@@ -131,15 +121,13 @@ def gap_at(home):
     os.environ["IDLEJOT_WG_STATE"] = str(home / "state")
     return restore
 
-
 def ledger_at(home):
     """把 wg_listener_state 的账本路径钉到 home 下，返回还原函数（与 #112 同款）。
 
-    #119 之后监听账本改成 `wg_listeners/<pid>.json` 一槽一份，模块级绑定是
-    `STATE_DIR`（新）与 `LEGACY_STATE`（旧，只读兼容）；更早的 #112 布局只有
-    `STATE`。三套名字都用 `hasattr` 探测后改写：跑新模块时 `STATE` 不存在，
-    跑旧基线时 `STATE_DIR` 不存在——基线复跑（新门禁跑未打补丁的模块）两套
-    路径都指到 `home`，否则旧模块会读写实机账本。与 `check_listener_rehang`
+    #119 后监听账本改成 `wg_listeners/<pid>.json` 一槽一份，模块级绑定是 `STATE_DIR`
+    （新）与 `LEGACY_STATE`（旧，只读兼容）；更早的 #112 布局只有 `STATE`。三套名字都
+    用 `hasattr` 探测后改写：跑新模块时 `STATE` 不存在，跑旧基线时 `STATE_DIR` 不存在
+    ——基线复跑两套路径都指到 `home`，否则旧模块读写实机账本。与 `check_listener_rehang`
     的 `ledger_at` 同款（同一次 #119 改动）。
     """
     names = ("STATE", "STATE_DIR", "LEGACY_STATE")
@@ -163,24 +151,21 @@ def ledger_at(home):
             os.environ[owner_env] = owner
     return restore
 
-
 def write_launch(home, epoch):
     (home / "state" / "napcat_launch.json").write_text(
         json.dumps({"launcher_pid": 1, "started_epoch": int(epoch)}, ensure_ascii=False),
         encoding="utf-8")
 
-
 def seed_inbox(home, rows):
     """rows: [(message_id, at_epoch, conversation_id)]。建表并插入。"""
     db = sqlite3.connect(str(home / "data" / "mcp-access.sqlite3"))
     try:
-        db.executescript("""
-            CREATE TABLE IF NOT EXISTS chat_inbox(
-                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
-                message_id TEXT NOT NULL, payload TEXT NOT NULL, at REAL NOT NULL,
-                UNIQUE(session_id,message_id));
-            CREATE INDEX IF NOT EXISTS chat_inbox_session ON chat_inbox(session_id,id);
-        """)
+        db.executescript(
+            "CREATE TABLE IF NOT EXISTS chat_inbox("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, "
+            "message_id TEXT NOT NULL, payload TEXT NOT NULL, at REAL NOT NULL, "
+            "UNIQUE(session_id,message_id));"
+            "CREATE INDEX IF NOT EXISTS chat_inbox_session ON chat_inbox(session_id,id);")
         for mid, at, cid in rows:
             payload = {"onebot_message_id": mid, "conversation_id": cid}
             db.execute(
@@ -190,7 +175,6 @@ def seed_inbox(home, rows):
         db.commit()
     finally:
         db.close()
-
 
 def onebot_msg(message_id, epoch, sender, text, at_qq=None):
     """OneBot 11 原始消息（`get_group_msg_history` 返回的格式）。"""
@@ -202,24 +186,19 @@ def onebot_msg(message_id, epoch, sender, text, at_qq=None):
             "sender": {"nickname": sender, "user_id": 1},
             "message": segs}
 
-
 def make_fetcher(msgs):
     """假 get_group_msg_history：返回固定的 msgs 列表（不联网）。"""
     def fetch(group_id, count=200):
         return list(msgs)
     return fetch
 
-
 CASES = []
-
 
 def case(fn):
     CASES.append(fn)
     return fn
 
-
 # ---------- 契约 1：compute() 的 diff 正确 ----------
-
 
 @case
 def compute_diff正确():
@@ -247,9 +226,7 @@ def compute_diff正确():
             and g["at_me_lines"][0]["sender"] == "乙"
             and "在吗" in g["at_me_lines"][0]["body"])
 
-
 # ---------- 契约 2：describe() 有缺口/无缺口两侧 ----------
-
 
 @case
 def describe_缺口非空时报计数():
@@ -268,7 +245,6 @@ def describe_缺口非空时报计数():
         finally:
             restore()
     return ("缺口" in note and "漏 2 条" in note and "@ 本机 1 条" in note)
-
 
 @case
 def describe_无缺口时返回空串():
@@ -291,9 +267,7 @@ def describe_无缺口时返回空串():
             restore()
     return note_present == "" and note_absent == ""
 
-
 # ---------- 契约 3：--status 的缺口行 ----------
-
 
 def status_lines(gap_record=None):
     """跑 `up.report()`，换掉会碰真机的探针，返回输出行列表。"""
@@ -320,7 +294,6 @@ def status_lines(gap_record=None):
                 setattr(up, name, value)
     return [ln for ln in buf.getvalue().splitlines() if ln.strip()]
 
-
 @case
 def status_缺口非空时出缺口行():
     with temp_dir(prefix="wg-gap-") as home:
@@ -339,7 +312,6 @@ def status_缺口非空时出缺口行():
     gap_line = next((ln for ln in lines if ln.startswith("缺口")), "")
     return ("缺口" in gap_line and "漏 1 条" in gap_line and "@ 本机 1 条" in gap_line)
 
-
 @case
 def status_无缺口时不加缺口行():
     """无缺口时不出现「缺口」行——与 #112 `状态行报出上一轮监听与空窗` 同口径。"""
@@ -353,17 +325,15 @@ def status_无缺口时不加缺口行():
             restore()
     return not any(ln.startswith("缺口") for ln in lines)
 
-
 # ---------- 契约 4：listen.py NO_WORK 路径插缺口提示 ----------
-
 
 @case
 def listen_NO_WORK路径带缺口提示且RESTART仍是末行():
     """缺口非空时 NO_WORK 与 RESTART: 之间插一行 ⚠ 缺口提示。
 
-    复用 `check_listener_rehang` 已钉的「NO_WORK 后跟 RESTART:」契约的现场，
-    但这里多验一桩：两者之间有缺口提示。`_no_work` 是新拆出的 NO_WORK 路径收尾，
-    直接调它（不真跑 watch.py）；WAKE 路径仍走 `_finish`，不带提示。
+    复用 `check_listener_rehang` 已钉的「NO_WORK 后跟 RESTART:」契约现场，但多验一桩：
+    两者之间有缺口提示。`_no_work` 是新拆出的 NO_WORK 路径收尾，直接调它（不真跑
+    watch.py）；WAKE 路径仍走 `_finish`，不带提示。
     """
     import listen  # noqa: E402  模块级 import 会让 listen.main() 跑起来，函数内 import 不会
     with temp_dir(prefix="wg-gap-") as home:
@@ -394,7 +364,6 @@ def listen_NO_WORK路径带缺口提示且RESTART仍是末行():
             and "漏 1 条" in out and "@ 本机 1 条" in out
             and restart_idx > gap_idx)
 
-
 @case
 def listen_WAKE路径不插缺口提示():
     """WAKE 路径 Agent 已被叫醒，不需要缺口提示——只 NO_WORK 路径插。"""
@@ -418,9 +387,7 @@ def listen_WAKE路径不插缺口提示():
             restore_listener()
     return "⚠" not in buf.getvalue()
 
-
 # ---------- 契约 5：reply.py --list 列漏掉的 @ ----------
-
 
 @case
 def reply_list_缺口非空时列漏掉的at():
@@ -445,7 +412,6 @@ def reply_list_缺口非空时列漏掉的at():
             and "id=-" in out and "msg_id=d" in out
             and "乙" in out and "在吗" in out)
 
-
 @case
 def reply_list_无缺口时不加段():
     with temp_dir(prefix="wg-gap-") as home:
@@ -460,13 +426,12 @@ def reply_list_无缺口时不加段():
             restore()
     return "停机窗口漏掉的 @" not in buf.getvalue()
 
-
 @case
 def reply_list_段标题带窗口时刻():
     """issue #148：`--list` 的缺口段也要说清「哪段时间、账本何时算的」。
 
-    段标题下面紧跟一行窗口上下文，与 `--status` 的缺口行同一份措辞
-    （`wg_gap.window_note()`）。只列 `id=-` 行不给窗口的实现红在这里。
+    段标题下紧跟一行窗口上下文，与 `--status` 缺口行同一份措辞（`wg_gap.window_note()`）。
+    只列 `id=-` 行不给窗口的实现红在这里。
     """
     start = local_epoch(2026, 10, 27, 7, 21, 40)
     end = local_epoch(2026, 10, 27, 9, 30, 26)
@@ -491,9 +456,7 @@ def reply_list_段标题带窗口时刻():
     return (head_idx >= 0 and note_idx > head_idx and line_idx > note_idx
             and "2026-10-27 09:30:47" in out and "仅供参考" in out)
 
-
 # ---------- 契约 6：200 上限语义（候选 4）----------
-
 
 @case
 def 上限截断时报最近200条():
@@ -517,7 +480,6 @@ def 上限截断时报最近200条():
     return (g["truncated"] is True
             and "只能核对最近 200 条" in note)
 
-
 @case
 def 上限覆盖时不说截断():
     """返回的最老一条老于本地最后一条 → truncated=False，describe 不含 200 条句。"""
@@ -540,9 +502,7 @@ def 上限覆盖时不说截断():
     g = rec["groups"][GROUP]
     return (g["truncated"] is False and "只能核对最近 200 条" not in note)
 
-
 # ---------- 契约 7：NapCat 未响应 ----------
-
 
 @case
 def napcat未响应时不崩且报无法核对():
@@ -564,9 +524,7 @@ def napcat未响应时不崩且报无法核对():
     return (g["unreachable"] is True and g["missing"] == 0
             and "无法核对" in note and "NapCat 未响应" in note)
 
-
 # ---------- 契约 8：@ 本机判定用 self_account ----------
-
 
 @case
 def 非本机at不计入at_me():
@@ -585,9 +543,7 @@ def 非本机at不计入at_me():
     g = entry["groups"][GROUP]
     return g["missing"] == 1 and g["at_me"] == 0 and g["at_me_lines"] == []
 
-
 # ---------- 契约 9：本地一条都没有不报缺口 ----------
-
 
 @case
 def 本地为空不报缺口():
@@ -606,9 +562,50 @@ def 本地为空不报缺口():
     g = entry["groups"][GROUP]
     return g["missing"] == 0 and g["at_me"] == 0 and g["window_start"] is None
 
+@case
+def 缺会话表时按payload算缺口():
+    """降级分支（#219）：`_local_state` 现在 LEFT JOIN `chat_sessions` 做会话号兜底，
+    但夹具/旧库可能没那张表——LEFT JOIN 撞缺表抛 `sqlite3.Error`，被 `except` 静默
+    吞掉会把缺口**算成空的**（比改前的「报得比实际大」更危险，把真漏的洗成「没漏」）。
+    缺表时必须退回只读 payload 的老写法：payload 带键的行仍计入缺口，且不崩。
+
+    与 `compute_diff正确` 同一批假消息，唯一差别是显式保证没有 `chat_sessions`
+    （`DROP TABLE IF EXISTS`，不依赖 `seed_inbox` 恰好不建它——若哪天夹具加了那张
+    表，这条仍钉缺表降级分支，不会悄悄改测 LEFT JOIN 路径）。若实现整段静默归零，
+    这里 `missing` 会算成 4（b/c/d/e 全不在本地集合），断言即红。
+    """
+    with temp_dir(prefix="wg-gap-") as home:
+        fixture_home(home)
+        restore = gap_at(home)
+        try:
+            now = int(time.time())
+            write_launch(home, now)
+            seed_inbox(home, [("a", now - 3600, f"1:group:{GROUP}"),
+                              ("b", now - 3500, f"1:group:{GROUP}"),
+                              ("c", now - 3400, f"1:group:{GROUP}")])
+            # 显式去掉会话表：这条用例钉的是缺表降级，不依赖 seed_inbox 的默认形状。
+            db = sqlite3.connect(str(home / "data" / "mcp-access.sqlite3"))
+            try:
+                db.execute("DROP TABLE IF EXISTS chat_sessions")
+                db.commit()
+            finally:
+                db.close()
+            msgs = [
+                onebot_msg("b", now - 3500, "甲", "在"),
+                onebot_msg("c", now - 3400, "甲", "好"),
+                onebot_msg("d", now - 600, "乙", "在吗", at_qq=ACCOUNT),
+                onebot_msg("e", now - 300, "丙", "你好"),
+            ]
+            entry = wg_gap.compute(group_ids=[GROUP], fetch=make_fetcher(msgs), now=now)
+        finally:
+            restore()
+    g = entry["groups"][GROUP]
+    return (g["missing"] == 2 and g["at_me"] == 1
+            and len(g["at_me_lines"]) == 1
+            and g["at_me_lines"][0]["sender"] == "乙"
+            and "在吗" in g["at_me_lines"][0]["body"])
 
 # ---------- 契约 10：窗口右边界取 launch_epoch ----------
-
 
 @case
 def 窗口右边界取launch_epoch():
@@ -637,12 +634,10 @@ def 窗口右边界取launch_epoch():
     return (g["window_end"] == launch and g["missing"] == 1 and g["at_me"] == 1
             and g["at_me_lines"][0]["msg_id"] == "d")
 
-
 def local_epoch(year, month, day, hour, minute, second=0):
     """某个本地墙钟时刻的 epoch 秒（契约 11–13 要钉确定的日期，不用 `time.time()`）。"""
     return datetime.datetime(year, month, day, hour, minute,
                              second).astimezone().timestamp()
-
 
 def fixed_record(computed, start, end, missing=29, at_me=0, at_me_lines=None):
     """手写一份缺口账本（绕过 compute()，只为把窗口/账本时刻钉成确定的日期）。"""
@@ -652,17 +647,15 @@ def fixed_record(computed, start, end, missing=29, at_me=0, at_me_lines=None):
                                "truncated": False, "unreachable": False,
                                "at_me_lines": list(at_me_lines or [])}}}
 
-
 # ---------- 契约 11：describe() 带窗口起止 + 账本时刻 + 仅供参考 ----------
-
 
 @case
 def describe_缺口非空时带窗口时刻与账本时刻():
     """issue #148：只有「漏 29 条」的账本会被读成现刻事故。
 
-    夹具钉死窗口 07:21:40–09:30:26、账本 09:30:47 计算。生产形态（`describe()`
-    不带参数）就必须同时说出**窗口起止**与**账本计算时刻**，并明写「仅供参考」。
-    未打补丁的 base 上这条红在「输出里没有窗口」上——正是 issue 的现象。
+    夹具钉死窗口 07:21:40–09:30:26、账本 09:30:47 计算。生产形态（`describe()` 不带
+    参数）必须同时说出**窗口起止**与**账本计算时刻**，并明写「仅供参考」。未打补丁的
+    base 上这条红在「输出里没有窗口」——正是 issue 的现象。
     """
     start = local_epoch(2026, 10, 27, 7, 21, 40)
     end = local_epoch(2026, 10, 27, 9, 30, 26)
@@ -680,14 +673,13 @@ def describe_缺口非空时带窗口时刻与账本时刻():
             and "仅供参考" in note
             and "漏 29 条" in note)
 
-
 @case
 def window_note_距今多久可按时刻钉():
-    """`window_note(now=...)` 的「多久前」可钉（issue #148）。
+    """`window_note(now=...)` 的「多久前」可钉（#148）。
 
-    与上一条分开：上一条钉生产形态的措辞，这条钉相对量本身——`now` 是 12:20:00，
-    账本 09:30:47 计算，差 2 小时 49 分。相对量算错（拿消息时间当基准、或算成
-    绝对时刻）的实现红在这里。
+    与上一条分开：上一条钉生产形态措辞，这条钉相对量本身——`now` 12:20:00、账本
+    09:30:47 计算、差 2 小时 49 分。相对量算错（拿消息时间当基准、或算成绝对时刻）的
+    实现红在这里。
     """
     start = local_epoch(2026, 10, 27, 7, 21, 40)
     end = local_epoch(2026, 10, 27, 9, 30, 26)
@@ -704,15 +696,14 @@ def window_note_距今多久可按时刻钉():
     return ("07:21:40–09:30:26" in note and "2 小时 49 分前" in note
             and "仅供参考" in note)
 
-
 @case
 def describe_无缺口时仍返回空串():
-    """排除型对照（issue #148）：恒加窗口注脚的实现红在这条。
+    """排除型对照（#148）：恒加窗口注脚的实现红在这条。
 
-    与契约 2 的后半条同口径，但这里专门针对新加的注脚——把窗口无条件拼进
-    `describe()` 的实现会在这里红。`window_note()` 自己也要空串（issue #151：
-    早先 docstring 这么写但断言只查 `describe()`，恒返回非空的 `window_note()`
-    能骗过；当前调用图下不可达，属措辞与断言不一致）。
+    与契约 2 后半条同口径，但专对新加的注脚——把窗口无条件拼进 `describe()` 的实现在这
+    红。`window_note()` 自己也要空串（#151：早先 docstring 这么写但断言只查
+    `describe()`，恒返回非空的 `window_note()` 能骗过；当前调用图下不可达，属措辞与
+    断言不一致）。
     """
     start = local_epoch(2026, 10, 27, 7, 21, 40)
     end = local_epoch(2026, 10, 27, 9, 30, 26)
@@ -728,9 +719,7 @@ def describe_无缺口时仍返回空串():
             restore()
     return empty == "" and note == ""
 
-
 # ---------- 契约 12：跨天窗口两端补日期 ----------
-
 
 @case
 def 跨天窗口两端补日期():
@@ -752,7 +741,6 @@ def 跨天窗口两端补日期():
     return ("10-26 23:50:00–10-27 07:21:40" in note
             and "仅供参考" in note)
 
-
 @case
 def 同一天窗口不补日期():
     """对照组（issue #148）：恒带日期的实现红在这条。
@@ -772,21 +760,18 @@ def 同一天窗口不补日期():
             restore()
     return ("07:21:40–09:30:26" in note and "10-27 07:21:40" not in note)
 
-
 # ---------- 契约 13：漏收 @ 的时间戳带日期 ----------
 
-# 契约 13 的固定夹具（issue #153 起是两组）。**必须多组**：单组只能证明「这一种窗口
-# 形态下实现是对的」，而「按窗口是否跨天决定格式」的条件式实现在另一组上就退化了。
-#   跨天窗口 —— #151 的夹具，抓「借窗口/账本日期冒充消息日期」
-#   同日窗口 —— 生产里最常见的停机窗口（早上拉起、窗口 07:21–09:30），抓「跨天才
-#               补日期」这类照抄 `wg_clock.window()` 习惯的实现（#153 L）
+# 契约 13 的固定夹具（#153 起是两组）。**必须多组**：单组只证明「这一种窗口形态下实现
+# 对」，而「按窗口是否跨天决定格式」的条件式实现在另一组上就退化。跨天组（#151 夹具）
+# 抓「借窗口/账本日期冒充消息日期」；同日组（生产最常见的早拉起窗口 07:21–09:30）
+# 抓「跨天才补日期」这类照抄 `wg_clock.window()` 习惯的实现（#153 L）。
 GAP_FIXTURES = (
     ("跨天窗口", (2026, 10, 25, 22, 0, 0), (2026, 10, 27, 7, 21, 40),
      (2026, 10, 26, 3, 5, 9)),
     ("同日窗口", (2026, 10, 27, 7, 21, 40), (2026, 10, 27, 9, 30, 26),
      (2026, 10, 27, 8, 2, 11)),
 )
-
 
 def _gap_line_ok(start, end, missed_at):
     """一组夹具跑一遍：漏收行的时间戳字段必须**等于消息自己的** `stamp()`。
@@ -807,100 +792,75 @@ def _gap_line_ok(start, end, missed_at):
         return False
     text = lines[0]
     msg_stamp = wg_clock.stamp(missed_at)
-    # 判据是**行首时间戳字段本身**，不是整行子串（#151 复核）：行尾补一句正确
-    # 时刻不该算通过。唤醒行是 `id=<正数> HH:MM:SS `，这里钉 `id=- msg_id=<id>
-    # YYYY-MM-DD HH:MM:SS `——两者第一眼就能分开。
-    # 注意**不要**在这里加「消息日期必须与窗口两端不同」的通用前提：同日窗口那
-    # 组（issue #153）消息必然落在窗口那一天，加了会让正确实现直接判红。那一类
-    # 前提只在跨天组有意义，写在 `漏收at的时间戳带日期` 的循环里。
+    # 判据是**行首时间戳字段本身**，不是整行子串（#151 复核）：行尾补一句正确时刻不该
+    # 算通过。唤醒行是 `id=<正数> HH:MM:SS `，这里钉 `id=- msg_id=<id> YYYY-MM-DD HH:MM:SS `
+    # ——两者第一眼分开。注意**不要**在这里加「消息日期必须与窗口两端不同」的通用前提：
+    # 同日窗口组（#153）消息必然落在窗口那一天，加了会让正确实现判红；那一类前提只在
+    # 跨天组有意义，写在 `漏收at的时间戳带日期` 的循环里。
     m = STAMPED_GAP_LINE.match(text)
     return (m is not None
             and m.group(1) == "d"
             and m.group(2) == msg_stamp
             and "乙" in text and "在吗" in text)
 
-
 @case
 def 漏收at的时间戳带日期():
     """issue #148：漏掉的 @ 可能是昨夜停机时段的，只给时分秒会读成「刚漏的」。
-
-    `at_me_lines()` 用 `stamp()`（带日期），与唤醒行的 `clock()`（`HH:MM:SS`）
-    不同形——两者同形时 Agent 分不清哪条是现刻待回、哪条是账本历史。
-
-    判据比对**行首时间戳字段本身**，不是在整行里找子串（#151 复核）：子串判据
-    挡不住「头字段日期错、行尾补一句正确时刻」的实现。
-
-    **四组夹具缺一不可**（issue #153），它们各堵一个维度的条件式退化：
-
-    1. 跨天窗口（固定日期）—— #151 的夹具，抓「借窗口/账本日期冒充消息日期」。
-    2. 同日窗口（固定日期）—— 生产里最常见的停机窗口（早上拉起、07:21–09:30）。
-       夹具一直跨天时，「按窗口是否跨天决定格式」的实现有现成模仿对象
-       `wg_clock.window()`（跨天才补日期），在同日窗口下它退回 `clock()`，输出
-       与唤醒行同形，issue #148 的 bug 原样回来。
-    3. 当天零点后（运行日构造）—— 消息落在「今天」但离 now 很远。抓「今天的
-       消息不带日期」这类条件式 stamp：固定日期抓它只是「机器今天恰好等于夹具
-       日」的巧合，换一天就漂移。
-    4. 相对 now（消息 60 秒前）—— 消息紧贴 now。抓「最近 N 小时内退回
-       `clock()`」这类**按消息新旧**判定的实现（理由通常是「反正就是刚才的」），
-       这类实现的消息可能距 now 只有几十秒、却仍属「今天」，第 3 组够不着。
-
-    第 3、4 组互补且不可互替：第 3 组的消息时刻是**固定**的（当天 00:01:01），
-    距 now 多远完全取决于运行时刻——只有在 00:01–01:01 之间跑时才恰好紧贴 now，
-    其余时间它离 now 几小时到二十几小时；第 4 组的消息时刻是**相对 now 构造**的
-    （`now - 60`），永远紧贴 now。`57b8ccc` 曾把第 4 组整个换成第 3 组，结果
-    recency 类实现在 288 个时刻里 275 个假绿。
-
-    本用例仍覆盖不到的（都是固定夹具的已知边界，base 与本 PR 同假绿，非本 PR
-    引入，`#154` 复核逐条列出）：硬编码成某组固定夹具那一天；`missing==0` 时省日期
-    （夹具固定 `missing=1`，该分支不触发）；把未来时刻 `min(msg, now)` 夹到 now
-    （夹具消息恒在过去或恰在 now 附近，夹取后与正确实现同形）。所以判据是「这四类
-    条件式退化必红」，不是「任何错日期都会红」——docstring 不这么声称。
+    `at_me_lines()` 用 `stamp()`（带日期），与唤醒行 `clock()`（`HH:MM:SS`）不同形。
+    判据比对**行首时间戳字段**，不在整行找子串（#151：子串挡不住「头字段日期错、行尾
+    补一句正确时刻」）。四组夹具缺一不可（#153），各堵一个条件式退化维度：1. 跨天窗口
+    （固定，#151 夹具）——抓「借窗口/账本日期冒充消息日期」。2. 同日窗口（固定，生产最
+    常见 07:21–09:30）——夹具一直跨天时「按窗口是否跨天决定格式」的实现会模仿
+    `wg_clock.window()`（跨天才补日期）在同日退回 `clock()`，与唤醒行同形，#148 回来。
+    3. 当天零点后（运行日构造）——消息落「今天」但离 now 远，抓「今天的消息不带日期」
+    类 stamp：固定日期抓它只靠「运行日恰好等于夹具日」的巧合。4. 相对 now（`now-60`）
+    ——抓「最近 N 小时内退回 `clock()`」这类**按消息新旧**判定，第 3 组够不着。3、4 不可
+    互替：第 3 组消息时刻固定、距 now 多远取决于运行时刻，第 4 组永远紧贴 now；`57b8ccc`
+    曾把第 4 组换成第 3 组，recency 类实现 288 时刻里 275 假绿。覆盖不到的（base 与本 PR
+    同假绿，#154 逐条列）：硬编码成夹具那一天、`missing==0` 时省日期（夹具固定
+    `missing=1`）、`min(msg,now)` 夹未来时刻。判据是「这四类退化必红」，不是「任何错日期
+    都红」。
     """
     for _name, s, e, missed in GAP_FIXTURES:
         start, end, msg_at = local_epoch(*s), local_epoch(*e), local_epoch(*missed)
-        # 夹具前提（只对跨天组有意义）：消息日期必须与窗口两端都不同，否则「借
-        # 窗口日期冒充消息日期」的坏实现与正确实现同形，本组退回零判别力。同日
-        # 组里消息必然落在窗口那一天，这条不适用——所以按窗口形态判断，不能无
-        # 条件加。
+        # 夹具前提（只对跨天组有意义）：消息日期与窗口两端都不同，否则「借窗口日期
+        # 冒充消息日期」的坏实现与正确实现同形，本组零判别力。同日组消息必然落在窗口
+        # 那一天，不适用——按窗口形态判断，不能无条件加。
         if wg_clock.stamp(start)[:10] != wg_clock.stamp(end)[:10]:
             if wg_clock.stamp(msg_at)[:10] in {wg_clock.stamp(start)[:10],
                                                wg_clock.stamp(end)[:10]}:
                 return False
         if not _gap_line_ok(start, end, msg_at):
             return False
-    # 第 3 组（当天零点后，运行日构造）：专抓「今天的消息不带日期」这类条件式
-    # stamp（#153 J）。J 的坏行为只在「消息日 == 实现读到的今天」时出现，固定日期
-    # 夹具只能靠「运行日恰好等于那个固定日」撞上，撞不上就假绿（`447ca55` 上 J 今天
-    # 恰好 `False` 就是这个巧合）。窗口必须落在同一个自然日，否则「跨天才补日期」
-    # 那类实现会走 `stamp()` 分支、输出恰好正确，这组抓不住它。用固定偏移做不到
-    # （`now - 1800` 在 00:29 跑就跨天），所以取「运行日当天零点后 1 秒 → +120 秒」，
-    # 消息落在中间。三者必然同一天、必然都在「今天」，与运行时刻无关。
+    # 第 3 组（当天零点后，运行日构造）：专抓「今天的消息不带日期」类条件式 stamp（#153
+    # J）。J 的坏行为只在「消息日 == 实现读到的今天」时出现，固定日期夹具只靠「运行日恰好
+    # 等于夹具日」撞上，撞不上就假绿（`447ca55` 上 J 今天恰好 `False` 就是这巧合）。窗口
+    # 必须落在同一自然日，否则「跨天才补日期」类实现走 `stamp()` 输出正确、抓不住。固定
+    # 偏移做不到（`now-1800` 在 00:29 跑就跨天），取「运行日当天零点后 1 秒 → +120 秒」，
+    # 消息落中间；三者必然同一天、都在「今天」，与运行时刻无关。
     now = int(time.time())
     day_start = int(time.mktime(tuple(time.localtime(now)[:3]) + (0, 0, 1, 0, 0, -1)))
     win_start, win_end = day_start, day_start + 120
     msg_at = day_start + 60
-    # 消息时间必须真的落在「今天」，否则这组抓不住 J（J 只在消息是今天时才退化）
+    # 消息必须真落在「今天」，否则这组抓不住 J（J 只在消息是今天时退化）
     if wg_clock.stamp(msg_at)[:10] != wg_clock.stamp(now)[:10]:
         return False
     if not _gap_line_ok(win_start, win_end, msg_at):
         return False
 
-    # 第 4 组（相对 now）：专抓「最近 N 小时内退回 `clock()`」这类**按消息新旧**
-    # 判定的实现（#153 复核 `recency-1h`）。第 3 组的消息离 now 最远可达 23 小时，
-    # 一个「1 小时内算刚漏的」实现完全可以在那组上走 `stamp()` 分支、输出正确，却在
-    # 真正紧贴 now 的消息上退回 `clock()`——而那正是生产里最常出现的情形。偏移取
-    # `now - 7200 → now`（消息 `now - 60`）而不是更小：窗口两端差 2 小时，消息落在
-    # 其中，仍属「今天」的概率高；窗口跨午夜时「跨天才补日期」类实现会走 `stamp()`
-    # 分支输出正确，但那一类已被第 2 组（同日固定窗口）堵住，这里只需保证 recency
-    # 维度被覆盖，不必也不该再要求「窗口同一天」（那会让 00:00 附近跑时这组直接
-    # 失效，正是 `57b8ccc` 之前 `now-1800` 踩过的坑）。
+    # 第 4 组（相对 now）：专抓「最近 N 小时内退回 `clock()`」这类**按消息新旧**判定
+    # （#153 复核 `recency-1h`）。第 3 组消息离 now 最远 23 小时，一个「1 小时内算刚漏」
+    # 的实现能在那组走 `stamp()` 输出正确、却在真正紧贴 now 的消息上退回 `clock()`——那
+    # 正是生产里最常出现的情形。偏移取 `now-7200 → now`（消息 `now-60`）而非更小：窗口两
+    # 端差 2 小时，消息落其中仍属「今天」概率高；窗口跨午夜时「跨天才补日期」类实现走
+    # `stamp()` 输出正确，但那一类已被第 2 组堵住，这里只需 recency 维度被覆盖，不该再
+    # 要求「窗口同一天」（那会让 00:00 附近跑时这组失效，正是 `57b8ccc` 之前 `now-1800`
+    # 踩过的坑）。
     if not _gap_line_ok(now - 7200, now, now - 60):
         return False
     return True
 
-
-# ---------- 契约 15：认群按 group_of，不按 endswith（issue #211）----------
-
+# ---------- 认群口径：group_of 不按后缀（叠加 #219 之上，issue #211）----------
 
 def _oracle_local_state(home, gid):
     """以 `wg_isolation.group_of()` 为 oracle 算期望的 `(ids, last_time)`：与
@@ -917,6 +877,8 @@ def _oracle_local_state(home, gid):
                 pl = json.loads(payload)
             except (ValueError, TypeError):
                 continue
+            if not isinstance(pl, dict):
+                continue
             if wg_isolation.group_of(pl.get("conversation_id")) != gid:
                 continue
             if pl.get("onebot_message_id"):
@@ -927,16 +889,17 @@ def _oracle_local_state(home, gid):
         db.close()
     return ids, last_time
 
-
 @case
 def 认群按group_of不按endswith():
     """issue #211：`_local_state` 按 cid 字段结构认群，不按后缀。同一本 `chat_inbox`
     三本会话：群 A（`12345`，`gA`）、群 B（`2345`，与 A 互为后缀，`gB`）、私聊
-    （`direct:12345`，user_id 等于群 A 号，`dA`）。旧 `endswith` 在群 A 上把私聊
-    `dA` 串进来（`100000:direct:12345` 同样以 `:12345` 结尾）；群 B 互为后缀**不**
-    串（整串后缀匹配挡住）。两群都查、以 `group_of` 为 oracle 断言 `ids` 与
-    `last_time` 一致——旧实现必须在群 A 的 `ids`（多出 `dA`）与 `last_time`（取到
-    私聊时间）上红。`last_time` 是 `window_start`，串错会把窗口左边界拉错。
+    （`direct:12345`，user_id 等于群 A 号，`dA`）。旧 `endswith` 在群 A 上把私聊 `dA`
+    串进来（`100000:direct:12345` 同样以 `:12345` 结尾）；群 B 互为后缀**不**串（整串
+    后缀匹配挡住）。两群都查、以 `group_of` 为 oracle 断言 `ids` 与 `last_time` 一致
+    ——旧实现必须在群 A 的 `ids`（多出 `dA`）与 `last_time`（取到私聊时间）上红。
+    `last_time` 是 `window_start`，串错会把窗口左边界拉错。#219 后 `_local_state` 走
+    `row_conversation` 取会话号，但认群若仍 `endswith`，完整 cid 上后缀匹配照样串
+    ——本用例钉认群那步，与取会话号那步正交。
     """
     acct = "100000"
     gid_a, gid_b = "12345", "2345"
@@ -955,17 +918,15 @@ def 认群按group_of不按endswith():
             restore()
     return got_a == exp_a and got_b == exp_b
 
-
 @case
 def 私聊同号不串入群缺口():
     """issue #211 下游：私聊串进 `local_ids` 让 `compute()` 少报缺口。chat_inbox：
-    群 A 收过 `g0`（now-3600）；私聊 user_id=群号 有 `gA`（now-1800，更晚——同时
-    污染 `last_time`/`window_start`）。history 一条 `gA`（now-600，窗口内）——群 A
-    真没收到，应当 missing=1。旧 `endswith` 把私聊 `gA` 算进 `local_ids` 且
-    `last_time` 取到 now-1800：`gA` 被判「已收」→ missing=0。新实现
-    `local_ids={g0}`、`last_time=now-3600`：missing=1。OneBot 消息 id 是按会话递增
-    的序列号，私聊与群消息撞同一数字 id 在真实数据里不罕见——这正是串扰能少报缺口
-    的现实路径。
+    群 A 收过 `g0`（now-3600）；私聊 user_id=群号 有 `gA`（now-1800，更晚——同时污染
+    `last_time`/`window_start`）。history 一条 `gA`（now-600，窗口内）——群 A 真没收到，
+    应当 missing=1。旧 `endswith` 把私聊 `gA` 算进 `local_ids` 且 `last_time` 取到
+    now-1800：`gA` 被判「已收」→ missing=0。新实现 `local_ids={g0}`、
+    `last_time=now-3600`：missing=1。OneBot 消息 id 是按会话递增的序列号，私聊与群消息
+    撞同一数字 id 在真实数据里不罕见——这正是串扰能少报缺口的现实路径。
     """
     acct = "100000"
     gid = "12345"
@@ -987,13 +948,11 @@ def 私聊同号不串入群缺口():
             restore()
     return g["missing"] == 1 and g["window_start"] == now - 3600
 
-
 def main():
     print("=" * 72)
     print("        [测试] issue #114 停机窗口缺口披露：漏了什么事后说得出来")
     print("=" * 72)
     return fs.run_cases(CASES)
-
 
 if __name__ == "__main__":
     sys.exit(main())

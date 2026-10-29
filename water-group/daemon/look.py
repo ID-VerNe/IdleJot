@@ -5,6 +5,7 @@ collector 默认只预热 @ 我那条消息的图（auto_images=candidates），
 
 Usage:
   look.py --event 123 [--index 0] [--frames all]
+  look.py --event q456 [--index 0]     # 追问行 / --context 的 q<n>
   look.py --recent 10
   look.py --pick
 """
@@ -19,7 +20,7 @@ sys.path.insert(0, str(HERE))
 
 import mcp_client  # noqa: E402
 import session  # noqa: E402
-import wg_event_ref  # noqa: E402  (事件 id 的唯一解析入口，issue #216)
+import wg_event_ref  # noqa: E402  (id / qid 两套命名空间 + 事件 id 的唯一解析入口，#203/#216)
 import wg_images  # noqa: E402
 import winconsole  # noqa: E402
 
@@ -30,7 +31,7 @@ def events():
     改前这个文件自带一份事件流读取与 `event_by_id()`，只扫 `wg_events.jsonl`：
     `--context` 里的闲聊（mention_only 滤掉、只在 `chat_inbox`）补读到像素时，
     落盘那一行拿不到 sender / ts / quote_of，图片索引里就少一半信息。现在按 id
-    取行走 `wg_event_ref.resolve()`，这里只留「整份事件流」这一个用途。
+    取行走 `wg_event_ref.resolve_id()`，这里只留「整份事件流」这一个用途。
     """
     return wg_event_ref.events()
 
@@ -97,6 +98,21 @@ def pick():
     return 0
 
 
+def _inbox_id_of_events(event_id):
+    """事件流 id -> 会话库 rowid（``wg_events`` 行上的 ``inbox_id``）。
+
+    ``chat_inbox`` 是 AUTOINCREMENT 且跨会话共用，同一条消息在两套编号里的数字
+    基本相同——但**只是基本相同**：别群先插的行会把库 rowid 推高，于是两者分叉。
+    图片索引（``wg_images``）与 ``read_chat_image`` 都用库 rowid，所以补读必须按
+    库口径去取，不能假设 ``wg_events.id`` 就等于它（issue #203）。
+    """
+    event = event_by_id(event_id)
+    try:
+        return int(event.get("inbox_id"))
+    except (TypeError, ValueError):
+        return None
+
+
 def read_event(event_id, index, frames):
     row = wg_images.load_index().get((event_id, index)) or {}
     if row.get("local_path") and Path(row["local_path"]).is_file():
@@ -105,7 +121,7 @@ def read_event(event_id, index, frames):
         return 0
     # 先按同一个解析入口确认这条 id 在不在：两个来源都没有时，补读接口同样拿不到
     # 像素，先在这里说清是「没有这条」而不是让 MCP 回一句泛泛的失败（issue #216）。
-    ref = wg_event_ref.resolve(event_id)
+    ref = wg_event_ref.resolve_id(event_id)
     if ref is None:
         print(f"本地没有 id={event_id} 的记录（wg_events 与 chat_inbox 都没有），无法补读。")
         print("可能已被 chat_inbox 的 1000 条上限挤掉，或这个 id 从来不存在。")
@@ -140,17 +156,41 @@ def read_event(event_id, index, frames):
     return 0
 
 
+def look(ref, index, frames):
+    """按记号补读（issue #203）：``q<n>`` 直接是库 rowid，裸数字是事件流 id。
+
+    两套编号会撞号：``--event 7`` 是唤醒行第 7 条，``--event q7`` 是追问行/上下文
+    里那条闲聊。裸数字仍按改前的做法经 ``wg_events`` 反查库 rowid（历史行为不变），
+    只是现在反查不到时**说出来**，不再拿那个数字去猜库。
+    """
+    try:
+        namespace, number = wg_event_ref.parse(ref)
+    except wg_event_ref.BadRef as exc:
+        print(f"拒绝：{exc}")
+        return 1
+    if namespace == wg_event_ref.INBOX:
+        return read_event(number, index, frames)
+    inbox = _inbox_id_of_events(number)
+    if inbox is None:
+        print(f"事件流里没有 id={number} 的记录，对着它补读会取到无图的条目。")
+        print(f"      要读追问行/上下文里的那条请写 --event q{number}")
+        return 1
+    return read_event(inbox, index, frames)
+
+
 def main(argv=None):
     winconsole.ensure_utf8_stdio()
     parser = argparse.ArgumentParser(description="补读群聊图片并落盘")
-    parser.add_argument("--event", type=int, help="事件 id（reply.py --context 里的行首编号）")
+    parser.add_argument(
+        "--event",
+        help="消息编号：唤醒行/事件流的裸数字（7）或追问行/上下文的 q7；也可写 id:7 / qid:7")
     parser.add_argument("--index", type=int, default=0, help="图片下标 image_index，默认 0")
     parser.add_argument("--frames", choices=["one", "all"], default="one", help="动图默认 1 帧；all 补 3 帧")
     parser.add_argument("--recent", type=int, help="列出最近 N 条图片记录")
     parser.add_argument("--pick", action="store_true", help="列出值得补读的图片候选，不拉像素")
     args = parser.parse_args(argv)
     if args.event is not None:
-        return read_event(args.event, args.index, args.frames)
+        return look(args.event, args.index, args.frames)
     if args.recent is not None:
         return recent(args.recent)
     if args.pick:

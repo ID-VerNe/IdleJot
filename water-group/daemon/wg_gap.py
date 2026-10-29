@@ -37,7 +37,7 @@ from pathlib import Path
 
 import wg_clock  # noqa: E402  (漏掉的 @ 的时间戳按同一份渲染口径)
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #4 PA0)
-import wg_isolation  # noqa: E402  (group_of：本群认群的全仓唯一口径，issue #211)
+import wg_event_ref  # noqa: E402  (会话号的唯一口径，issue #219)
 import wg_text  # noqa: E402  (issue #169 PC：connect_ro 延迟导入门面)
 from wg_paths import data_dir, state_dir  # noqa: E402
 
@@ -80,16 +80,20 @@ def _local_state(group_id):
     """该群在 chat_inbox 里已有的 onebot_message_id 集合 + 最新一条 epoch 秒。
 
     与 issue #114 现象段那条复现命令同款 diff：`conversation_id` 形如 `1:group:123`，
-    按 `wg_isolation.group_of(cid) == group_id` 认群（全仓唯一口径，issue #211）。
+    按 `wg_event_ref.group_of(cid) == group_id` 认群（字段结构判定，issue #211）。
     `at` 是 chat_inbox 的 REAL 列（epoch 秒），不从 payload 解析——`max(at)` 就是
     窗口左边界。
 
-    issue #211：改前用 `endswith(':' + group_id)`，不校验 cid 的字段结构。群号互为
-    后缀（`12345` / `2345`）**不会**串——`<account>:group:12345` 整串以 `:12345`
-    结尾、不以 `:2345` 结尾。真正串的是同库里的 `:direct:<user_id>` 会话：user_id
-    恰好等于某群号时（`100000:direct:12345` 同样以 `:12345` 结尾），私聊消息被当成
-    「本机已收的群消息」，缺口少报、`last_time` 取到别会话的时间。`group_of` 按
-    `split(':')` 取 `parts[1]=='group'` 才认，私聊返回空串，不串。
+    会话号走 `wg_event_ref.row_conversation()`（payload 优先、会话行兜底，issue #219）：
+    只读 payload 时，缺这个键的行会被静默判成别的群，缺口于是报得比实际大。
+
+    issue #211：认群用 `group_of(cid) == gid` 而不是 `endswith(':' + gid)`。`row_conversation`
+    取回的是完整 cid（`<account>:group:<gid>` 或 `<account>:direct:<uid>`），`endswith`
+    不校验字段结构——同库里一个 `:direct:<user_id>` 会话的 user_id 恰好等于某群号时
+    （`100000:direct:12345` 同样以 `:12345` 结尾），私聊消息会被当成「本机已收的群消息」，
+    缺口少报、`last_time` 取到别会话的时间。`group_of` 按 `split(':')` 取
+    `parts[1]=='group'` 才认，私聊返回空串不串。`group_of` 与 `row_conversation` 同在
+    `wg_event_ref`，无新 import。
     """
     gid = str(group_id or "")
     ids = set()
@@ -97,13 +101,34 @@ def _local_state(group_id):
     con = _db()
     if con is None:
         return ids, last_time
+    # 会话号一并取回（LEFT JOIN，issue #219）：payload 缺 `conversation_id` 的行
+    # 以前在这里被判成「不是这个群」，那一批消息既不算进 ids，也推不动窗口左边界
+    # ——缺口会被报成比实际更大。口径同 `wg_event_ref.row_conversation()`。
+    #
+    # 但不能因此把「会话表读不到」变成「缺口算成空的」：这里只读 `chat_inbox` 是
+    # issue #114 起的既有契约（`check_gap_disclosure` 的夹具就只建那一张表），而
+    # LEFT JOIN 撞上缺表会抛 `sqlite3.Error`，被下面那句 `except` 静默吞掉，缺口语
+    # 报得比实际更小——比改前的「报得更大」更危险。所以缺表时退回只读 payload 的
+    # 老写法：宁可少算兜底那部分，也不让整段静默归零。
+    sql = ("SELECT i.at, i.payload, s.conversation_id"
+           " FROM chat_inbox i LEFT JOIN chat_sessions s ON s.id = i.session_id"
+           " ORDER BY i.at")
     try:
-        for at, payload in con.execute("SELECT at, payload FROM chat_inbox ORDER BY at"):
+        rows = list(con.execute(sql))
+    except sqlite3.Error:
+        rows = [(at, payload, None) for at, payload
+                in con.execute("SELECT at, payload FROM chat_inbox ORDER BY at")]
+    try:
+        for at, payload, session_cid in rows:
             try:
                 pl = json.loads(payload)
             except (ValueError, TypeError):
                 continue
-            if wg_isolation.group_of(pl.get("conversation_id")) != gid:
+            if not isinstance(pl, dict):
+                continue
+            cid = wg_event_ref.row_conversation(
+                {"payload": pl, "conversation_id": session_cid})
+            if wg_event_ref.group_of(cid) != gid:
                 continue
             if pl.get("onebot_message_id"):
                 ids.add(str(pl["onebot_message_id"]))

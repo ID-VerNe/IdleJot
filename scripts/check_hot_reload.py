@@ -15,6 +15,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -28,6 +29,7 @@ sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 import reload  # noqa: E402
 import reload_exec  # noqa: E402  (issue #11 PD: 执行层；补丁打到这里才到真实调用点)
 import reload_plan  # noqa: E402  (issue #11 PD: 分析层；补丁打到这里才到真实调用点)
+import wg_budget  # noqa: E402  (issue #230：reload.py --wait 默认走预算口径)
 import wg_daemon  # noqa: E402  (issue #11 PB: JSON 助手搬到 wg_daemon)
 
 
@@ -329,6 +331,52 @@ def check_cli_no_spawn():
     print("  ok  CLI：reload.py 无 subprocess/Popen，reload.ps1 存在")
 
 
+def check_wait_budget():
+    """reload.py 的 --wait 默认值必须 = wg_budget.WAIT_BUDGET，且 reload.ps1 不补发
+    字面量 --wait（单点定义）。issue #230：默认 120 吃光 AGENT_TOOL_TIMEOUT，宿主在
+    120s 处杀进程树时 _wait_result 的超时分支来不及执行，Agent 看到的最后一行停在
+    「已投递 nonce=…」，分不清被杀还是还在等。
+    """
+    source = (ROOT / "water-group" / "daemon" / "reload.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    wait_default = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "add_argument":
+            if any(getattr(a, "value", None) == "--wait" for a in node.args):
+                for kw in node.keywords:
+                    if kw.arg == "default":
+                        wait_default = kw.value
+    assert wait_default is not None, "reload.py --wait 没有找到 default 关键字参数"
+    # default=wg_budget.WAIT_BUDGET → Attribute(value=Name('wg_budget'), attr='WAIT_BUDGET')
+    ok_attr = (isinstance(wait_default, ast.Attribute)
+               and isinstance(wait_default.value, ast.Name)
+               and wait_default.value.id == "wg_budget"
+               and wait_default.attr == "WAIT_BUDGET")
+    # 不接受任何字面量默认值（120 / 90 / 数字一律不行——必须走预算口径，单点定义）
+    not_literal = not isinstance(wait_default, ast.Constant)
+    assert ok_attr and not_literal, \
+        f"reload.py --wait default 必须是 wg_budget.WAIT_BUDGET，实际是 {ast.dump(wait_default)}"
+
+    ps1 = (ROOT / "reload.ps1").read_text(encoding="utf-8")
+    # reload.ps1 里 --wait 只允许出现在注释里（解释/示例），不允许作为补发的参数值。
+    # 抓「补发」形态：`@('--wait', '<数字>')` 或 `--wait` 后跟一个裸数字字面量。
+    code_lines = [ln for ln in ps1.splitlines() if ln.strip()
+                  and not ln.strip().startswith("#")]
+    code = "\n".join(code_lines)
+    assert not re.search(r"'--wait'\s*,\s*'\d+'", code), \
+        "reload.ps1 不得补发字面量 --wait（单点定义，让 reload.py 默认值生效，issue #230）"
+    assert "$hasWait" not in code and "$cliArgs +=" not in code, \
+        "reload.ps1 不应再有 --wait 补发逻辑（已删，issue #230）"
+
+    # 反例：旧默认 120 必须被判超预算（钉住复发——任何把默认改回 120 的改动会让这条变红，
+    # 而 reload.py 的 default 断言会先一步挡住）。
+    assert wg_budget.over_budget(120) is True, "120 应被判超预算（issue #230 反例）"
+    assert wg_budget.over_budget(wg_budget.WAIT_BUDGET) is False, \
+        "WAIT_BUDGET 不应被判超预算"
+    print(f"  ok  等待预算：reload.py --wait 默认 = wg_budget.WAIT_BUDGET "
+          f"({wg_budget.WAIT_BUDGET})，reload.ps1 不补发字面量，over_budget(120) 为真")
+
+
 def check_exclusions():
     planner = reload.Planner()
     files = planner.scan()
@@ -376,6 +424,7 @@ def main():
     check_quarantine()
     check_no_port_spawn()
     check_cli_no_spawn()
+    check_wait_budget()
     check_exclusions()
     check_soft_marker()
     check_mailbox_dry_run()

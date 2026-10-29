@@ -47,6 +47,17 @@ wait 已交付材料、无需消息翻页且 `decision_required=true` 时，顶�
 
 Planner 的 `WAITING` 表示暂缓决定，不是本批已处理；其 `next_call` 不确认本批，旧客户端附上原水位也不会越过待处理输入。到期前无新输入时继续程序内等待，较短调用超时可返回带 `deferred_until` 的 idle；到期后重新交付原输入和新建的可规划批次，不复用过期 batch。新输入按原收集规则交付并取代旧等待，分页可正常推进。成功回复或沉默后仍正常确认；撤回清空待决输入、停止或撤权不会恢复旧等待，取消仅结束当前调用、保留未处理进度供显式接续。没有后台模型或新调度器。
 
+两个「等待秒数」字段分工不同，上限同源（issue #221）：
+
+| 字段 | 所在工具 | 含义 | 上限 |
+| --- | --- | --- | --- |
+| `wait_seconds` | `plan_chat_reply` | 计划内的推迟：`action='wait'` 时把本轮发送决定推迟 N 秒，只推迟决定，不承诺到点自动叫醒 | `TURN_MAX_WAIT_SECONDS`（=冷却上限 60） |
+| `minimum_wait_seconds` | `wait_chat_messages` | 本次调用的等待下限：重试前在程序内等 N 秒，避免旧批次立即返回造成忙等；可被停止或取消打断，不超过 `timeout_seconds` | `TURN_MAX_WAIT_SECONDS`（=冷却上限 60） |
+
+两者上限都取 `TURN_MAX_WAIT_SECONDS`，即 `RANGES['reply_cooldown_seconds']` 的上限（60）。`needs_wait`/`reply_cooldown` 给出的等待秒数按冷却算，最大就是这个上限；recovery 把它夹到上限内是「等到能再试」，recovery.next_call 的 `minimum_wait_seconds` 与 schema 的 maximum 因此同源——冷却配成 45 时指导值就是 45，不会被静默压成 30 再吃一次冷却。`TURN_MAX_WAIT_SECONDS` 与冷却上限是同一个数，下次调 `RANGES` 一起动。
+
+`action="wait"` 的计时到期、而到期那一刻又没有新输入可读时，等待不再返回无法区分的 `idle`（issue #222）：返回 `event="wait_elapsed"`，附 `wait_plan`（`plan_id` / `action` / `not_before` 到期时刻），`decision_required=true`，`input_batch.phase` 仍为 `DECIDING`，顶层 `next_call` 复用该批次的 `plan_call`。待决计划在 Agent 作出决定前保持 `WAITING`，原输入与游标都不动。这类包要求当场决定：接话（`reply` / `ask`）或明确收场（`silence`）；继续 `wait` 会再次进入同一计时。`ask` 到期不产生该事件——它已经把对话窗口装好，对方下一句就是必须续上的输入。学习唤醒（`learning_ready`）优先于它，来源断开时仍报 `source_unavailable`。
+
 READY 结果的 `quote_guidance` 提供目标之后已读的他人消息数量，默认 `quote_threshold=3`：达到阈值建议首条文字引用，由同一次 Replyer 生成覆盖或采纳并填写 `quote`，不新增模型请求。自身、系统、撤回和重复事件不计数；不会等凑够条数。实际引用发送仍保留已有的 QQ 目标核验。
 
 接收的引用原文及合并转发在父消息的 `referenced_messages` 中。程序优先使用本地事件或内嵌节点，缺失时在整批 `detail_budget_seconds=3` 的预算下调用内部 OneBot 接口。只展开一层引用；自动交付和显式 `read_chat_forward` 统一默认最多 100 节点，仍遵守 2 层、12,000 字符等原预算；显式 limit 可选 1–100，小页与后续分页保持生效。超限明确标记，不能把转发作者当作当前发言者。NapCat 的 `parseMultMsg` 打开时节点随事件内联（`forward` 段直接带 `content`，内层转发同样内联），不再依赖 `get_forward_msg`，也就绕开它的「内层消息无法获取」与资源过期；关闭时事件里只有资源编号，补拉能取到外层、内层拿不到。部署建议开启，实时事件的嵌套转发才完整可见；事件到达前就已过期或撤回的老转发仍然补不回来。

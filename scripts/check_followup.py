@@ -534,12 +534,18 @@ def check_db_fallback_not_gated():
     import plugins
 
     off = commands.settings_from({"plugins": {"followup": {"enabled": False}}})
-    # event_lookup / active_group 连 settings 都不看：停用态照旧回答
-    assert plugins.emit("event_lookup", {"event_id": 6, "settings": off}) == (GROUP, "776")
-    assert plugins.emit("event_lookup", {"event_id": 9999, "settings": off}) is None
+    # event_lookup / active_group 连 settings 都不看：停用态照旧回答。
+    # 编号必须是**库记号**（q<n>）：这条链查的是 chat_inbox（issue #203），
+    # 裸数字是事件流编号，交给它会拿别群同号那条顶替。
+    assert plugins.emit("event_lookup", {"event_id": "q6", "settings": off}) == (GROUP, "776")
+    assert plugins.emit("event_lookup", {"event_id": "qid:6"}) == (GROUP, "776")
+    assert plugins.emit("event_lookup", {"event_id": "q9999", "settings": off}) is None
+    assert plugins.emit("event_lookup", {"event_id": 6, "settings": off}) is None, \
+        "裸数字（事件流编号）不该走库兜底（issue #203 撞号本体）"
+    assert plugins.emit("event_lookup", {"event_id": "id:6", "settings": off}) is None
     assert plugins.emit("active_group", {"settings": off}) == GROUP
     # commands 注册表同一条路，答案一样
-    assert commands.PLUGINS.emit("event_lookup", {"event_id": 6}) == (GROUP, "776")
+    assert commands.PLUGINS.emit("event_lookup", {"event_id": "q6"}) == (GROUP, "776")
     assert commands.PLUGINS.emit("active_group") == GROUP
     print("  ok  event_lookup / active_group 不受门控（回复链路 DB 兜底）")
 
@@ -725,9 +731,12 @@ def check_bare_at_others_watch():
     code, out = run_watch()
     assert code == 0, f"watch.py 退出码 {code}：\n{out}"
     assert "WAKE" in out, f"@我 的空白消息该唤醒，不能连坐：\n{out}"
-    assert "id=951" not in out, \
+    assert "q951" not in out and "id=951" not in out, \
         f"只 @ 别人的空白消息进了追问行（issue #138 复发）：\n{out}"
-    assert "id=952" in out, f"@我 的那条没进追问行：\n{out}"
+    # 追问行的编号改打 `q<n>`（issue #203）：那是 chat_inbox 的 rowid，与事件流
+    # 的裸数字是两套编号，撞号时必须能一眼分开。
+    assert "id=q952" in out, f"@我 的那条没进追问行（issue #203 的 q<n> 形态）：\n{out}"
+    assert "id=952" not in out, f"追问行仍在打裸数字编号（issue #203 复发）：\n{out}"
     followup.close()
     print("  ok  watch.py 追问行只放真接话：@别人+空白不出现，@我+空白照旧（issue #138）")
 

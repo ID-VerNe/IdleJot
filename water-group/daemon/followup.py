@@ -57,6 +57,7 @@ import wg_images  # noqa: E402  (图片标记渲染，issue #35 追问行同款)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #164 PC)
 import wg_event_ref  # noqa: E402  (事件 id 的唯一解析入口，issue #216)
+import wg_isolation  # noqa: E402  (本会话群身份的唯一解析口，issue #206)
 import wg_text  # noqa: E402  (issue #169 PC：connect_ro 延迟导入门面)
 from wg_paths import data_dir, state_dir
 STATE = state_dir()
@@ -113,15 +114,33 @@ def close():
 
 
 def active_session_id():
-    """当前会话 id，读库不读 wg_session.txt——后者会滞后于会话重建。"""
+    """当前会话 id：按本会话钉死的群过滤 `chat_sessions`，不取整表最后一行。
+
+    多群机器上 `chat_sessions` 里会有多个 `active=1`（#164 支持的一会话一群），
+    改前 `WHERE active=1 ORDER BY rowid DESC LIMIT 1` 没有群过滤，取到哪条看
+    会话创建顺序——追问窗口于是绑到别的群的会话，`since()` 整窗口读别群，
+    `stale()` 还会因那条会话重建而误判收窗（issue #206）。
+
+    群身份走 `wg_isolation.resolve()` 的四档口径（env / 状态文件 / 唯一启用群 /
+    空），与 `watch.py` 的 `rows_of` / `reply.py` 的 `target_group` 同一口径；
+    未钉死时退化成改前的整表取最后一行——单群机器与改前完全一致，不制造新故障。
+    """
+    conversation, _source = wg_isolation.resolve()
     try:
         db = wg_text.connect_ro(DB, timeout=5)
     except sqlite3.Error:
         return ""
     try:
-        row = db.execute(
-            "SELECT id FROM chat_sessions WHERE active=1 ORDER BY rowid DESC LIMIT 1"
-        ).fetchone()
+        if conversation:
+            row = db.execute(
+                "SELECT id FROM chat_sessions"
+                " WHERE active=1 AND conversation_id=? ORDER BY rowid DESC LIMIT 1",
+                (conversation,)).fetchone()
+        else:
+            row = db.execute(
+                "SELECT id FROM chat_sessions WHERE active=1"
+                " ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
     except sqlite3.Error:
         return ""
     finally:

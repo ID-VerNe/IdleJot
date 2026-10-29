@@ -60,6 +60,7 @@ from chatlocal.text_limits import (  # noqa: E402
     clip,
 )
 import dossier  # noqa: E402
+import wg_event_ref  # noqa: E402  (issue #216: 按 id 取行与来源顺序的唯一入口)
 import wg_text  # noqa: E402  (issue #32: daemon 正文渲染的唯一归属)
 from water_group.memory_engine import MemoryEngine  # noqa: E402
 
@@ -472,7 +473,7 @@ def test_show_event_reads_the_whole_message(tmp):
     }, ensure_ascii=False) + "\n", encoding="utf-8")
 
     buffer = io.StringIO()
-    with patch.object(wg_text, "EVENTS", events):
+    with patch.object(wg_event_ref, "EVENTS", events):
         with contextlib.redirect_stdout(buffer):
             code = wg_text.show_event(7)
     assert code == 0, code
@@ -492,15 +493,15 @@ def test_show_event_reads_the_whole_message(tmp):
                                     "timestamp": 1792759760000}, ensure_ascii=False)))
     conn.commit()
     conn.close()
-    with patch.object(wg_text, "DB", db_path):
+    with patch.object(wg_event_ref, "DB", db_path):
         with contextlib.redirect_stdout(buffer):
             code = wg_text.show_event(1)
     assert code == 0, code
     assert long_body in buffer.getvalue(), buffer.getvalue()[:200]
 
     # 第三路：两条都没有时明说，不靠空输出表达失败。
-    with patch.object(wg_text, "EVENTS", tmp / "none.jsonl"), \
-            patch.object(wg_text, "DB", tmp / "none.sqlite3"):
+    with patch.object(wg_event_ref, "EVENTS", tmp / "none.jsonl"), \
+            patch.object(wg_event_ref, "DB", tmp / "none.sqlite3"):
         with contextlib.redirect_stdout(buffer):
             code = wg_text.show_event(999)
     assert code == 1, code

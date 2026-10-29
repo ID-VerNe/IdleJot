@@ -274,6 +274,9 @@ def muted_now(now=None):
       - `group_shut is True`：全员禁言没有解禁时刻（NapCat 常常不给成员写
         `shut_up_timestamp`），账本明确记着就仍算禁言；
       - `recheck_result == "muted"`：预测已过点，但最后一次复查实测仍禁言。
+        必须有可复查的对象撑着（`mute_until` 在或 `group_shut is True`）——两者都
+        缺时这条结论是孤立的，既不知道禁言到何时、也不知道是不是全员禁言，
+        `watch.py` 据此停扫追问窗口就是永久停扫（issue #205）。
 
     `recovered is True`（实测解禁 / 补发成功）、无账本、非禁言类失败（参数错、
     网络错）一律 False。**不探测**：打接口的是 `probe()`；调用方（`watch.py` 的
@@ -292,7 +295,11 @@ def muted_now(now=None):
         return True
     if rec.get("group_shut") is True:
         return True
-    return rec.get("recheck_result") == "muted"
+    # 孤立的 `recheck_result="muted"`（mute_until 缺失 + group_shut 也读不到）不算
+    # 仍在禁言：那条结论没有可复查的对象撑着，watch.py 据此停扫就是永久停扫
+    # （issue #205）。让它降级成 False，解禁扫描恢复，下一次 probe() 或下一次发送
+    # 的 diagnose() 会重建事实。
+    return rec.get("recheck_result") == "muted" and bool(until or rec.get("group_shut") is True)
 
 
 def clear():
@@ -414,7 +421,12 @@ def probe(post=None, now=None, min_interval=None):
     except (TypeError, ValueError):
         return "idle", False
     if not until and rec.get("group_shut") is not True:
-        return "idle", False  # 不是禁言类失败（参数错 / 网络错 / 状态未知），没有对象
+        # 没有禁言时刻、账本也没明确记着全员禁言：普通失败（参数错 / 网络错）
+        # 没有复查对象，idle。但**上一轮探测留下的 muted / unknown 不算「没有对象」
+        # ——那只是接口抖动把 group_shut 擦掉了，不是解禁了**（issue #205）：这一轮
+        # 仍要探一次（带节流），探到仍禁言就如实留 muted/unknown，探到解禁就 recovered。
+        if rec.get("recheck_result") not in ("muted", "unknown"):
+            return "idle", False
     try:
         wrote_at = int(rec.get("at") or 0)
     except (TypeError, ValueError):

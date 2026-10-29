@@ -16,7 +16,7 @@ import sqlite3
 
 QUOTE_CHARS = 60   # 唤醒行是给人扫的，原文留够判断「在说什么」就行
 SENDER_CHARS = 24
-MAX_QUOTES = 3     # 一条消息最多挂 8 个引用，全印出来会把唤醒行撑成一屏
+MAX_QUOTES = 3     # 一条消息最多挂 3 个引用，全印出来会把唤醒行撑成一屏
 
 REASONS = {
     "unavailable": "原文不可得",

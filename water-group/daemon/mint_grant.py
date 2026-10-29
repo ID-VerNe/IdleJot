@@ -30,16 +30,20 @@ SCOPE_FIELDS = (
     "qq_qzone", "qq_albums",
 )
 
-# First-run fallback when no grant exists yet to copy a scope from. Broad on the
-# capabilities a water-group collector needs (send/chat/onebot/manage/chat_* and
-# voice ASR); qq_* extensions stay off because the collector is group-only and
-# never touches qzone/albums. An operator can narrow this from the UI afterwards.
+# First-run fallback when no grant exists yet to copy a scope from. Broad only on
+# the capabilities a water-group collector actually needs (send/chat/onebot/manage,
+# the chat_* media the collector posts, and voice ASR). Everything else stays off
+# for the same reason as qq_*: the collector is group-only and never calls
+# read_chat_attachment / import_qq_media (those are Agent-side tools opened by
+# scope), so chat_video / chat_files defaulting to True only widened the
+# authorisation surface on a cold rebuild (issue #201). An operator turns them on
+# from the UI when a session actually needs them.
 DEFAULT_SCOPE = {
     "platforms": ["qq"], "conversations": [], "start": "", "end": "",
     "media": False, "prepare": False, "voice": True, "onebot": True,
     "send": True, "manage": True, "chat": True, "chat_images": True,
     "chat_sticker_send": True, "chat_sticker_collect": True, "chat_reactions": True,
-    "chat_voice": True, "chat_video": True, "chat_files": True,
+    "chat_voice": True, "chat_video": False, "chat_files": False,
     "qq_messages": False, "qq_interactions": False, "qq_friends": False,
     "qq_profile": False, "qq_qzone": False, "qq_albums": False,
 }

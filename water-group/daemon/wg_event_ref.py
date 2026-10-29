@@ -160,6 +160,49 @@ def _session_conversation(db, session_id) -> str:
     return str(row[0] or "") if row else ""
 
 
+def payload_conversation(payload) -> str:
+    """payload 自己的 `conversation_id`；不是 dict、缺键、空串都返回空串。
+
+    这是**唯一**读 payload 这个键的地方。批量读（`followup.since` /
+    `wg_context.recent_chatter` / `wg_gap._local_state`）以前各写一份
+    `data.get("conversation_id")`，缺键就静默读成空（issue #219）。
+    """
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("conversation_id") or "")
+
+
+def row_conversation(row) -> str:
+    """一条 `chat_inbox` 行的会话号：payload 优先，会话行兜底（issue #216 / #219）。
+
+    名字里带 `row`：`wg_isolation.conversation_of(group_id)` 是反方向的「群号 →
+    `<账号>:group:<群号>`」，两个方向同名会让调用点读不出自己在用哪一个。
+
+    `row` 是 dict：`payload`（已解成 dict 或原样的 JSON 串）与 `conversation_id`
+    ——后者是**会话行上的那一列**，由调用方的 SELECT（LEFT JOIN `chat_sessions`）
+    或 `_row_as_dict` 一并取回；没带这一列时按「没有」处理，绝不回头再查一次库
+    （批量读会变成 N+1）。
+
+    这是**批量读**与**单条解析**的唯一出口：`followup.since()` /
+    `wg_context.recent_chatter()` / `wg_gap._local_state()` 与 `_ref_from_inbox()`
+    都走这里，别在调用点再写一次 `payload_conversation(payload) or row[...]`。
+
+    payload 少这个键时两条路都退成空串：写方 `chatlocal/mcp_chat.py` 现在**是**
+    写这个键的，但兜底不能建立在「写方永不变」上——旧行、被裁过的行、别的
+    写入方都读得出来（issue #219：追问行与 `--context` 行按跨群主档挂别名指向）。
+    """
+    if not isinstance(row, dict):
+        return ""
+    payload = row.get("payload")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            payload = None
+    return (payload_conversation(payload)
+            or str(row.get("conversation_id") or ""))
+
+
 def _ref_from_events(event_id):
     for row in events():
         if row.get("id") != event_id:
@@ -187,9 +230,12 @@ def _ref_from_inbox(event_id):
         if not isinstance(payload, dict):
             payload = {}
         # 群号优先 payload（追问窗口与别名渲染都按它取），其次会话行——payload
-        # 少这个键的行走的正是这一步（issue #216 的复现形态）。
-        conversation = (str(payload.get("conversation_id") or "")
-                        or _session_conversation(db, row.get("session_id")))
+        # 少这个键的行走的正是这一步（issue #216 的复现形态）。口径与批量读
+        # （`followup.since` / `wg_context.recent_chatter`）同一份，见
+        # `row_conversation()`（issue #219）。
+        conversation = row_conversation(
+            {"payload": payload,
+             "conversation_id": _session_conversation(db, row.get("session_id"))})
         # 编号同理：payload 两种键名 → `chat_inbox.message_id` 列。
         message = message_id_of(payload) or str(row.get("message_id") or "")
         return Ref(event_id=int(event_id), source=SRC_INBOX,

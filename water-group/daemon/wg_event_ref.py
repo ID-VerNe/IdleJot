@@ -1,4 +1,35 @@
-"""事件 id 的唯一解析入口：`wg_events` → `chat_inbox`（issue #216）。
+"""一条消息的记号：两件事各归一处——**它指哪套编号**与**它指向哪条消息**。
+
+## 一、``id=<n>`` 与 ``qid=<n>`` 是两个命名空间（issue #203）
+
+issue #203 的翻车形态：追问行与唤醒行打同一种 ``id=<数字>``，而这两套数字来自
+**两个各自独立分配的编号**——唤醒行是 ``wg_events.jsonl`` 的 ``id``，追问行是
+``chat_inbox`` 的 AUTOINCREMENT 全局 rowid（``followup.py`` 的模块 docstring 明说
+它是全局 rowid，跨会话唯一，但与会话内的 ``wg_events`` 编号毫无关系）。撞号是常态：
+``event_target(7)`` 拿到群 111 的 ``message_id=7007``，``lookup(7)`` 拿到群 222 的
+``9999``，于是回复正文发进正确的群，引用气泡却指向另一个群那条消息；钉死群的会话
+还会在 ``target_group()`` 上被拒，理由与眼前那一行对不上。
+
+改前每一处入口各自 ``int()`` 之后再各写一套「先查 wg_events、查不到回库兜」的
+回退链，撞号时每一处都**静默二选一**。本模块把「这个记号指的是哪套编号」收成
+唯一归属，回退链一起收掉：
+
+===========  ==================================  ================================
+写法          含义                                查找范围
+===========  ==================================  ================================
+``id:7``      事件流事件（唤醒行 / ``--list``）    只查 ``wg_events.jsonl``
+``qid:7``     会话库消息（追问行 / ``--context``） 只查 ``chat_inbox``
+``7``         事件流事件（**与改前一致**）          ``wg_events``；未命中**且库中
+                                                   唯一命中**时回库，并标明来源
+``q7``        会话库消息的简写                    只查 ``chat_inbox``
+===========  ==================================  ================================
+
+裸数字仍然是事件流 id，这是**故意**的：唤醒行在改前就是 ``id=<n>``，而 Agent 抄的
+绝大多数编号来自唤醒行；把它悄悄改成「两套里任意一套」就等于把 #164 的护栏从
+「挡住跨群」变成「挡错对象」（#203 的 P0 判级）。撞号时裸数字只认事件流，真要看
+库那条就写 ``q7``——记号上写得出区别，才谈得上不猜。
+
+## 二、按事件 id 取一条消息也只有一个入口（issue #216）
 
 改前「按 id 找一条消息」这件事在四个地方各写了一份，来源顺序与认的字段名都不同：
 
@@ -18,17 +49,104 @@
 解析方只认 payload 里的两个键名，等于把「写方永不变」当成契约：payload 少一个键
 （旧行、别的写入方、被裁过的行）就静默 `None`，而这一行完全读得出来。
 
+## 三、两者怎么配合
+
+``parse()`` 只负责**语法**（记号 → ``(namespace, 数字)``），``resolve()`` /
+``resolve_id()`` 是「按裸 id 找一条消息」的单点入口（返回 :class:`Ref`，
+`wg_events` 优先、`chat_inbox` 兜底——兜底时 ``Ref.namespace`` 会如实说是
+会话库；``resolve`` 是上游兼容名，见函数 docstring），``format_ref()`` 负责
+**渲染**（怎么打进行里给 Agent 抄）。
+
+``resolve_id()`` 与 ``resolve()`` 的口径必须一致，这是本模块唯一容易走岔的地方：
+两条路径都得「裸数字先认事件流，事件流没有才回库」，否则撞号时同一个 id 会在
+``reply.py 7`` 与 ``followup.lookup(7)`` 之间给出两个答案——那正是 #203。
+
+三者分开，是因为渲染风格会变（哪天 ``qid=`` 要改名），而查找口径不该跟着变。
+
 本模块只做解析，不做发送、不做隔离判断、不渲染——`reply` / `followup` / `wg_text` /
 `look` 都调它，来源顺序与字段兼容只在这里维护一份。
 """
+from __future__ import annotations
+
 import json
 import os
+import re
 import sqlite3
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from wg_paths import data_dir, state_dir
+
+# --- 一、命名空间（issue #203） -------------------------------------------
+
+# 命名空间：事件流（wg_events.jsonl）与会话库（chat_inbox）是两套编号。
+EVENT = "event"
+INBOX = "inbox"
+NAMESPACES = (EVENT, INBOX)
+
+# 显式前缀写在前面，简写 ``q7`` 写在后面：``id:7`` / ``qid:7`` / ``7`` / ``q7``。
+# 只认小写——``Q7`` 是打错，不是另一种写法；报错比猜好。
+_EXPLICIT = re.compile(r"^(id|qid):(\d+)$")
+_SHORT = re.compile(r"^q(\d+)$")
+_BARE = re.compile(r"^\d+$")
+
+
+class BadRef(ValueError):
+    """记号长得不像任何一种合法写法。调用方据此拒绝，不猜。"""
+
+
+def parse(ref):
+    """记号 -> ``(namespace, int)``。非法记号抛 :class:`BadRef`。
+
+    接受的写法见模块 docstring 的表。空白先剥：Agent 从行里抄编号时经常带个空格
+    或换行，那不是另一个记号。
+    """
+    text = str(ref if ref is not None else "").strip()
+    if not text:
+        raise BadRef("空记号：需要 id=<n>、qid=<n>、<n> 或 q<n> 之一")
+    matched = _EXPLICIT.match(text)
+    if matched:
+        return (EVENT if matched.group(1) == "id" else INBOX), int(matched.group(2))
+    matched = _SHORT.match(text)
+    if matched:
+        return INBOX, int(matched.group(1))
+    if _BARE.match(text):
+        return EVENT, int(text)
+    raise BadRef(f"看不懂的记号 {text!r}：需要 id=<n>、qid=<n>、<n> 或 q<n> 之一")
+
+
+def format_ref(namespace, number):
+    """``(namespace, int)`` -> 打进行里的写法。``event`` 仍是裸数字。
+
+    唤醒行沿用 ``id=<n>`` 的历史形态（那是一整排 RSS 一样的行，加前缀只会挤掉
+    正文额度）；追问行与上下文行打 ``q<n>``，短，且与裸数字在字面上就能分开。
+    两条都不带 ``<...>`` 括号——Agent 是直接抄这一段去跑的。
+    """
+    number = int(number)
+    return str(number) if namespace == EVENT else f"q{number}"
+
+
+def describe(namespace):
+    """一行中文，用在拒绝信息里说清「你说的是哪套编号」。"""
+    return "事件流（wg_events）" if namespace == EVENT else "会话库（chat_inbox）"
+
+
+def resolve(ref):
+    """按裸 id 解析一条事件，返回 :class:`Ref`；两个来源都没有返回 ``None``。
+
+    这是 `resolve_id` 的**上游兼容名**（issue #216 曾叫 ``resolve``，单参数返回
+    ``Ref``）。`resolve_id` 加了命名空间参数（issue #203），解析口径完全一致：
+    ``wg_events`` 优先、``chat_inbox`` 兜底。撞号时裸数字只认事件流，事件流没有
+    才回库——两个名字给出同一个答案，调用方随便用哪个。
+
+    行在但群号取不到时仍返回 ``Ref``（``resolvable`` 为假），让调用方能把
+    「不存在」与「存在但解析不出群」分开说——这正是 issue #216 修复候选 2。
+    """
+    return resolve_id(ref)
+
+
+# --- 二、按事件 id 取一条消息（issue #216） -------------------------------
 
 EVENTS = state_dir() / "wg_events.jsonl"
 DB = Path(os.environ.get("IDLEJOT_WG_DB")
@@ -52,6 +170,9 @@ class Ref:
     `group_id` 为空 = 这条行在，但取不到群号（payload 没有 `conversation_id`，
     `chat_sessions` 也查不到）；`message_id` 为空 = 群号有、编号没有（能回，
     只是挂不上引用）。两者分开表达，调用方不必再从 `None` 里猜是哪一种。
+
+    issue #203：`source` 同时决定**这是哪套编号**——`wg_events` 就是事件流
+    （`Ref.namespace == EVENT`），`chat_inbox` 就是会话库（`INBOX`）。
     """
     event_id: int
     source: str
@@ -59,6 +180,11 @@ class Ref:
     group_id: str = ""
     message_id: str = ""
     payload: dict = field(default_factory=dict, repr=False, compare=False)
+
+    @property
+    def namespace(self) -> str:
+        """这套编号属于哪个命名空间（issue #203）。"""
+        return INBOX if self.source in (SRC_INBOX, SRC_PLUGIN) else EVENT
 
     @property
     def resolvable(self) -> bool:
@@ -99,8 +225,8 @@ def message_id_of(payload) -> str:
 def group_of_payload(payload, message_id=None):
     """只有 payload 时能解析出的 ``(群号, 编号)``；缺一不可，否则 `None`。
 
-    与 `resolve()` 的区别只在于「没有行可回查」：这里没有 `session_id`，回不到
-    `chat_sessions`。有行的时候一律走 `resolve()`。
+    与 `resolve_id()` 的区别只在于「没有行可回查」：这里没有 `session_id`，回不到
+    `chat_sessions`。有行的时候一律走 `resolve_id()`。
     """
     if not isinstance(payload, dict):
         return None
@@ -247,10 +373,35 @@ def _ref_from_inbox(event_id):
         db.close()
 
 
-def resolve(event_id):
-    """按 id 解析一条事件，`wg_events` 优先、`chat_inbox` 兜底；都没有返回 `None`。
+def inbox_session_of(event_id):
+    """这条库行是**哪个会话**收下来的；没有或读不到返回空串（issue #203）。
 
-    顺序与改前一致：同号时以事件流为准（`wg_events` 只收投递过的那批）。
+    与群号校验并列的第二道：``chat_inbox`` 是跨会话的全局表，光有群号分不出
+    「本会话在群里看到的那条」与「另一个会话在同一个群里的另一条」。
+    """
+    try:
+        db = _connect()
+    except sqlite3.Error:
+        return ""
+    try:
+        row = db.execute("SELECT session_id FROM chat_inbox WHERE id=?",
+                         (int(event_id),)).fetchone()
+    except (sqlite3.Error, TypeError, ValueError):
+        return ""
+    finally:
+        db.close()
+    return str(row[0] or "") if row else ""
+
+
+def resolve_id(event_id, namespace=None):
+    """按 id 解析一条事件：`wg_events` 优先、`chat_inbox` 兜底；都没有返回 `None`。
+
+    `namespace` 给定时只查那一处（issue #203 的显式写法），不做回退。
+
+    顺序与 :func:`resolve` 的裸数字口径**完全相同**（issue #203）：事件流里有就
+    是事件流那条，事件流里没有才回库——撞号时两个入口给出同一个答案。库兜底命中
+    时 `Ref.source` 会说 `chat_inbox`，调用方据此在输出里标明来源。
+
     行在但群号取不到时仍返回 `Ref`（`resolvable` 为假），让调用方能把「不存在」
     与「存在但解析不出群」分开说——这正是 issue #216 修复候选 2。
     """
@@ -258,6 +409,10 @@ def resolve(event_id):
         eid = int(event_id)
     except (TypeError, ValueError):
         return None
+    if namespace == INBOX:
+        return _ref_from_inbox(eid)
+    if namespace == EVENT:
+        return _ref_from_events(eid)
     return _ref_from_events(eid) or _ref_from_inbox(eid)
 
 
@@ -267,7 +422,7 @@ def explain(event_id) -> str:
     改前两者都是「查不到所属群」，读者分不清是 id 写错了、被 1000 条挤掉了，
     还是行在、只是群号解析不出来（issue #216 影响面第一条）。
     """
-    ref = resolve(event_id)
+    ref = resolve_id(event_id)
     if ref is None:
         return (f"不在 {SRC_EVENTS} 也不在 {SRC_INBOX}"
                 f"（可能已被 {SRC_INBOX} 的 1000 条上限挤掉，或这个 id 从未存在）")

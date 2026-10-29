@@ -503,6 +503,161 @@ def 正常空流不吵():
     return ("没有一条属于本群" not in out) or out
 
 
+# ---------- PD：id / qid 两套编号不撞号（issue #203） ----------
+
+# 撞号夹具：事件流第 7 条在群 A，会话库第 7 行在群 B。两套编号各自独立分配，
+# 同号是常态（issue #203 的证据链就是这个形状）。
+CLASH = 7
+
+
+def seed_inbox(rows):
+    """造一份只装 ``chat_inbox`` 的库：``rows`` 是 ``(session_id, payload)`` 对。
+
+    写的是 ``wg_event_ref.DB`` 实际打开的那个文件，不是本脚本自己声明的 ``DB``：
+    ``IDLEJOT_WG_DB`` 只有逗号分隔时才被 `chatlocal/config.py` 当路径用，否则回落
+    到数据根下的 ``mcp-access.sqlite3``——按 ``DB`` 造夹具等于让 reply.py 去读一个
+    空库，撞号根本造不出来（本门禁最初的 3 项失败就是这个假夹具，不是实现问题）。
+    """
+    import wg_event_ref
+
+    target = Path(wg_event_ref.DB)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)
+    conn = sqlite3.connect(str(target))
+    conn.execute("CREATE TABLE IF NOT EXISTS chat_inbox ("
+                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, "
+                 "payload TEXT NOT NULL)")
+    conn.executemany("INSERT INTO chat_inbox (session_id, payload) VALUES (?, ?)", rows)
+    conn.commit()
+    conn.close()
+
+
+def clash_payload(conversation_id, content, message_id):
+    return json.dumps({"conversation_id": conversation_id, "sender": "闲聊乙",
+                       "content": content, "timestamp": NOW_MS,
+                       "onebot_message_id": message_id}, ensure_ascii=False)
+
+
+def clash_fixture():
+    """事件流第 7 条在群 A；会话库第 7 行（rowid 必须是 7）在群 B。"""
+    clear_state()
+    write_config(both_groups())
+    seed([event(CLASH, CONV_A, "A 群喊你")])
+    # rowid 从 1 起连续分配：造满 CLASH 行，第 CLASH 行才是要撞号的那条。
+    seed_inbox([("s1", clash_payload(CONV_B, f"B 群闲聊 {n}", f"q{n}"))
+                for n in range(1, CLASH + 1)])
+    (STATE / "wg_session.txt").write_text("s1", encoding="utf-8")
+
+
+@case
+def 撞号时裸数字只认事件流():
+    """钉死群 A：裸 ``7`` 是事件流那条（群 A），不许被会话库同号的群 B 那行顶掉。
+
+    改前 `event_target(7)` 先查事件流，查到就用——这一条改前也是绿的；它在这里是
+    对照组：证明护栏没把正常路径也挡掉。
+    """
+    import reply
+
+    clash_fixture()
+    saved = reply.wg_isolation.group_id
+    reply.wg_isolation.group_id = lambda: GROUP_A
+    try:
+        found = reply.event_target(str(CLASH))
+    finally:
+        reply.wg_isolation.group_id = saved
+    ok = found == (GROUP_A, f"m{CLASH}")
+    return ok or f"event_target({CLASH})={found}"
+
+
+@case
+def 撞号时q记号码读会话库():
+    """``q7`` 必须读会话库那行（群 B），不是事件流同号的群 A 那条。"""
+    import reply
+
+    clash_fixture()
+    ns, number, found = reply.resolve_target(f"q{CLASH}")
+    ok = (ns == "inbox" and number == CLASH and found == (GROUP_B, f"q{CLASH}"))
+    return ok or f"ns={ns} number={number} found={found}"
+
+
+@case
+def 撞号夹具到位_库第7行在群B():
+    """自检：上面那条不是「查不到就绿」。库 rowid 7 必须真实存在且属于群 B。"""
+    import followup
+
+    clash_fixture()
+    found = followup.lookup(CLASH)
+    return found == (GROUP_B, f"q{CLASH}") or f"lookup({CLASH})={found}"
+
+
+@case
+def 撞号时q7回复被拒而不是挂到别群():
+    """钉死群 A 回 ``q7``：引用会挂到群 B，必须被拒且不记账。
+
+    改前 `--context` 里看到的 `id=7` 拿来回，会把群 A 同号那条记成「已回」（P0）。
+    """
+    clash_fixture()
+    proc = run(REPLY, f"q{CLASH}", "x", "--no-wait", conversation=CONV_A)
+    out = proc.stdout or ""
+    ok = (proc.returncode == 1 and "拒绝" in out
+          and GROUP_B in out and CLASH not in ledger_ids())
+    return ok or f"rc={proc.returncode} ledger={ledger_ids()}\n{out}\n{proc.stderr}"
+
+
+@case
+def 撞号时_also里的q不进账本():
+    """``--also q7`` 走真实 CLI：只做存在性与归属校验，绝不把事件流第 7 条记成已回。
+
+    改前 `--also` 一律 `int()` 后并进 `answered`，同号的事件流唤醒会被写进
+    `wg_replied.jsonl` —— 另一个群那条就此永远显示「已回」（issue #203）。
+    夹具里 q7 属于群 B：钉死群 A 时必须**拒绝退出**，且账本里不许出现任何 7。
+    """
+    clash_fixture()
+    proc = run(REPLY, str(CLASH), "x", "--also", f"q{CLASH}", "--no-wait",
+               conversation=CONV_A)
+    out = proc.stdout or ""
+    ok = (proc.returncode == 1 and "拒绝" in out and "--also" in out
+          and CLASH not in ledger_ids())
+    return ok or f"rc={proc.returncode} ledger={ledger_ids()}\n{out}\n{proc.stderr}"
+
+
+@case
+def 撞号时_also里的q按存在性放行():
+    """对照组：未钉死时 `--also q7` 只校验存在性，不许因为「不在事件流」就拒。
+
+    走不到发送（没有后端），关键是没被 `--also` 的护栏挡住，且明说 q7 是会话库
+    的闲聊、不进账本——否则「一律拒绝」也会绿。
+    """
+    clash_fixture()
+    proc = run(REPLY, str(CLASH), "x", "--also", f"q{CLASH}", "--no-wait")
+    out = proc.stdout or ""
+    ok = ("不属于本会话" not in out
+          and "是会话库里的闲聊，不进取答账本" in out
+          and CLASH not in ledger_ids())
+    return ok or f"rc={proc.returncode} ledger={ledger_ids()}\n{out}\n{proc.stderr}"
+
+
+@case
+def 撞号门禁自检_parse退化成一律当id必须翻转():
+    """反例：`wg_event_ref.parse` 改成「一律当事件流 id」，q7 用例必须红。
+
+    这条与 `自检_rows_of恒空必须翻转` 同一个纪律：没有它，上面三条可能是
+    「怎么跑都绿」，撞号本体没被钉住。
+    """
+    import reply
+    import wg_event_ref
+
+    clash_fixture()
+    real = wg_event_ref.parse
+    wg_event_ref.parse = lambda ref: (wg_event_ref.EVENT, int(str(ref).lstrip("q")))
+    try:
+        ns, _number, found = reply.resolve_target(f"q{CLASH}")
+    finally:
+        wg_event_ref.parse = real
+    degraded_ok = (ns == "inbox" and found == (GROUP_B, f"q{CLASH}"))
+    return (not degraded_ok) or f"退化成一律当 id 后 q7 仍读到了库那行：ns={ns} found={found}"
+
+
 # ---------- 判据完整性自检 ----------
 
 

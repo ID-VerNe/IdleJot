@@ -337,18 +337,23 @@ def labels(event, media=None):
     return found
 
 
-def render(event, media=None):
+def render(event, media=None, ref_name=None):
     """渲染成一行图片标记，例如 ``[图片 i=0 path=C:\\...\\12-0.jpg]``。
 
     「可补读」必须带上具体命令（issue #35）：裸「可补读」三个字不是可执行指引，
     Agent 每次都要现场试错才能想起 look.py。同理，占位在、记录全无也要明说
     「未登记」并给出命令——不靠不印表达失败。
+
+    ``ref_name`` 是命令里要打给 Agent 抄的记号（issue #203）：事件流的行仍打裸
+    ``--event 7``；会话库的行（追问行 / 上下文行）必须打 ``--event q7``，否则同一
+    个数字在撞号时会指向另一次事件的图。省略时退回裸 id，与改前一致。
     """
     parts = []
     event_id = int(event.get("id") or 0)
+    ref = event_id if ref_name is None else ref_name
     for item in labels(event, media):
         suffix = f" 引自 {item['quote']}" if item.get("quote") else ""
-        hint = f"look.py --event {event_id} --index {item['index']}"
+        hint = f"look.py --event {ref} --index {item['index']}"
         if item.get("local_path"):
             parts.append(f"[图片 i={item['index']}{suffix} path={item['local_path']}]")
         elif item["state"] in ("deferred", "available", "", None):
@@ -362,7 +367,7 @@ def render(event, media=None):
         # 不让唤醒行只剩一个裸 [图片]（issue #35）。
         body = str(event.get("content") or "")
         if "[图片]" in body or "[动画表情]" in body:
-            parts.append(f"[图片 未登记 look.py --event {event_id} 补读]")
+            parts.append(f"[图片 未登记 look.py --event {ref} 补读]")
     return "".join(parts)
 
 

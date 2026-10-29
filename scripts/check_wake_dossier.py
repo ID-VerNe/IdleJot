@@ -335,8 +335,9 @@ def context_只给唤醒行和_around_挂画像():
     with contextlib.redirect_stdout(buf):
         code = reply.show_context(10)
     text = buf.getvalue()
-    wakes = line_with(text, "1 ")
-    chatter = line_with(text, "3 ")
+    # 上下文行打 `q<n>`（chat_inbox rowid），唤醒行仍是裸 `id=<n>`（issue #203）。
+    wakes = line_with(text, "q1 ")
+    chatter = line_with(text, "q3 ")
     return (code == 0 and "画像 群友甲(10001)" in wakes
             and "画像" not in chatter)
 
@@ -349,7 +350,7 @@ def context_around_那一行也挂画像():
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         code = reply.show_context(10, around=2)
-    line = line_with(buf.getvalue(), "2 ")
+    line = line_with(buf.getvalue(), "q2 ")
     return code == 0 and "回这条" in line and "画像 群友甲(10001)" in line
 
 

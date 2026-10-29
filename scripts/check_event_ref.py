@@ -119,7 +119,7 @@ def case(fn):
 
 @case
 def 同号时事件流优先():
-    ref = wg_event_ref.resolve(7)
+    ref = wg_event_ref.resolve_id(7)
     return (ref is not None and ref.source == wg_event_ref.SRC_EVENTS
             and ref.group_id == GROUP and ref.message_id == "7007"
             and ref.payload.get("content") == "事件流那条")
@@ -129,7 +129,7 @@ def 同号时事件流优先():
 def 只带_message_id_的_payload_也解析得出():
     # issue 复现命令的形态：`followup._group_of` 以前对这种 payload 回 None。
     import followup
-    ref = wg_event_ref.resolve(10)
+    ref = wg_event_ref.resolve_id(10)
     return (ref is not None and ref.source == wg_event_ref.SRC_INBOX
             and ref.target == (GROUP, "1010")
             and followup._group_of({"conversation_id": "SELF:group:111",
@@ -138,27 +138,27 @@ def 只带_message_id_的_payload_也解析得出():
 
 @case
 def payload_没群号时回查会话行():
-    ref = wg_event_ref.resolve(11)
+    ref = wg_event_ref.resolve_id(11)
     return (ref is not None and ref.group_id == GROUP and ref.message_id == ""
             and ref.target == (GROUP, ""))
 
 
 @case
 def payload_没编号时回查消息列():
-    ref = wg_event_ref.resolve(12)
+    ref = wg_event_ref.resolve_id(12)
     return ref is not None and ref.target == (GROUP, "1212")
 
 
 @case
 def 群号有编号空也算解析成功():
-    ref = wg_event_ref.resolve(13)
+    ref = wg_event_ref.resolve_id(13)
     return (ref is not None and ref.resolvable
             and reply.event_target(13) == (GROUP, ""))
 
 
 @case
 def 行在但群号取不到时_resolvable_为假():
-    ref = wg_event_ref.resolve(14)
+    ref = wg_event_ref.resolve_id(14)
     return (ref is not None and not ref.resolvable and ref.target is None
             and reply.event_target(14) is None)
 
@@ -223,7 +223,8 @@ def context_行自带来源标记():
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         reply.show_context(20)
-    line = next((ln for ln in buf.getvalue().splitlines() if ln.startswith("11 ")), "")
+    # 行首编号是 `q11`（issue #203 的库记号），来源标记紧跟在它后面（#216）。
+    line = next((ln for ln in buf.getvalue().splitlines() if ln.startswith("q11 ")), "")
     return bool(line) and f"src={wg_event_ref.SRC_INBOX}" in line
 
 

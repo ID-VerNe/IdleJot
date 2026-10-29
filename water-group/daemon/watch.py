@@ -74,6 +74,7 @@ import wg_budget  # noqa: E402  (等待预算，issue #83)
 import wg_aliases  # noqa: E402  (别名指向渲染，issue #30)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_dossiers  # noqa: E402  (群友画像 / 群级术语，issue #163)
+import wg_event_ref  # noqa: E402  (id / qid 两套命名空间，issue #203)
 import wg_images  # noqa: E402  (图片标记渲染)
 import wg_isolation  # noqa: E402  (本会话只管一个群，issue #164 PA)
 import wg_listener_state  # noqa: E402  (监听存亡账本的续心跳，issue #112)
@@ -368,16 +369,21 @@ def main():
             print(wg_clock.now_line())
             for r in woke:
                 stamp = wg_clock.clock_ms(r.get("ts"))
+                # 追问行的编号是 chat_inbox 的全局 rowid，和唤醒行的 wg_events id
+                # 是两套各自分配的编号，会撞号（issue #203）。所以这里打 `q<n>`，
+                # 渲染侧给的都是同一个记号：截断提示的 --show、补读命令的 --event、
+                # 行首的 id= 三处必须一致，Agent 抄哪一处都指回这条。
+                ref = wg_event_ref.format_ref(wg_event_ref.INBOX, r.get("id"))
                 # 追问行与唤醒行同一份渲染口径（issue #32）。
                 body, _, _ = wg_text.render_body(r.get("text"),
                                                   wg_text.WAKE_BODY_CHARS,
-                                                  r.get("id"))
+                                                  r.get("id"), name=ref)
                 # 人名指向与画像同唤醒行同款（issue #30 / #163）；追问行没有
                 # conversation_id 字段时退回跨群主档别名。
                 gid = wg_aliases.group_of(r.get("conversation_id"))
                 tag, hits, cards = wg_dossiers.anchors(r.get("sender"),
                                                        r.get("text"), gid)
-                print(f"id={r.get('id')} {stamp} [追问] {r.get('sender')}{tag}: "
+                print(f"id={ref} {stamp} [追问] {r.get('sender')}{tag}: "
                       f"{body}"
                       f"{('  ' + r['quote']) if r.get('quote') else ''}"
                       f"{('  ' + r['images']) if r.get('images') else ''}"

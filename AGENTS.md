@@ -23,6 +23,7 @@
 .venv/Scripts/python.exe water-group/daemon/reply.py --context 30      # 回之前看群里在聊什么（含闲聊）
 .venv/Scripts/python.exe water-group/daemon/reply.py <id> "<正文>"      # 回一条，自动带原生引用；发完默认续挂监听 90s，--no-wait 关闭
 .venv/Scripts/python.exe water-group/daemon/reply.py --show <id>       # 读某条消息全文（wg_events 命中带引用展开；缺 id 明说原因）
+.venv/Scripts/python.exe water-group/daemon/reply.py q<n> "<正文>"     # 首参也可以写 q<n>：会话库 rowid（追问行/--context 的写法，issue #203）
 .venv/Scripts/python.exe water-group/daemon/reply.py <id> "<正文>" --at <花名>  # 正文前 @ 人，可重复；真 @ 不是正文里的文本
 .venv/Scripts/python.exe water-group/daemon/reply.py --context 30 --around <id> # 只看这条之前的部分
 .venv/Scripts/python.exe water-group/daemon/reply.py --who <花名>     # 解析花名到 QQ 与归属群并给出画像卡，不发送
@@ -32,6 +33,10 @@
 
 `reply.py` 共 17 个参数，上面是最常用的；`--also`（连发 @ 用一条答复算作回了多条）、
 `--force`（目标唤醒已过待回时效也发）、`--intent`、`--no-quote` 见 `reply.py --help`。
+**id 有两套（issue #203）**：唤醒行 / `reply.py --list` / `--context` 里的裸数字是**事件流 id**
+（`wg_events`），前面带 `q` 的（`q<n>`、`qid:<n>`）是**会话库 `chat_inbox` 的 rowid**——追问行和
+`--context` 打出来的就是后者。两套编号会撞号，看到 `q<n>` 就照抄带 `q` 的写法，别剥掉前缀；
+裸数字在事件流没命中、会话库唯一命中时会回库兜底，并打一行源说明（不静默换源）。
 `--image`（issue #128）按**内容**校验：Pillow 把整张图逐帧解开才算数（不是看扩展名、
 也不是看 `verify()`——它只对 PNG 有效），格式限 PNG/JPEG/GIF/WebP，单张 ≤6 MiB、
 合计 ≤80 兆像素、≤300 帧，一次最多 9 张。任何一张不合格就一张都不发（先校验再动手，
@@ -498,7 +503,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 84 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
 | 85 | `reply` | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
 | 86 | `reply` | `check_busboss.py` | 车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103） |
-| 87 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164） |
+| 87 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164）；id 撞号分节：事件流 id 与会话库 rowid 同号时 q&lt;n&gt; 只落到本群那条、裸 id 回库兜底要打出源说明（#203） |
 | 88 | `reply` | `check_trigger_mode.py` | 按群选择 natural/mention_only 触发模式：collector 请求值按 trigger_mode 取（不再硬编码 True）、natural 群普通消息 wake_reason 放行、@/关键词/is_self/指令早退不破坏、两群不同配置按群生效（#188） |
 
 共 88 个 CI 门禁，分 5 个分片（`static` 18、`runtime` 15、`mcp` 18、`storage` 11、`reply` 26）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。

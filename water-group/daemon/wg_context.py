@@ -33,7 +33,7 @@ if str(HERE) not in sys.path:
 import wg_aliases  # noqa: E402  (群号 → 别名视图，issue #30)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_dossiers  # noqa: E402  (群友画像，issue #163)
-import wg_event_ref  # noqa: E402  (来源标记的唯一格式，issue #216)
+import wg_event_ref  # noqa: E402  (id / qid 两套命名空间 + 来源标记，#203/#216)
 import wg_images  # noqa: E402  (图片标记渲染，issue #27)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
@@ -90,8 +90,19 @@ def recent_chatter(limit, around=None):
            " WHERE i.session_id=?")
     params = [sid]
     if around:
-        sql += " AND i.id<=?"
-        params.append(int(around))
+        # 行号本身后来改打 `q<n>`，但 `around` 一直是库 rowid（issue #203）。
+        # 光按 `i.id<=?` 会踩到一个真实缺口：`chat_inbox` 是 AUTOINCREMENT 全局 rowid，
+        # 同一个会话里被挤掉的旧行（每会话只留最近 1000 条）也会推高编号，于是
+        # 「最近 N 条」与「q<n> 之前的部分」可能没有交集，`--around q<n>` 返回空。
+        # 下界取 `around - N` 是保守的上界估计（同一会话的编号差不超过总数），
+        # 交汇处在就从它开始取，绝不让 `--around` 指向一条读不到的锚点。
+        # 列名带 `i.` 前缀（issue #219 起 `SELECT` 用全限定名）。
+        try:
+            number = int(around)
+        except (TypeError, ValueError):
+            number = 0
+        sql += " AND i.id<=? AND i.id>=?"
+        params.extend([number, max(0, number - max(1, int(limit)))])
     sql += " ORDER BY i.id DESC LIMIT ?"
     params.append(max(1, int(limit)))
     out = []
@@ -125,7 +136,11 @@ def recent_chatter(limit, around=None):
                 # 引用原文：payload 里只有编号，父消息在同一会话的库里就查得到（issue #94）。
                 "quote": wg_quotes.render_payload(db, sid, data),
                 # 图片标记让 Agent 知道这条能看图，以及是否已经落盘（issue #27）。
-                "images": wg_images.render(dict(data, id=event_id), media),
+                # 补读命令必须打 `q<n>`：这行 q<n> 是库 rowid，`--event <裸数字>`
+                # 在撞号时会去读事件流那条的图（issue #203）。
+                "images": wg_images.render(
+                    dict(data, id=event_id), media,
+                    ref_name=wg_event_ref.format_ref(wg_event_ref.INBOX, event_id)),
             })
     except sqlite3.Error:
         pass
@@ -159,9 +174,13 @@ def show_context(limit, around=None):
     for row in rows:
         stamp = wg_clock.clock_ms(row["ts"])
         who = "我" if row["self"] else (row["sender"] or "?")
+        # 上下文行的编号是 chat_inbox 的全局 rowid，与唤醒行的 wg_events id 会撞号
+        # （issue #203）。行首、截断提示、补读命令三处打同一个 `q<n>` 记号，
+        # `--around q<n>` / `--show q<n>` / `look.py --event q<n>` 都认它。
+        ref = wg_event_ref.format_ref(wg_event_ref.INBOX, row["id"])
         # 上下文行同一份渲染口径（issue #32）：段占位不占额度，截断了说被切过。
         text, _, _ = wg_text.render_body(row["text"], wg_text.CONTEXT_BODY_CHARS,
-                                         row["id"])
+                                         row["id"], name=ref)
         # 人名指向与唤醒行同款（issue #30）；自己说的话不指、不挂画像。
         tag, hits, cards = wg_dossiers.anchors(
             "" if row["self"] else row["sender"],
@@ -180,5 +199,6 @@ def show_context(limit, around=None):
         alias_tail = "".join("  " + h for h in hits)
         # 行首编号后面紧跟来源（issue #216 / #204 的同形契约）：这些 id 只活在
         # chat_inbox，`reply.py <id>` 与 `look.py --event <id>` 都按这个来源解析。
-        print(f"{row['id']} src={wg_event_ref.SRC_INBOX} {stamp} {who}{tag}: {text}{quote}{('  ' + row['images']) if row.get('images') else ''}{alias_tail}{cards}{tail}")
+        # 编号本身打 `q<n>`（issue #203），与唤醒行的裸事件 id 在字面上就分得开。
+        print(f"{ref} src={wg_event_ref.SRC_INBOX} {stamp} {who}{tag}: {text}{quote}{('  ' + row['images']) if row.get('images') else ''}{alias_tail}{cards}{tail}")
     return 0

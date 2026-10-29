@@ -504,8 +504,62 @@ def test_show_event_reads_the_whole_message(tmp):
         with contextlib.redirect_stdout(buffer):
             code = wg_text.show_event(999)
     assert code == 1, code
-    assert "本地没有 id=999 的全文" in buffer.getvalue()
+    # 改前这句是「本地没有 id=999 的全文」：两套编号（事件流 / 会话库）分家后，
+    # 「本地」说不清是读的哪一处，现在必须点名（issue #203）。
+    assert "本地里没有 id=999 的全文" in buffer.getvalue(), \
+        buffer.getvalue()
     print("✓ 10. --show 按 id 读全文：wg_events / chat_inbox / 明说没有")
+
+
+def test_show_event_namespaces(tmp):
+    """`--show 7` 与 `--show q7` 是两条不同的消息（issue #203 撞号本体）。
+
+    事件流第 7 条与会话库第 7 行是两套编号里恰好同号的两条；`show_event` 带
+    namespace 时只查那一处，不带时才保留「事件流优先、未命中回库」的旧回退。
+    """
+    import wg_event_ref
+
+    events = tmp / "ns-events.jsonl"
+    events.write_text(json.dumps({"id": 7, "sender": "唤醒甲", "content": "事件流那条",
+                                  "timestamp": 1792759758000}, ensure_ascii=False) + "\n",
+                      encoding="utf-8")
+    db_path = tmp / "ns-show.sqlite3"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE chat_inbox ("
+                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, "
+                 "payload TEXT NOT NULL)")
+    conn.executemany("INSERT INTO chat_inbox (session_id, payload) VALUES (?, ?)",
+                     [("s1", json.dumps({"sender": "闲聊乙", "content": "会话库那条",
+                                         "timestamp": 1792759760000}, ensure_ascii=False))] * 7)
+    conn.commit()
+    conn.close()
+
+    def read(ref):
+        buffer = io.StringIO()
+        ns, number = wg_event_ref.parse(ref)
+        with patch.object(wg_text, "EVENTS", events), patch.object(wg_text, "DB", db_path):
+            with contextlib.redirect_stdout(buffer):
+                code = wg_text.show_event(number, namespace=ns)
+        return code, buffer.getvalue()
+
+    code, out = read("7")
+    assert code == 0 and "事件流那条" in out and "会话库那条" not in out, out
+    code, out = read("q7")
+    assert code == 0 and "会话库那条" in out and "事件流那条" not in out, out
+    assert "id=q7 " in out, f"库那行必须打 q7，不是裸 7：{out!r}"
+    # 事件流里没有 8：带 EVENT 命名空间时不许回库顶替
+    code, out = read("8")
+    assert code == 1 and "会话库那条" not in out, out
+    # 反例自检：把 parse 换回「一律当事件流 id」，q7 必须读错（读到事件流那条或读不到），
+    # 这样的用例才钉得住撞号本体。
+    with patch.object(wg_event_ref, "parse", lambda ref: (wg_event_ref.EVENT, int(ref))):
+        buffer = io.StringIO()
+        with patch.object(wg_text, "EVENTS", events), patch.object(wg_text, "DB", db_path):
+            with contextlib.redirect_stdout(buffer):
+                wg_text.show_event(7, namespace=wg_event_ref.EVENT)
+    assert "会话库那条" not in buffer.getvalue(), \
+        "反例没翻转：parse 退化成一律当事件流 id 时 q7 仍读到库那行，用例形同虚设"
+    print("✓ 10b. --show 的 id / qid 分命名空间解析，撞号时各读各的（issue #203）")
 
 
 def test_show_event_is_wired_into_reply_cli():
@@ -514,7 +568,12 @@ def test_show_event_is_wired_into_reply_cli():
 
     source = (ROOT / "water-group" / "daemon" / "reply.py").read_text(encoding="utf-8")
     assert '"--show"' in source, "reply.py 缺 --show 参数"
-    assert "wg_text.show_event(args.show)" in source, "--show 没有接到 wg_text.show_event"
+    # 改前断言的是 `wg_text.show_event(args.show)`。issue #203 之后 target 先过
+    # `wg_event_ref.parse` 定命名空间，`--show 7` 与 `--show q7` 才读得到两条
+    # 不同的消息；接线本身仍是这一句，只是多带了命名空间。
+    assert "wg_text.show_event(number, namespace=namespace)" in source, \
+        "--show 没有接到 wg_text.show_event（issue #203 的带命名空间形态）"
+    assert "wg_event_ref.parse(args.show)" in source, "--show 没有定命名空间（issue #203）"
     print("✓ 11. reply.py --show 已接到 wg_text.show_event")
 
 
@@ -614,6 +673,7 @@ def main():
         test_daemon_has_no_bare_slices()
         test_render_body_budget_is_prose_only()
         test_show_event_reads_the_whole_message(tmp)
+        test_show_event_namespaces(tmp)
         test_show_event_is_wired_into_reply_cli()
         test_bare_slice_judgement_ab()
         test_bare_slice_judgement_negative()

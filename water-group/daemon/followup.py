@@ -23,7 +23,9 @@
 
 状态文件（TULPA_WG_STATE 下）：
   wg_followup.json  当前窗口；文件不存在就是没开窗
-字段：after_id（从这条之后开始看，通常就是刚回复的那条）、not_before（发送开始
+字段：after_id（从这条之后开始看，通常就是刚回复的那条；**是 chat_inbox 的 rowid**，
+不是 wg_events 的 id——两套编号会撞号，见 issue #203 与 ``_after_id_of``）、
+not_before（发送开始
 的墙上时间，窗口只收这之后的发言，给 after_id 补一个向过去的下界）、session
 （所属会话，换会话即失效，防会话重建后 id 空间对不上）、opened_at、until
 （静默截止）、budget（还能跟几条，自己被自己说的话不占额度）、max_messages、
@@ -44,6 +46,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收口)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
+import wg_event_ref  # noqa: E402  (id / qid 两套命名空间，issue #203)
 import wg_images  # noqa: E402  (图片标记渲染，issue #35 追问行同款)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #164 PC)
@@ -119,8 +122,16 @@ def active_session_id():
     return row[0] if row else ""
 
 
-def open(after_id, max_messages=None, idle_seconds=None, session=None, not_before=None):
+def open(after_id, max_messages=None, idle_seconds=None, session=None, not_before=None,
+         after_ref=None):
     """回复成功后开窗。after_id 通常就是刚回复的那条消息。
+
+    ``after_id`` 是 **chat_inbox 的 rowid**，``since()`` 直接 `id>?` 用它——这一点
+    改前就有，但谁也说不出来，因为调用方传的是事件流 id（issue #203 §2 方案 6）。
+    现在 ``after_ref`` 显式说明它：``q<n>`` / ``qid:<n>`` / 裸数字**都**落到库
+    rowid（裸数字在这里就是库口径，与 ``reply.py`` 的 target 不是同一套解释），
+    由 :func:`_after_id_of` 统一转换；``after_id`` 保留给直接按 rowid 调的旧调用方
+    （门禁夹具、``followup.py --show``）。给了 ``after_ref`` 就以它为准。
 
     not_before 是发送开始的墙上时间，用作**预算标记**：Agent 从拿到唤醒到真正把
     回复发出去，中间经常隔着十几分钟，这段积压的 id 都大于被回复的那条，只按 id
@@ -139,7 +150,7 @@ def open(after_id, max_messages=None, idle_seconds=None, session=None, not_befor
         idle_seconds = int(cfg["idle_seconds"])
     now = time.time()
     state = {
-        "after_id": int(after_id),
+        "after_id": _after_id_of(after_id if after_ref is None else after_ref),
         "not_before": float(not_before or 0),
         "session": session or active_session_id(),
         "opened_at": now,
@@ -151,6 +162,23 @@ def open(after_id, max_messages=None, idle_seconds=None, session=None, not_befor
     }
     save(state)
     return state
+
+
+def _after_id_of(ref):
+    """窗口游标的记号 -> chat_inbox 的 rowid（issue #203）。
+
+    窗口游标的语义**只有一种**：库 rowid。``q7`` 是它的标准写法，``qid:7`` 是它的
+    长写法，裸数字是改前就已经在用的写法（``reply.py`` 一直传裸数字），三者在这里
+    一起落到同一个 rowid。**不**经 ``wg_event_ref.resolve``：那条链会先问事件流，
+    而游标问事件流只会把「刚回复的那条 @ 唤醒」与「同号的闲聊」搅在一起。
+    看不懂的记号返回 0（= 从头看），不让开窗本身把回复链路打挂。
+    """
+    import wg_event_ref  # noqa: PLC0415
+
+    try:
+        return wg_event_ref.parse(ref)[1]
+    except wg_event_ref.BadRef:
+        return 0
 
 
 def stale(window, now=None):
@@ -289,7 +317,11 @@ def since(after_id, session, not_before=None, limit=50):
                     # 追问行和 @ 唤醒行一样要能看出引用原文（issue #94）。
                     "quote": wg_quotes.render_payload(db, session, data),
                     # 追问窗里收到的图也要有路径/补读提示，不能只剩裸 [图片]（issue #35）。
-                    "images": wg_images.render(dict(data, id=event_id), media),
+                    # 补读命令打 `q<n>`：追问行的 id 是库 rowid，与事件流 id 撞号时
+                    # `--event <裸数字>` 会指到另一条消息的图（issue #203）。
+                    "images": wg_images.render(
+                        dict(data, id=event_id), media,
+                        ref_name=wg_event_ref.format_ref(wg_event_ref.INBOX, event_id)),
                     # @ 指向只在段里（issue #138）：`content` 已被人名替换过，
                     # `consume()` 判「只 @ 别人、没有正文」要靠这一列。
                     "segments": data.get("segments") if isinstance(
@@ -464,7 +496,7 @@ def show():
         until = window.get("until") or 0
         left = wg_clock.seconds_left(until)
         left_text = f"，还剩 {left}s" if left is not None else ""
-        print(f"追问窗口：进行中，从 id={window.get('after_id')} 之后看，"
+        print(f"追问窗口：进行中，从 qid={window.get('after_id')} 之后看，"
               f"还可跟 {window.get('budget')} 条，静默至 "
               f"{wg_clock.clock(until)}{left_text}")
     return 0

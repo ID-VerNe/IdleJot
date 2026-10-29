@@ -27,6 +27,13 @@ Usage:
   reply.py --show <event_id>      读这条消息的全文（行内截断后的补救路径）
   reply.py --who <花名>            只解析到 QQ，并把他的画像卡整张打出来（issue #163）
 
+<event_id> 有两套命名空间，解析口是 wg_event_ref.py（issue #203）：裸数字是事件流
+`wg_events` 的 id；`q<n>` / `qid:<n>` 是会话库 `chat_inbox` 的 rowid（追问行与
+`--context` 打出来的就是它），`id:<n>` 是事件流的显式写法。两套编号会撞号，照抄带
+`q` 的写法即可；裸数字在事件流没命中、会话库唯一命中时回库兜底，并打一行源说明，
+不静默换源。会话库的行必须属于本会话，钉死会话时跨会话的行直接拒。
+`--also` 只做存在性与归属校验，不进 `wg_replied.jsonl`。
+
 <text> 里的换行会拆成多条气泡（默认最多 20 条，首条挂引用；`--max-bubbles`
 或 config.json 的 `reply.max_bubbles` 可以调小，issue #131）。想连发几句就分行写，
 不要拿斜杠把几句话串成一行——QQ 里换行会折叠，斜杠会读成文档。shell 双引号里
@@ -61,11 +68,14 @@ import wg_gap  # noqa: E402  (停机窗口缺口账本，issue #114)
 import winconsole  # noqa: E402
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #128)
+import wg_event_ref  # noqa: E402  (id / qid 两套命名空间的唯一归属，issue #203)
 import wg_images  # noqa: E402
 import wg_isolation  # noqa: E402  (群身份与跨群护栏，issue #164)
+import wg_members  # noqa: E402  (花名 -> QQ 的唯一出口，issue #30/#203)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_send_failure  # noqa: E402  (发送失败的原文 / 禁言诊断 / 失败账本，issue #132)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
+from wg_wakes import list_wakes  # noqa: E402,F401  (--list 视图，issue #203 搬出)
 
 ROOT = HERE.parents[1]
 from wg_paths import state_dir
@@ -266,7 +276,36 @@ AT_TOKEN = re.compile(r"@\{([^{}\n\\]{1,24})\}")
 
 
 def event_target(event_id):
-    """(group_id, onebot_message_id) for an event the collector already stored."""
+    """(group_id, onebot_message_id) for a message, by its namespace (issue #203).
+
+    ``event_id`` 可以是 ``7`` / ``id:7``（事件流）或 ``q7`` / ``qid:7``（会话库），
+    写法见表在 ``wg_event_ref`` 的模块 docstring。改前这里只有裸 id：先遍历
+    ``wg_events.jsonl``，未命中再回库兜底——两套编号各撞各的号时，追问行那条
+    ``id=7`` 会被静默解析成群 111 的事件，引用于是挂到另一个群的消息上。
+    现在记号自己带命名空间，撞号只可能指回自己那条。
+    """
+    return resolve_target(event_id)[2]
+
+
+def resolve_target(event_id):
+    """``(namespace, number, found)``：命中的是哪套编号、编号、``(群号, message_id)``。
+
+    与 :func:`event_target` 同一次查找，只是把「实际落在哪套编号」也交出来——
+    裸数字回库兜底时调用方要能说出来源，不许把库那条当成事件流那条（#203）。
+    非法记号返回 ``(None, None, None)``。
+    """
+    try:
+        return wg_event_ref.resolve(event_id, _event_target_of, _inbox_target_of)
+    except wg_event_ref.BadRef:
+        return None, None, None
+
+
+def _event_target_of(event_id):
+    """事件流里这一条按 id 反查 ``(群号, message_id)``；没有或不可引用都返回 None。
+
+    非群会话（私聊、频道）同样返回 None：没有群号就发不出去，返回半截反而会让
+    调用方以为查到了。
+    """
     for row in read_events():
         if row.get("id") != event_id:
             continue
@@ -274,129 +313,40 @@ def event_target(event_id):
         if len(parts) == 3 and parts[1] == "group" and row.get("onebot_message_id"):
             return parts[2], str(row["onebot_message_id"])
         return None
-    # 追问唤醒要回的是被 mention_only 滤掉的闲聊，wg_events.jsonl 里没有它，
-    # 只能回库拿编号——不然引用挂不上，群号也只能靠猜。DB 兜底归追问插件，
-    # 不过它的三态开关：关了窗口也要能回 --context 里看到的闲聊（PD2a）。
-    return plugins.emit("event_lookup", {"event_id": event_id})
+    return None
 
 
-_ROSTER = {}
+def _inbox_target_of(event_id):
+    """会话库兜底：追问唤醒要回的是被 mention_only 滤掉的闲聊，事件流里没有它。
 
-
-def group_members(group_id):
-    """Live member list for one group: [{"qq", "card", "nickname"}].
-
-    Memoised per process: one reply can carry several @-mentions, and the roster
-    is a fat JSON list that costs a round trip each time.
+    回库拿编号，引用才挂得上，群号也只能从这里来。DB 兜底归追问插件，不过它的
+    三态开关：关了窗口也要能回 ``--context`` 里看到的闲聊（PD2a）。
     """
-    if group_id in _ROSTER:
-        return _ROSTER[group_id]
-    base, token = onebot_config()
-    if not base or not group_id:
-        return []
-    try:
-        resp = requests.post(f"{base}/get_group_member_list",
-                             json={"group_id": int(group_id)},
-                             headers={"Authorization": f"Bearer {token}"}, timeout=15)
-        rows = resp.json().get("data") or []
-    except (requests.RequestException, ValueError) as exc:
-        print(f"  member list unavailable: {type(exc).__name__}: {exc}")
-        return []
-    _ROSTER[group_id] = [{"qq": str(r.get("user_id") or ""),
-                          "card": (r.get("card") or "").strip(),
-                          "nickname": (r.get("nickname") or "").strip()} for r in rows]
-    return _ROSTER[group_id]
+    return plugins.emit("event_lookup", {"event_id": f"qid:{event_id}"})
 
 
-def dossier_matches(raw):
-    """(exact, loose) profiles from the memory DB; empty pair when it is absent.
-
-    The dossier is a nice-to-have here: @-ing still works off the live roster, so
-    a locked or missing database must not take the whole reply down with it.
-    """
-    try:
-        if str(ROOT) not in sys.path:
-            sys.path.insert(0, str(ROOT))
-        from water_group.memory_engine import get_memory_engine
-
-        return get_memory_engine().match_profiles(raw)
-    except Exception as exc:  # noqa: BLE001
-        print(f"  dossier lookup failed: {type(exc).__name__}: {exc}")
-        return [], []
+def _inbox_session_of(event_id):
+    """这条会话库行是哪个会话收到的；读不到返回空串（issue #203，见 wg_text）。"""
+    return wg_text.inbox_session_of(event_id)
 
 
 def resolve_member(name, group_id):
-    """花名 -> (qq, label), or (None, 原因).
+    """花名 -> (qq, label)：实现搬到 `wg_members`（issue #203），这里只是再导出。"""
+    return wg_members.resolve_member(name, group_id)
 
-    A bare number is taken as the QQ itself -- the one input that cannot be
-    ambiguous. Everything else is tried against the live roster first and the
-    dossier second: the group card is how people actually address each other in
-    here ("某人的旧名片"、"某人的新名片"), the dossier is what survives a rename and
-    holds the shorthand people type ("主名"、"外号"). Each tier is tried exact
-    before loose, so a full name never loses to somebody else's substring.
 
-    A name that fits more than one person is reported, not guessed. @-ing the
-    wrong person reads as a mistake by the bot in a way that a missed @ does not.
+def _looking_for(who, group_id):
+    """`--who` 的打印：解析结果 + 整张画像卡（issue #163 的唯一「问他是谁」入口）。
+
+    返回退出码：认到人才是 0，认不到给 1（调用方当失败处理）。
     """
-    raw = (name or "").strip().lstrip("@")
-    if not raw:
-        return None, "空名字"
-
-    members = group_members(group_id)
-    in_group = {m["qq"]: m for m in members}
-    roster_known = bool(members)
-    me = self_account()
-
-    def label_of(qq):
-        mate = in_group.get(qq)
-        return ((mate["card"] or mate["nickname"]) if mate else "") or qq
-
-    if raw.isdigit():
-        if roster_known and raw not in in_group:
-            # A number nobody in the group answers to is not an @, it is a typo.
-            return None, f"{raw} 不在本群"
-        if raw == me:
-            return None, "是我自己"
-        return raw, label_of(raw)
-
-    # 档案里有、但不在本群的人：不能 @，可往往正是用户记错的那个，值得单独说一句。
-    elsewhere = []
-
-    def from_dossier(profs):
-        out = []
-        for p in profs:
-            qq = str(p.get("user_id") or "")
-            if not qq:
-                continue
-            if roster_known and qq not in in_group:
-                elsewhere.append((qq, str(p.get("primary_name") or qq)))
-                continue
-            out.append((qq, label_of(qq) if qq in in_group else str(p.get("primary_name") or qq)))
-        return out
-
-    exact, loose = dossier_matches(raw)
-    tiers = [("本群名片", [(m["qq"], label_of(m["qq"])) for m in members
-                          if raw in (m["card"], m["nickname"])]),
-             ("档案", from_dossier(exact))]
-    if len(raw) >= 2:
-        tiers.append(("本群名片近似", [(m["qq"], label_of(m["qq"])) for m in members
-                                      if raw in m["card"] or raw in m["nickname"]]))
-        tiers.append(("档案近似", from_dossier(loose)))
-
-    for kind, cands in tiers:
-        if len(cands) == 1:
-            qq, label = cands[0]
-            if qq == me:
-                return None, "是我自己"
-            return qq, label
-        if len(cands) > 1:
-            shown = "、".join(f"{label}({qq})" for qq, label in cands[:5])
-            return None, f"{kind}里有 {len(cands)} 个：{shown}"
-
-    if elsewhere:
-        qq, label = elsewhere[0]
-        return None, f"档案里是 {label}({qq})，但不在本群"
-    return None, "没找到"
+    qq, label = resolve_member(who, group_id)
+    print(f"{who} -> {qq or '未解析'}（{label}）")
+    # 唤醒行那 60 字是给接话用的预算，专门问一个人时不必省。
+    card = wg_dossiers.who_card(qq or who, group_id)
+    if card:
+        print(card)
+    return 0 if qq else 1
 
 
 def _tidy(segments):
@@ -505,75 +455,6 @@ def onebot_send_bubbles(group_id, bubble_segments, message_id=None, failure=None
     return len(bubble_segments)
 
 
-def list_wakes():
-    """Same wake rules and same answered-check as `up.py --status`.
-
-    Importing up keeps one source of truth for "who woke us", "did we answer"
-    and "is it still worth answering" — the third one is the reply TTL, so a
-    wake older than `pending_reply.max_age_seconds` reads [过期], not [待回].
-
-    issue #164 PA：只看本会话的群。改前遍历全量事件流，钉死群 111 的会话照样
-    看到群 222 的唤醒——两个会话都以为那些 @ 是给自己的。未钉死时不过滤（与改前
-    一致），但会打一行 `note()` 说清隔离没生效。
-    """
-    import up
-
-    rows = up.events()
-    # issue #164 PA：只看本会话的群。改前遍历全量事件流，钉死群 111 的会话照样
-    # 看到群 222 的唤醒——两个会话都以为那些 @ 是给自己的。未钉死时不过滤（与
-    # 改前一致），但下面会打 `note()` 说清隔离没生效。
-    rows = wg_isolation.rows_of(rows)
-    ledger = up.replied_ids()
-    # 表头先给「现在」：下面每行只有消息自己的时间戳，没有基准的话，Agent
-    # 分不清一条 20:50 的 @ 是刚发的还是十分钟前的（issue #95）。
-    print(f"# 唤醒记录 · {wg_clock.now_line()}")
-    # issue #164 PA：本会话钉死在哪一群，一眼看得见——下面每行都只来自它。
-    print(f"# 本会话群 · {wg_isolation.describe()}")
-    warn = wg_isolation.note()
-    if warn:
-        print(warn)
-    # issue #114：停机窗口内漏收的 @ 本机消息在这里列出来，让「没人叫我」与
-    # 「有人叫过但机器不在」可区分。抬头由 `wg_gap.header_lines()` 一次给全
-    # （段标题 + 窗口起止 + 账本时刻，issue #148）：不给时刻，三小时前的早晨
-    # 账本与几分钟前的新缺口读起来一样。
-    gap_lines = wg_gap.at_me_lines()
-    for ln in ((wg_gap.header_lines() + gap_lines) if gap_lines else []):
-        print(ln)
-    wg_send_failure.print_last()
-    shown = 0
-    for e in rows:
-        reason = up.wake_reason(e)
-        if not reason:
-            continue
-        mark = up.wake_state(e, rows, ledger)
-        stamp = wg_clock.clock_ms(e.get("timestamp"))
-        images = wg_images.render(e)
-        quotes = wg_quotes.render_event(e)
-        # 正文渲染与 watch 唤醒行同一份口径（issue #32）：段占位不占额度，
-        # 截断了带 … 和 --show 指引。
-        body, _, _ = wg_text.render_body(e.get("content"), wg_text.LIST_BODY_CHARS,
-                                          e.get("id"))
-        # 人名指向与画像与唤醒行同款（issue #30 / #163）。
-        gid = wg_aliases.group_of(e.get("conversation_id"))
-        tag, hits, cards = wg_dossiers.anchors(e.get("sender"), e.get("content"), gid)
-        print(f"id={e.get('id')} {stamp} [{mark}] [{reason}] {e.get('sender')}{tag}: "
-              f"{body}"
-              f"{('  ' + quotes) if quotes else ''}{('  ' + images) if images else ''}"
-              f"{''.join('  ' + h for h in hits)}{cards}")
-        shown += 1
-    note = wg_dossiers.group_note_line(
-        wg_aliases.group_of(rows[-1].get("conversation_id")) if rows else "")
-    if note:
-        print(note)
-    # 过滤把自己滤空要说出来（issue #164）：群号/self_account/状态目录配错时，
-    # 「过滤生效」与「群里没人说话」在输出里完全一样，Agent 会一直等一个不会
-    # 来的唤醒。正常空流不吵——`filter_report` 只在「有东西但一条都不属于我」时出声。
-    empty = wg_isolation.filter_report(up.events())
-    if empty:
-        print(empty)
-    if not shown:
-        print("没有唤醒记录")
-    return 0
 def latest_group_id():
     for row in reversed(read_events()):
         parts = str(row.get("conversation_id") or "").split(":")
@@ -611,6 +492,97 @@ def unanswered(answered):
             and not up.wake_expired(e)]
 
 
+def _resolve_or_reject(parser, args, sid):
+    """解析 target 记号并做归属校验；通过就返回 (namespace, number, found, group_id)。
+
+    失败一律返回 None（拒绝理由已打印），调用方直接 `return 1`。
+    """
+    try:
+        ref_namespace, target = wg_event_ref.parse(args.target)
+    except wg_event_ref.BadRef as exc:
+        parser.error(f"target {exc}")
+    # 回复一条已过待回时效的老唤醒，等于回头挖一个没人记得的坟。默认拒绝，
+    # 确实要回就 --force 显式放行。追问闲聊不在 wg_events.jsonl 里，走不到
+    # 这个检查——追问窗口自带 idle/budget 时效，由 followup.stale 把关。
+    import up
+
+    # 待回时效只对**事件流**的唤醒有意义：`q7` 是库里的闲聊，不在 `up.events()`
+    # 里，按数字去比对会拿别群同号那条的时效来判它（issue #203）。
+    stale_row = None
+    if ref_namespace == wg_event_ref.EVENT:
+        stale_row = next((e for e in up.events() if e.get("id") == target), None)
+    if stale_row and up.wake_expired(stale_row):
+        age_min = (time.time() - (stale_row.get("timestamp") or 0) / 1000) / 60
+        if not args.force:
+            print(f"拒绝：id={target} 是 {age_min:.0f} 分钟前的唤醒，超过待回时效 "
+                  f"{up.pending_reply_ttl()}s，默认不当新话题回。")
+            print("      确认要回这条旧消息就加 --force 再跑一次")
+            return None
+        print(f"  note: id={target} 已过待回时效（{age_min:.0f} 分钟前），--force 放行")
+
+    # issue #203：查找按记号自己的命名空间走，撞号时只可能指回自己那条。裸数字在
+    # 事件流里查不到、回库兜底命中时，这里把来源说出来——「引用挂上了」必须能看出
+    # 挂的是哪套编号里的那条。
+    resolved_ns, resolved_no, found = resolve_target(args.target)
+    if resolved_ns is None:
+        print(f"拒绝：看不懂的记号 {args.target!r}（需要 id=<n>、qid=<n>、<n> 或 q<n>）")
+        return None
+    if resolved_ns != ref_namespace and found is not None:
+        print(f"  note: {args.target} 是事件流编号，事件流里没有它；按"
+              f"{wg_event_ref.describe(resolved_ns)}的同号消息解析（要回库那条请写 "
+              f"q{resolved_no}）")
+    target = resolved_no
+    # issue #164 PB（P0 护栏）：目标事件必须属于本会话的群，否则不进 plan()、
+    # 不发送、不记账。改前这里是 `found[0] if found else (args.group or
+    # latest_group_id())`——目标事件自己的群直接拿来发，一句归属校验都没有：
+    # 钉死群 111 的会话能把话发进群 222，还把群 222 那条记成「已回」，另一个
+    # 会话于是永远不再回它（doc/MULTI_GROUP_PLAN.md:63 的 P0）。
+    # 未钉死时 target_group 原样返回 found，单群机器行为不变。
+    try:
+        found = wg_isolation.target_group(target, found)
+    except wg_isolation.CrossGroup as exc:
+        print(f"拒绝：{exc}")
+        print(f"      本会话群：{wg_isolation.describe()}")
+        return None
+    # issue #203 修复候选 3：库里的行还要满足「确实属于本会话」——撞号时
+    # `target_group` 校验的是本行自己的群号，但库那张表是跨会话的，光有群号
+    # 分不出「本会话在群里看到的那条」与「另一个会话在同一个群里的另一条」。
+    if resolved_ns == wg_event_ref.INBOX and wg_isolation.pinned():
+        owner = _inbox_session_of(target)
+        if owner and owner != sid:
+            print(f"拒绝：qid={target} 属于另一个会话（{owner}），本会话是 {sid}"
+                  f"——那条是别的会话在群里收到的，回它会把它的记账搅乱")
+            return None
+    return resolved_ns, target, found
+
+
+def _check_also(also_inbox, answered):
+    """`--also` 的归属校验：库编号查存在性，事件编号查是不是本会话的群。"""
+    import up
+
+    for no in also_inbox:
+        _, _, hit = resolve_target(f"q{no}")
+        if hit is None:
+            print(f"拒绝：--also q{no} 在会话库里查不到这条消息")
+            return False
+        if wg_isolation.pinned() and str(hit[0]) != wg_isolation.group_id():
+            print(f"拒绝：--also q{no} 属于群 {hit[0]}，不属于本会话的群"
+                  f"（{wg_isolation.describe()}）")
+            return False
+    # issue #164 PB：`--also` 也是记账，别群的 id 记成「已回」等于替另一个会话
+    # 静默丢消息——那条会永远停在「已回」，而它的会话根本不知道发生过什么。
+    if wg_isolation.pinned():
+        by_id = {e.get("id"): e for e in up.events()}
+        cross = [i for i in answered
+                 if i in by_id and not wg_isolation.belongs(by_id[i])]
+        if cross:
+            print(f"拒绝：--also 里的 {cross} 不属于本会话的群"
+                  f"（{wg_isolation.describe()}）——把它们记成「已回」会让另一个"
+                  f"会话永远不再回这些消息")
+            return False
+    return True
+
+
 def _plugin_settings():
     """追问窗口一类插件的归一化设置（三态门控要它）。
 
@@ -625,12 +597,16 @@ def _plugin_settings():
         return {}
 
 
-def open_followup(event_id, group_id="", wanted=True, not_before=None):
+def open_followup(event_id, group_id="", wanted=True, not_before=None, after_ref=None):
     """发送成功后开追问窗口，让话题继续；wanted=False 或插件停了就不开。
 
     not_before 是发送开始的墙上时间：窗口只收这之后的发言，避免把 Agent 思考
     期间堆下的历史闲聊算成接话（issue #29）。group_id 带进去，三态门控按群判
     （issue #4 PD2a）——这个群关了追问窗口，别的群照开。
+
+    ``after_ref`` 是窗口游标**在这条回复链路上**的记号（issue #203）：回的是唤醒行
+    就给事件流写法（裸数字 / ``id:<n>``），回的是追问行就给 ``q<n>``——由这里定
+    命名空间，插件原样转给 ``followup.open``。省略时退回 ``event_id``，与改前一致。
     """
     if not wanted:
         return None
@@ -638,6 +614,7 @@ def open_followup(event_id, group_id="", wanted=True, not_before=None):
         "settings": _plugin_settings(),
         "group_id": group_id,
         "event_id": event_id,
+        "after_ref": event_id if after_ref is None else after_ref,
         "not_before": not_before,
     })
     if state:
@@ -730,9 +707,15 @@ def wait_for_next(seconds):
     return winconsole.run_passthrough(cmd, cwd=str(ROOT))
 
 
-def main():
+def _build_parser():
+    """16 个参数的登记表；取值校验与副作用都在 `main()` 里。
+
+    单独拎出来只为让 `main()` 读得懂（issue #11 的体量红线），没有别的作用。
+    """
     parser = argparse.ArgumentParser(description="回一条群消息并记账")
-    parser.add_argument("target", nargs="?", help="要回复的消息 id（必填，偷懒省略会直接报错）")
+    parser.add_argument("target", nargs="?",
+                        help="要回复的消息 id：唤醒行/--list 的 id=<n> 抄成 <n>，追问行的 qid=<n> "
+                             "抄成 q<n>（必填，偷懒省略会直接报错；issue #203）")
     parser.add_argument("text", nargs="?", help="回复正文；@ {花名} 会变成真正的 @；换行或字面量 \\n 拆成多条气泡"
                                                 f"（默认最多 {MAX_BUBBLES} 条，--max-bubbles 可调）；只发图时可省略")
     parser.add_argument("--image", action="append", default=[], metavar="路径",
@@ -745,8 +728,9 @@ def main():
     parser.add_argument("--no-quote", action="store_true", help="不带引用")
     parser.add_argument("--at", action="append", default=[], metavar="花名",
                         help="在正文前面 @ 某人，可重复")
-    parser.add_argument("--also", type=int, action="append", default=[], metavar="ID",
-                        help="同一条回复顺带算作回了这些消息（连发的 @ 用一条答完）")
+    parser.add_argument("--also", action="append", default=[], metavar="ID",
+                        help="同一条回复顺带算作回了这些消息（连发的 @ 用一条答完）；"
+                             "写法同 target：<n> 是事件流，q<n> 是会话库")
     parser.add_argument("--wait", type=int, default=DEFAULT_WAIT, metavar="秒",
                         help="发完就地等下一条唤醒，不用退出后另外重挂监听（默认 "
                              f"{DEFAULT_WAIT}s，0 等同于 --no-wait）")
@@ -763,10 +747,108 @@ def main():
     parser.add_argument("--list", action="store_true", help="只列出 @ 过我的消息")
     parser.add_argument("--context", type=int, metavar="N",
                         help="列出最近 N 条聊天（含闲聊），回之前先看群里在聊什么")
-    parser.add_argument("--around", type=int, metavar="ID",
-                        help="配合 --context：只看这条之前的部分")
-    parser.add_argument("--show", type=int, metavar="ID",
-                        help="按 id 读这条消息的全文（唤醒行/上下文行截断后的补救，issue #32）")
+    parser.add_argument("--around", metavar="ID",
+                        help="配合 --context：只看这条之前的部分（编号同上下文行；"
+                             "上下文行是会话库的 q<n>，写成 q<n> 或 <n> 都行）")
+    parser.add_argument("--show", dest="show", metavar="ID",
+                        help="按 id 读这条消息的全文（唤醒行/上下文行截断后的补救，issue #32）："
+                             "<n> 读事件流，q<n> 读会话库")
+    return parser
+
+
+def _run_readonly(args, parser):
+    """只读分支（--context / --show / --list / --who）：有命中就返回退出码，否则 None。"""
+    if args.context is not None:
+        around = None
+        if args.around is not None:
+            # 上下文行打的是会话库编号（q<n>），`--around` 也按库口径解释；
+            # 写成 `q7` / `7` 都落到同一个 rowid（issue #203）。
+            try:
+                around = wg_event_ref.parse(args.around)[1]
+            except wg_event_ref.BadRef as exc:
+                parser.error(f"--around {exc}")
+        return show_context(args.context, around)
+    if args.show is not None:
+        try:
+            namespace, number = wg_event_ref.parse(args.show)
+        except wg_event_ref.BadRef as exc:
+            parser.error(f"--show {exc}")
+        return wg_text.show_event(number, namespace=namespace)
+    if args.list:
+        return list_wakes()
+    if args.who:
+        return _looking_for(args.who, args.group or latest_group_id())
+    return None
+
+def _send_via_onebot(args, ctx):
+    """OneBot 通道：带 @、带图，或能对上原始 message_id 时的唯一选择。
+
+    返回 None 表示这条通道没走通、可以退回计划通道；否则就是退出码。
+    """
+    group_id, target = ctx["group_id"], ctx["target"]
+    bubble_segments, has_at = ctx["bubble_segments"], ctx["has_at"]
+    found = ctx["found"]
+    # 发之前先报账：间隔会吃掉本次调用的等待额度（整次共享的总额，issue #88）。
+    # 这条路径按 `BUBBLE_GAP` 固定节奏算；条数取 `bubble_segments`——图片也是气泡（#136）。
+    wg_bubbles.report_cost(len(bubble_segments), args.wait)
+    message_id = None if args.no_quote else (found[1] if found else None)
+    # 发送 + 失败诊断 + 可选解禁补发全在 wg_send_failure（#132）：首条就失败时
+    # 由它说出真实原因，不再是那句「带 @ 只能走 OneBot」。
+    sent = wg_send_failure.send(group_id, bubble_segments, message_id,
+                                deliver=onebot_send_bubbles, has_at=has_at,
+                                unmute=args.wait_unmute)
+    if sent == len(bubble_segments):
+        record(ctx["answered"], args.text or "")
+        print("SENT")
+        open_followup(target, group_id=group_id,
+                      wanted=not args.no_followup, not_before=ctx["send_started"],
+                      after_ref=ctx["followup_ref"])
+        return wait_for_next(args.wait) if args.wait else 0
+    if sent or has_at:
+        return 1
+    if args.image:
+        # 计划通道只发文字（send() 的气泡写死 kind=text），回退过去图片就没了。
+        print("SEND_FAILED: 带图的消息只能走 OneBot，计划通道会把图片整个丢掉")
+        return 1
+    print("  falling back to the plan path")
+    return None
+
+
+def _send_via_plan(args, sid, ctx):
+    """计划通道：纯文字、且不需要指向旧 batch 里的某条消息时走这里。"""
+    group_id, target = ctx["group_id"], ctx["target"]
+    bubbles = ctx["bubbles"]
+    # 计划通道条数有限，超过就**在发之前**拒绝，别留下半截回复（issue #131）。
+    overflow = wg_bubbles.plan_overflow_message(len(bubbles))
+    if overflow:
+        print(f"REFUSED: {overflow}")
+        return 1
+    wg_bubbles.report_cost(len(bubbles), args.wait, plan_path=True)
+
+    batch = batch_id()
+    if not batch:
+        print("没有可用批次，等 collector 收下一批")
+        return 1
+    plan_id, final_target = plan(sid, batch, target, args.intent, not args.no_quote)
+    if not plan_id:
+        print("PLAN_FAILED")
+        return 1
+    quote = (not args.no_quote) and final_target == target
+    if send(sid, plan_id, bubbles, quote):
+        record(ctx["answered"], args.text)
+        if final_target != target:
+            print(f"note: batch moved, plan target was {final_target}")
+        print("SENT")
+        open_followup(final_target, group_id=group_id,
+                      wanted=not args.no_followup, not_before=ctx["send_started"],
+                      after_ref=wg_event_ref.format_ref(ctx["resolved_ns"], final_target))
+        return wait_for_next(args.wait) if args.wait else 0
+    print("SEND_FAILED")
+    return 1
+
+
+def main():
+    parser = _build_parser()
     args = parser.parse_args()
     # 上限是硬顶（issue #131 明确不做无限条）：显式取值越界就别猜，直接报错。
     if args.max_bubbles is not None and not 1 <= args.max_bubbles <= MAX_BUBBLES:
@@ -782,21 +864,9 @@ def main():
     # message went out.
     winconsole.ensure_utf8_stdio(line_buffering=True)
 
-    if args.context is not None:
-        return show_context(args.context, args.around)
-    if args.show is not None:
-        return wg_text.show_event(args.show)
-    if args.list:
-        return list_wakes()
-    if args.who:
-        qq, label = resolve_member(args.who, args.group or latest_group_id())
-        print(f"{args.who} -> {qq or '未解析'}（{label}）")
-        # 专门问一个人时把画像整张给出来（issue #163）：这是唯一「问他是谁」的
-        # 入口，唤醒行那 60 字是给接话用的预算，这里不必省。
-        card = wg_dossiers.who_card(qq or args.who, args.group or latest_group_id())
-        if card:
-            print(card)
-        return 0 if qq else 1
+    readonly = _run_readonly(args, parser)
+    if readonly is not None:
+        return readonly
     if not args.target or not (args.text or args.image):
         parser.error("需要 <event_id> 和 <text>（只发图就加 --image）")
 
@@ -805,35 +875,10 @@ def main():
         print("没有会话 id，先跑 up.py 让 collector 建立会话")
         return 1
 
-    target = int(args.target)
-    # 回复一条已过待回时效的老唤醒，等于回头挖一个没人记得的坟。默认拒绝，
-    # 确实要回就 --force 显式放行。追问闲聊不在 wg_events.jsonl 里，走不到
-    # 这个检查——追问窗口自带 idle/budget 时效，由 followup.stale 把关。
-    import up
-
-    stale_row = next((e for e in up.events() if e.get("id") == target), None)
-    if stale_row and up.wake_expired(stale_row):
-        age_min = (time.time() - (stale_row.get("timestamp") or 0) / 1000) / 60
-        if not args.force:
-            print(f"拒绝：id={target} 是 {age_min:.0f} 分钟前的唤醒，超过待回时效 "
-                  f"{up.pending_reply_ttl()}s，默认不当新话题回。")
-            print("      确认要回这条旧消息就加 --force 再跑一次")
-            return 1
-        print(f"  note: id={target} 已过待回时效（{age_min:.0f} 分钟前），--force 放行")
-
-    found = event_target(target)
-    # issue #164 PB（P0 护栏）：目标事件必须属于本会话的群，否则不进 plan()、
-    # 不发送、不记账。改前这里是 `found[0] if found else (args.group or
-    # latest_group_id())`——目标事件自己的群直接拿来发，一句归属校验都没有：
-    # 钉死群 111 的会话能把话发进群 222，还把群 222 那条记成「已回」，另一个
-    # 会话于是永远不再回它（doc/MULTI_GROUP_PLAN.md:63 的 P0）。
-    # 未钉死时 target_group 原样返回 found，单群机器行为不变。
-    try:
-        found = wg_isolation.target_group(target, found)
-    except wg_isolation.CrossGroup as exc:
-        print(f"拒绝：{exc}")
-        print(f"      本会话群：{wg_isolation.describe()}")
+    resolved = _resolve_or_reject(parser, args, sid)
+    if resolved is None:
         return 1
+    resolved_ns, target, found = resolved
     group_id = found[0] if found else (args.group or latest_group_id())
     if not group_id:
         print("不知道该发到哪个群：事件里没有 group 信息")
@@ -845,19 +890,27 @@ def main():
     bubbles = split_bubbles(args.text, limit)
     bubble_segments = [build_segments(bubbles[0], group_id, leading=args.at)]
     bubble_segments += [build_segments(one, group_id) for one in bubbles[1:]]
-    answered = [target, *[i for i in args.also if i != target]]
-    # issue #164 PB：`--also` 也是记账，别群的 id 记成「已回」等于替另一个会话
-    # 静默丢消息——那条会永远停在「已回」，而它的会话根本不知道发生过什么。
-    if wg_isolation.pinned():
-        by_id = {e.get("id"): e for e in up.events()}
-        cross = [i for i in answered
-                 if i in by_id and not wg_isolation.belongs(by_id[i])]
-        if cross:
-            print(f"拒绝：--also 里的 {cross} 不属于本会话的群"
-                  f"（{wg_isolation.describe()}）——把它们记成「已回」会让另一个"
-                  f"会话永远不再回这些消息")
+
+    # issue #203：`--also` 里的库编号（q<n>）不进取答账本——账本只服务
+    # wg_events 的「已回」判定，把库 rowid 写成数字会让一个同号的事件流唤醒
+    # 被静默标成已回（这正是撞号的本体）。库那条的接话由追问窗口自己推游标，
+    # 这里只需校验它确实存在、且属于本会话的群，再在记账时跳过它。
+    also_event, also_inbox = [], []
+    for ref in args.also:
+        try:
+            ns, no = wg_event_ref.parse(ref)
+        except wg_event_ref.BadRef as exc:
+            print(f"拒绝：--also {exc}")
             return 1
+        (also_inbox if ns == wg_event_ref.INBOX else also_event).append(no)
+    answered = [target, *[i for i in also_event if i != target]]
+    if not _check_also(also_inbox, answered):
+        return 1
+    if also_inbox:
+        print(f"  note: --also {'、'.join(f'q{i}' for i in also_inbox)} 是会话库里的"
+              f"闲聊，不进取答账本（追问窗口自己推游标）")
     print(f"target={target} group={group_id} session={sid}")
+
     # 图片先校验再动手（issue #128）：坏路径在这里就退，一张都不发，也不打印后面
     # 那行「还有 N 条没回」——那会让 Agent 以为图已经发出去了。`limit` 一起传进去：
     # 图也是气泡，正文 + 图超过上限就在发之前拒（间隔 1.2s 会吃掉发送预算，#131）。
@@ -881,67 +934,30 @@ def main():
         print(f"  NOTE 还有 {len(missing)} 条没回：{ids}")
         print("       一条答得完就加 --also，答不完就先回这条再接着回")
 
-    # 追问窗口的时间下界：只把「发送开始之后」的发言算成接话。Agent 拿到唤醒后
-    # 可能隔十几分钟才发出回复，这期间群里堆的闲聊 id 都大于被回复的那条，按 id
-    # 扫会把它们全算进预算，窗口开出来就被自己关掉（issue #29）。
-    send_started = time.time()
+    ctx = {
+        "group_id": group_id, "target": target, "found": found,
+        "bubbles": bubbles, "bubble_segments": bubble_segments,
+        "has_at": has_at, "answered": answered,
+        # 追问窗口的时间下界：只把「发送开始之后」的发言算成接话（issue #29）。
+        "send_started": time.time(),
+        # 追问窗口的游标是 **chat_inbox 的 rowid**，与事件流 id 是两套编号：回一条
+        # 追问行必须把它记住成 `q<n>`，否则开出来的窗口从别群同号那条往后看，
+        # 回复挂的引用与窗口听得见的话会指向两条不同的消息（issue #203）。
+        "followup_ref": wg_event_ref.format_ref(resolved_ns, target),
+        "resolved_ns": resolved_ns,
+    }
 
     # Quote through OneBot first: it is the only path that can point at a message
     # from an older batch, which is the normal case once the group is chatting.
     # It is also the only path that can carry an at or image segment -- plan/send
     # speaks plain text, so a message with either must not be handed to it.
     if has_at or args.image or (not args.no_quote and found):
-        # 发之前先报账：间隔会吃掉本次调用的等待额度（整次共享的总额，issue #88）。
-        # 这条路径按 `BUBBLE_GAP` 固定节奏算；条数取 `bubble_segments`——图片也是气泡（#136）。
-        wg_bubbles.report_cost(len(bubble_segments), args.wait)
-        message_id = None if args.no_quote else (found[1] if found else None)
-        # 发送 + 失败诊断 + 可选解禁补发全在 wg_send_failure（#132）：首条就失败时
-        # 由它说出真实原因，不再是那句「带 @ 只能走 OneBot」。
-        sent = wg_send_failure.send(group_id, bubble_segments, message_id,
-                                    deliver=onebot_send_bubbles, has_at=has_at,
-                                    unmute=args.wait_unmute)
-        if sent == len(bubble_segments):
-            record(answered, args.text or "")
-            print("SENT")
-            open_followup(target, group_id=group_id,
-                          wanted=not args.no_followup, not_before=send_started)
-            return wait_for_next(args.wait) if args.wait else 0
-        if sent or has_at:
-            return 1
-        if args.image:
-            # 计划通道只发文字（send() 的气泡写死 kind=text），回退过去图片就没了。
-            print("SEND_FAILED: 带图的消息只能走 OneBot，计划通道会把图片整个丢掉")
-            return 1
-        print("  falling back to the plan path")
+        result = _send_via_onebot(args, ctx)
+        if result is not None:
+            return result
     elif not args.no_quote:
         print("  no OneBot id on record for this event; using the plan path")
-
-    # 计划通道条数有限，超过就**在发之前**拒绝，别留下半截回复（issue #131）。
-    overflow = wg_bubbles.plan_overflow_message(len(bubbles))
-    if overflow:
-        print(f"REFUSED: {overflow}")
-        return 1
-    wg_bubbles.report_cost(len(bubbles), args.wait, plan_path=True)
-
-    batch = batch_id()
-    if not batch:
-        print("没有可用批次，等 collector 收下一批")
-        return 1
-    plan_id, final_target = plan(sid, batch, target, args.intent, not args.no_quote)
-    if not plan_id:
-        print("PLAN_FAILED")
-        return 1
-    quote = (not args.no_quote) and final_target == target
-    if send(sid, plan_id, bubbles, quote):
-        record(answered, args.text)
-        if final_target != target:
-            print(f"note: batch moved, plan target was {final_target}")
-        print("SENT")
-        open_followup(final_target, group_id=group_id,
-                      wanted=not args.no_followup, not_before=send_started)
-        return wait_for_next(args.wait) if args.wait else 0
-    print("SEND_FAILED")
-    return 1
+    return _send_via_plan(args, sid, ctx)
 
 
 if __name__ == "__main__":

@@ -211,7 +211,7 @@ def run_reply(args, state_dir):
     env = dict(os.environ)
     env["IDLEJOT_WG_STATE"] = str(state_dir)
     return subprocess.run([sys.executable, str(ROOT / "water-group" / "daemon" / "reply.py"),
-                           *args],
+                           *args], encoding="utf-8", errors="replace",
                           capture_output=True, text=True, timeout=90, cwd=str(ROOT), env=env)
 
 

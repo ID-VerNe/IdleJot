@@ -24,10 +24,10 @@
 状态文件（TULPA_WG_STATE 下）：
   wg_followup.json  当前窗口；文件不存在就是没开窗
 字段：after_id（从这条之后开始看，通常就是刚回复的那条）、not_before（发送开始
-的墙上时间，窗口只收这之后的发言，给 after_id 补一个向过去的下界）、session
-（所属会话，换会话即失效，防会话重建后 id 空间对不上）、opened_at、until
-（静默截止）、budget（还能跟几条，自己被自己说的话不占额度）、max_messages、
-idle_seconds、wakes。
+的墙上时间，只作**预算标记**：它不给可见性划界，只决定哪些接话扣额度，判据见
+`sent_at()`）、session（所属会话，换会话即失效，防会话重建后 id 空间对不上）、
+opened_at、until（静默截止）、budget（还能跟几条，自己被自己说的话不占额度）、
+max_messages、idle_seconds、wakes。
 
 Usage:
   followup.py --show   打印当前窗口状态（调试用）
@@ -235,8 +235,9 @@ def since(after_id, session, not_before=None, limit=50):
     """窗口之后的全部消息，含自己说的（调用方按 is_self 过滤要不要唤醒）。
 
     只捞 id、payload、media、at 四列，跟 `reply.recent_chatter` 同一份库同一套
-    字段；区别只在它是往前看而不是取最近 N 条。`at` 一并取回，让 `consume()` 逐
-    行判 pre/post-reply——`not_before` 不再在 SQL 层过滤（issue #117：处理期间
+    字段；区别只在它是往前看而不是取最近 N 条。`at` 一并取回，给 `consume()` 兜底
+    ——判 pre/post-reply 用消息自己的 `ts`（`sent_at()`），`at` 只在 `ts` 缺失时
+    顶上（issue #218）。`not_before` 不再在 SQL 层过滤（issue #117：处理期间
     群友发的消息被过滤掉就永久消失，`consume()` 的游标只推进它看得见的行，被过滤
     的行下一轮仍在 SQL 层挡掉）。
 
@@ -281,8 +282,8 @@ def since(after_id, session, not_before=None, limit=50):
                     # "#ping"；而 commands.command_key 要求行首、不 strip（#70）。
                     "raw": data.get("content") or "",
                     "text": " ".join((data.get("content") or "").split()),
-                    "ts": data.get("timestamp"),
-                    "at": float(at) if at is not None else 0.0,
+                    "ts": data.get("timestamp"),  # 毫秒，消息自己的时间（issue #218）
+                    "at": float(at) if at is not None else 0.0,  # 秒，本地入库时刻
                     "self": bool(data.get("is_self")),
                     "synthetic": bool(data.get("synthetic")),
                     "recalled": bool(data.get("recalled")),
@@ -305,6 +306,35 @@ def since(after_id, session, not_before=None, limit=50):
     return out
 
 
+def sent_at(row):
+    """一条消息「开口」的时刻（秒）：`ts` 优先，`at` 兜底（issue #218）。
+
+    两个时间来源不同、单位也不同，混用正是 #218 的根因：
+
+    - `ts`：消息自己的时间，取自 `chat_inbox.payload.timestamp`，**毫秒**（OneBot
+      v11 的 `time` 是整数秒，`chatlocal/mcp_chat.py` 入库时乘 1000），Unix 时间戳，
+      时钟是 QQ 服务器的；
+    - `at`：`chat_inbox.at`，**秒**，本地入库那一刻的墙上时间（入库写的是
+      `received_at=time.time()`），与 `not_before` 同源。
+
+    额度问的是「谁在发送开始之后开口」，只有 `ts` 答得上来：`at` 会把「发送开始
+    之前发出、发送期间才收到」的消息算成接话，而多气泡回复在途的这几秒
+    （`BUBBLE_GAP=1.2s` × 条数）里，群里说的话几乎全是这个形态——`max_messages`
+    就这么被整段绕过去了（issue #218）。
+
+    `ts` 缺失（老行、payload 超限被清空、手搓行）时退回 `at`：宁可多扣一次，也不能
+    把一条接话算成 0 额度、让窗口无上限地跟下去。
+
+    两个已知边界，写在这里免得下次再混：`ts` 是整数秒，边界有 ≤1s 的粒度残差，
+    方向是「少扣」；本机时钟与 QQ 服务器时间若有偏差，边界整体平移（本机时钟是
+    全局时间基准，见 issue #95）——拿 `at` 判看似免偏差，代价是整段发送在途全判错。
+    """
+    ts = row.get("ts")
+    if type(ts) in (int, float) and ts > 0:
+        return float(ts) / 1000.0
+    return float(row.get("at") or 0)
+
+
 def consume(window, rows):
     """消化一批查询结果：返回该唤醒的闲聊，并原地更新窗口。
 
@@ -313,11 +343,12 @@ def consume(window, rows):
     （issue #70）。**只 @ 了别人、正文空白**的消息同理（issue #138）：它没有一句话
     可回，却会被当成「他在 @ 我」，Agent 照着答就是认错人。
 
-    pre-reply 的闲聊（`at < not_before`，Agent 处理回复期间群里说的话）**照常
-    唤醒**、照常推进游标，但不占 budget——它们是处理期间漏掉的接话，得让 Agent
-    看见（issue #117：以前在 `since()` 的 SQL 层过滤，处理期间发的消息永久从查询
-    结果里消失）。`not_before` 从「可见性过滤」退化为「预算标记」：可见性交给
-    `since()` 一次返回全量，预算只扣真正在发送开始之后接的话。
+    pre-reply 的闲聊（**开口**早于 `not_before`，Agent 处理回复期间群里说的话）
+    **照常唤醒**、照常推进游标，但不占 budget——它们是处理期间漏掉的接话，得让
+    Agent 看见（issue #117：以前在 `since()` 的 SQL 层过滤，处理期间发的消息永久
+    从查询结果里消失）。`not_before` 从「可见性过滤」退化为「预算标记」：可见性交给
+    `since()` 一次返回全量，预算只扣真正在发送开始之后**开口**的接话——判据取消息
+    自己的时间（`sent_at()`），不是本地收到时刻（issue #218）。
 
     有人接话就续期（until 推后）；这一批把 budget 扣到 0 就**当场收窗**，不留到
     下一轮 stale()（issue #98：以前那批照样唤醒，报告还写着「额度还剩 0 条」，
@@ -337,9 +368,10 @@ def consume(window, rows):
             if not r["self"] and not r["synthetic"]
             and not up.is_command(r.get("raw") or r["text"])
             and not bare_at_others(r, account)]
-    # 只扣发送开始之后的接话：pre-reply 是处理期间漏掉的，不该再算一次额度
-    # （issue #117）；它仍要唤醒，预算只是真正的接话上限。
-    chargeable = [r for r in woke if float(r.get("at") or 0) >= not_before]
+    # 只扣发送开始之后**开口**的接话：pre-reply 是处理期间漏掉的，不该再算一次
+    # 额度（issue #117）；它仍要唤醒，预算只是真正的接话上限。判据取消息时间而不是
+    # 本地收到时刻——发送在途那几秒「早发出、晚收到」的话不算接话（issue #218）。
+    chargeable = [r for r in woke if sent_at(r) >= not_before]
     window["after_id"] = max(r["id"] for r in rows)
     if woke:
         # 钳在 0：背着聊天记录回来时一批可能远超额度，那是「这段时间群里都在聊」，

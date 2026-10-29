@@ -27,6 +27,10 @@ issue #138：**只 @ 了别人、正文空白**的消息不算接话——不唤
 的 ``segments``（``followup.mention_info``），没有段清单的老行退化成从 ``content``
 认 ``@<qq>``。同一 issue 的第二半在渲染侧：追问行不许把 ``@<qq>`` 抹成裸 ``@``。
 
+issue #218：额度判据取消息自己的时间（``ts``，毫秒）而不是本地收到时刻（``at``，
+秒）——多气泡回复在途那几秒里「发送前发出、发送中收到」的话不再白嫖
+``max_messages``；``ts`` 缺失时才退回 ``at``。
+
     .venv/Scripts/python.exe scripts/check_followup.py
 """
 import json
@@ -243,9 +247,11 @@ def check_backlog():
     assert state["after_id"] == 35, "游标要越过积压，不能卡在锚点"
     assert state["wakes"] == 1, state
     assert followup.stale(state) is None, followup.stale(state)
-    # 开窗之后真有人接话，才该扣额度
+    # 开窗之后真有人接话，才该扣额度。时间写成 sent_at+2 而不是 sent_at：额度判据
+    # 比的是消息自己的时间（issue #218），`int(sent_at*1000)` 截断后比 sent_at 还早
+    # 一点，会被算成「发送开始之前开口」——夹具要表达的是「发送之后说的」。
     append([(40, {"sender": "群友", "content": "回复之后说的",
-                  "timestamp": int(sent_at * 1000)}, sent_at + 5)])
+                  "timestamp": int((sent_at + 2) * 1000)}, sent_at + 5)])
     woke = followup.consume(state, followup.since(state["after_id"], SID,
                                                   state["not_before"]))
     assert [r["id"] for r in woke] == [40], woke
@@ -282,9 +288,9 @@ def check_pre_reply_visible():
     assert state["budget"] == 5, "pre-reply 不该扣额度（issue #117）"
     assert followup.stale(state) is None, followup.stale(state)
 
-    # 发送开始之后的接话才占预算
+    # 发送开始之后的接话才占预算（消息时间同样要真的晚于 not_before，见 check_backlog）
     append([(810, {"sender": "群友", "content": "回复之后说的",
-                   "timestamp": int(sent_at * 1000)}, sent_at + 5)])
+                   "timestamp": int((sent_at + 2) * 1000)}, sent_at + 5)])
     woke = followup.consume(state, followup.since(state["after_id"], SID,
                                                   state["not_before"]))
     assert [r["id"] for r in woke] == [810], woke
@@ -298,8 +304,9 @@ def check_pagination():
     anchor = 100
     sent_at = time.time()
     ids = list(range(110, 170))  # 60 条，超过 since() 的默认每页 50 条
+    # 消息时间与入库时间都排在 not_before 之后（+2）：判据比的是消息时间（issue #218）
     append([(i, {"sender": "群友", "content": f"接话 {i}",
-                 "timestamp": int(sent_at * 1000)}, sent_at + i * 0.001) for i in ids])
+                 "timestamp": int((sent_at + 2) * 1000)}, sent_at + 2 + i * 0.001) for i in ids])
     rows = followup.since(anchor, SID, sent_at)
     assert [r["id"] for r in rows] == ids, f"分页漏了：{[r['id'] for r in rows]}"
     state = followup.open(anchor, max_messages=100, idle_seconds=600, not_before=sent_at)
@@ -725,6 +732,53 @@ def check_bare_at_others_watch():
     print("  ok  watch.py 追问行只放真接话：@别人+空白不出现，@我+空白照旧（issue #138）")
 
 
+def check_charge_uses_message_time():
+    """issue #218：额度按消息自己的时间扣，不是本地收到时刻。
+
+    现场：一条多气泡回复在途 `BUBBLE_GAP=1.2s × 条数`（最长到 `SEND_BUDGET=30s`），
+    这段里群里说的话几乎全是「发送开始之前发出、发送开始之后才收到」。旧判据
+    `at >= not_before` 把它们全判成 pre-reply，`max_messages` 在发送期间被整段绕过
+    ——和 #144 压 turn 成本的方向相反。判据要的是「谁在发送开始之后**开口**」，
+    只有 `ts`（`payload.timestamp`，毫秒）答得上来。
+
+    三行夹具就是 issue 的复现形态：`ts < not_before < at`（发送在途到达）不扣额度
+    但仍唤醒（#117 的可见性不倒退）；`not_before <= ts` 扣；`ts` 缺失退回 `at` 扣。
+    """
+    anchor = 1000
+    sent_at = time.time()
+    append([
+        # 1) 发送开始之前发出、发送期间才收到：不扣额度（issue #218 的症状行）
+        (1001, {"sender": "甲", "content": "在途到达",
+                "timestamp": int((sent_at - 2) * 1000)}, sent_at + 1),
+        # 2) 发送开始之后开口：扣
+        (1002, {"sender": "乙", "content": "发送后接话",
+                "timestamp": int((sent_at + 2) * 1000)}, sent_at + 2.5),
+        # 3) 没有消息时间（老行/手搓行）：退回 at，at 在发送开始之后 → 扣
+        (1003, {"sender": "丙", "content": "没有消息时间"}, sent_at + 3),
+    ])
+    state = followup.open(anchor, max_messages=5, idle_seconds=600, not_before=sent_at)
+    rows = followup.since(anchor, SID)
+    assert [r["id"] for r in rows] == [1001, 1002, 1003], [r["id"] for r in rows]
+
+    woke = followup.consume(state, rows)
+    assert [r["id"] for r in woke] == [1001, 1002, 1003], \
+        f"在途到达的接话也要唤醒，不能吞：{[r['id'] for r in woke]}"
+    assert state["budget"] == 3, (
+        "发送期间到达的消息被扣了额度（issue #218 复发）："
+        f"该扣 1002/1003 两条，实际扣了 {5 - state['budget']} 条")
+    assert state["after_id"] == 1003, state
+
+    # 判据本身也钉一下：ts 是毫秒、at 是秒；ts 缺失才退回 at。放在行为断言之后，
+    # 是为了让未打补丁的 base 先红在「额度多扣」这个症状上，而不是红在缺函数上。
+    assert followup.sent_at(rows[0]) == int((sent_at - 2) * 1000) / 1000.0, \
+        followup.sent_at(rows[0])
+    assert followup.sent_at(rows[1]) == int((sent_at + 2) * 1000) / 1000.0, \
+        followup.sent_at(rows[1])
+    assert followup.sent_at(rows[2]) == sent_at + 3, followup.sent_at(rows[2])
+    followup.close()
+    print("  ok  额度按消息时间扣，发送在途到达的不扣（issue #218）")
+
+
 def main():
     build()
     print("追问窗口回归：")
@@ -757,6 +811,9 @@ def main():
     # 用例之后——否则会被它们当成接话捞进去。
     check_bare_at_others()
     check_bare_at_others_watch()
+    # issue #218 专项：追加 id 1000+ 的新消息，同样必须排在所有 `since(小 anchor)`
+    # 用例之后。
+    check_charge_uses_message_time()
     print("PASS")
     return 0
 

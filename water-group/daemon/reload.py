@@ -17,7 +17,8 @@ Design notes that matter when editing this file:
 * A syntax error rejects the whole batch.  The old processes keep running.
 * ``watchdog`` is only restarted while NapCat answers; otherwise the request is
   deferred.  Killing an injector mid-relaunch is how two QQ instances end up
-  sharing one user-data-dir.
+  sharing one user-data-dir.  A deferral is reported as a failure (exit 5), not
+  as a success: the changed code is still the old code (issue #229).
 * ``db_keeper`` is the one child that may briefly have two instances: start the
   new one, wait, then stop the old one.  There must never be a window with no
   keeper.
@@ -104,8 +105,16 @@ def status_line() -> str:
     restarted = ",".join(state.get("last_restarted") or []) or "-"
     elapsed = state.get("last_elapsed")
     elapsed = f"{elapsed}s" if isinstance(elapsed, (int, float)) else "-"
-    return (f"watch {watch}（间隔 {state.get('interval', 2)}s，"
+    line = (f"watch {watch}（间隔 {state.get('interval', 2)}s，"
             f"上次 {stamp} 重启 {restarted} {elapsed}）")
+    # issue #229：推迟 = 改动的代码没生效。只报「重启 -」等于说一切正常，
+    # 所以把还欠着的 target 单独说出来。
+    deferred = [str(name) for name in (state.get("last_deferred") or [])]
+    if deferred:
+        at = state.get("last_deferred_at")
+        when = time.strftime("%H:%M", time.localtime(at)) if at else stamp
+        line += f"；{when} 有 {len(deferred)} 个 target 推迟未生效：{','.join(deferred)}"
+    return line
 
 
 def _request_payload(mode, only, requested_by, dry_run=False):
@@ -154,6 +163,16 @@ def _wait_result(nonce: str, wait: float, guard: int):
         time.sleep(0.2)
 
 
+def _defer_reasons(result: dict) -> dict:
+    """把 warnings 里的 ``target: why`` 还原成 target → why（issue #229）。"""
+    reasons = {}
+    for item in result.get("warnings") or []:
+        name, sep, why = str(item).partition(": ")
+        if sep:
+            reasons[name] = why
+    return reasons
+
+
 def _print_result(result: dict):
     if not result:
         print("等待超时：guard 没有写结果文件")
@@ -161,9 +180,16 @@ def _print_result(result: dict):
     if result.get("rejected"):
         for item in result["rejected"]:
             print(f"拒绝: {item.get('path') or '-'} {item.get('why')}")
+    deferred = [str(name) for name in (result.get("deferred") or [])]
     print(f"ok={result.get('ok')} elapsed={result.get('elapsed')}s "
           f"restarted={','.join(result.get('restarted') or []) or '-'} "
-          f"deferred={','.join(result.get('deferred') or []) or '-'}")
+          f"deferred={','.join(deferred) or '-'}")
+    # issue #229：推迟是「这次没做」，改动的代码一行没生效。必须单独一行说清，
+    # 否则 `ok=True deferred=watchdog restarted=-` 读起来跟成功一样。
+    if deferred:
+        reasons = _defer_reasons(result)
+        for name in deferred:
+            print(f"未生效（推迟）: {name} —— {reasons.get(name) or '原因未记录'}")
     for item in result.get("warnings") or []:
         print(f"warning: {item}")
 
@@ -246,6 +272,8 @@ def main(argv=None):
     _print_result(result)
     if result is None:
         return 3
+    # 退出码即 guard 给的 code：2 拒绝 / 4 失败 / 5 推迟未生效（issue #229）。
+    # reload.ps1 末行 exit $LASTEXITCODE 直接透出，调用方按非 0 处理即可。
     return int(result.get("code", 0))
 
 

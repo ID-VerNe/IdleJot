@@ -21,7 +21,6 @@ import contextlib
 import io
 import json
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -210,9 +209,10 @@ def unanswered_滤掉过期唤醒():
 def run_reply(args, state_dir):
     env = dict(os.environ)
     env["IDLEJOT_WG_STATE"] = str(state_dir)
-    return subprocess.run([sys.executable, str(ROOT / "water-group" / "daemon" / "reply.py"),
-                           *args],
-                          capture_output=True, text=True, timeout=90, cwd=str(ROOT), env=env)
+    # reply.py 走 ensure_utf8_stdio，写出的是 UTF-8；解码钉在 run_python 里
+    # （issue #240：裸 text=True 按宿主 locale=cp936 解，stdout 变成 None）。
+    return fs.run_python([str(ROOT / "water-group" / "daemon" / "reply.py"), *args],
+                         cwd=ROOT, env=env, timeout=90)
 
 
 def make_state():

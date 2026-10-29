@@ -51,9 +51,10 @@
 几十秒后就失真了。这几处格式由 `water-group/daemon/wg_clock.py` 统一提供，
 `scripts/check_now_clock.py` 门禁钉住。
 
-**等待预算（issue #79 / #83）**：三个数只写在 `water-group/daemon/wg_budget.py`——
+**等待预算（issue #79 / #83 / #230）**：三个数只写在 `water-group/daemon/wg_budget.py`——
 宿主工具调用超时 `AGENT_TOOL_TIMEOUT=120`、发送余量 `SEND_BUDGET=30`、单次调用最多能等
-`WAIT_BUDGET=90`。`reply.py --wait` 默认、`listen.py` 常驻周期都是 90；**你自己把工具超时
+`WAIT_BUDGET=90`。`reply.py --wait` 默认、`listen.py` 常驻周期、`reload.py --wait` 默认都是 90
+（`reload.ps1` 无参时不补 `--wait`，单点定义）；**你自己把工具超时
 调小过，就必须同步调小**：被截断时父进程和它起的子进程在同一个进程组里一起死，而那条路径
 上一个字都不打印——Agent 看到的最后一行停在「等下一次唤醒…」，分不清是被杀还是还在等。
 要短一点用 `--wait 60`，要立刻返回用 `--no-wait`。`listen.py` 每轮进入 `watch.py` 之前会打
@@ -66,6 +67,9 @@
 `--timeout`（从命令行读，不是从源码推的），超预算的那个带 ⚠ 点名——修复前起的旧监听
 （远超预算的旧默认值）在状态里一眼看得出，不必再另跑一条 PowerShell 查 WMI。
 `listen.py` 显式传超预算的 `--timeout` 时也会自己打一行 `WARN`。
+`reload.py` 显式传超预算的 `--wait` 时同样打一行 `WARN`（不夹断——重载的等待是「等满 / 不等」
+二选一，压回会把显式取值改成另一个数；只说清「guard 可能在写回结果前被宿主截断，这条路径
+不打印结果」，逃生口是 `--wait 0` + `--status` 轮询，issue #230）。
 
 **监听存亡（issue #112 / #119）**：`listen.py` 每一轮值守都会在
 `~/.water-group/state/wg_listeners/<pid>.json` 留一份（起点、退出时刻、退出原因；并行监听
@@ -468,7 +472,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 58 | `storage` | `check_pollution_scrub.py` | 跨群主档污染审计、清理与还原（#34） |
 | 59 | `storage` | `check_qr_login.py` | 每用户扫码登录：passport 双流、DPAPI、限流、隐私（#6） |
 | 60 | `storage` | `check_upgrade.py` | 升级用真实 SQLite/WAL 夹具 |
-| 61 | `storage` | `check_hot_reload.py` | 全栈热重载：闭包覆盖、target 映射、debounce、quarantine、不 spawn（#58） |
+| 61 | `storage` | `check_hot_reload.py` | 全栈热重载：闭包覆盖、target 映射、debounce、quarantine、不 spawn（#58）；--wait 默认走 wg_budget.WAIT_BUDGET、reload.ps1 不补发字面量、over_budget(120) 反例（#230） |
 | 62 | `storage` | `check_sync_groups_participation.py` | sync_groups 不得用派生缺省改写会话参与度：未配 participation 的群三轮同步后库值不动且无改写日志、显式配置按配置对齐且打「配置同步」而非「热重载」、非法值告警不写库、人格变更仍报热重载、status.json 仍派生 trigger_mode（#234） |
 | 63 | `reply` | `check_anti_habituation.py` | 反语癖固化与多样性提示词注入 |
 | 64 | `reply` | `check_plan_recovery.py` | stale 拒绝后的重规划（plan_id 为 None 也不崩） |

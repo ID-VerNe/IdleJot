@@ -414,7 +414,7 @@ def replied_ids():
     return ids
 
 
-_LEDGER_START = {"mtime": None, "ts": 0.0}
+_LEDGER_START = {"size": None, "ts": 0.0}
 
 
 def ledger_started():
@@ -422,15 +422,23 @@ def ledger_started():
 
     Everything older than this was answered before the ledger existed, so a later
     self message is the only evidence left for it. Everything newer has to be in
-    the ledger itself. Cached on mtime: the file is append-only, so the first
-    line never moves.
+    the ledger itself.
+
+    The starting point is the first entry's own ``ts`` (issue #209), not the file's mtime:
+    mtime is however precise the filesystem happens to be and lands *after* the
+    line was written, so comparing event timestamps against it made the two
+    clocks disagree by up to a second. Cached on ``st_size`` instead: the file is
+    append-only, so the first line only moves when the ledger is rewritten from
+    scratch — and then the size drops to 0 first, which busts the cache. Keying
+    on mtime instead meant every reply (each one appends) invalidated it, so the
+    whole file was re-read on every judgement.
     """
     path = STATE / "wg_replied.jsonl"
     try:
-        mtime = path.stat().st_mtime
+        size = path.stat().st_size
     except OSError:
         return 0.0
-    if _LEDGER_START["mtime"] == mtime:
+    if _LEDGER_START["size"] == size:
         return _LEDGER_START["ts"]
     ts = 0.0
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -439,7 +447,7 @@ def ledger_started():
             break
         except (ValueError, KeyError, TypeError):
             continue
-    _LEDGER_START.update(mtime=mtime, ts=ts)
+    _LEDGER_START.update(size=size, ts=ts)
     return ts
 
 
@@ -460,6 +468,18 @@ def replied_after(event_id, rows, ledger=None):
     marks every @ that arrived while it was being typed as answered — which is
     exactly how a burst gets dropped: a later message swallowed by the
     reply to 1563「？」, because that reply landed two seconds later.
+
+    The fence is half-open on the ledger side: strictly after ``ledger_started()``
+    and the ledger is the only judge; at or before it, the fallback decides. The
+    comparison is strict (issue #209): an event whose millisecond timestamp lands
+    exactly on the starting point could not be proven to come after the ledger
+    started. With ``>=`` that single millisecond was handed to the ledger —
+    ``seen`` was already set, so it returned False and a message that was in fact
+    answered stayed ``[待回]``, replaying it. The starting point is
+    seconds-granular, so an event and the first ledger entry collide on it
+    routinely. Landing on the fallback side does not by itself answer "yes" —
+    the fallback still needs a later self message; it only stops the ledger from
+    answering "no" on evidence it does not have.
     """
     if ledger and event_id in ledger:
         return True
@@ -468,7 +488,7 @@ def replied_after(event_id, rows, ledger=None):
     for row in rows:
         if row.get("id") == event_id:
             seen = True
-            if started and (row.get("timestamp") or 0) / 1000 >= started:
+            if started and (row.get("timestamp") or 0) / 1000 > started:
                 # The ledger was already keeping score by then. Not in it, not answered.
                 return False
             continue

@@ -850,6 +850,20 @@ def main():
         print("不知道该发到哪个群：事件里没有 group 信息")
         return 1
 
+    # issue #208: `--at` 全部未解析时提前拦下。改前 build_segments 把名字按文字
+    # 发出，has_at=False，用户的 @ 意图静默丢失，OneBot 直发失败时还打「未退回
+    # 计划通道：带引用…」——与「没 @ 成」自相矛盾。零请求、不发、不记账（与 #131
+    # 超限提前拒绝同口径）。部分解析时照发（时间敏感优先），未解析的名字仍由
+    # build_segments 的 `at:` 前缀行说明。
+    if args.at:
+        unresolved = [(name, reason)
+                      for name in args.at
+                      for qq, reason in [resolve_member(name, group_id)]
+                      if not qq]
+        if unresolved and len(unresolved) == len(args.at):
+            print("AT_UNRESOLVED: " + "、".join(f"{n}（{r}）" for n, r in unresolved))
+            return 1
+
     # 正文只拆一次：两个分支各拆一次会让超限提示打两遍（issue #131）。
     limit = (args.max_bubbles if args.max_bubbles is not None
              else wg_bubbles.config_limit(wg_config.config()))

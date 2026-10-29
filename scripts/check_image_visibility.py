@@ -16,10 +16,12 @@
     .venv/Scripts/python.exe scripts/check_image_visibility.py
 """
 import contextlib
+import hashlib
 import io
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -206,6 +208,202 @@ def 唤醒行端到端带图片提示():
     text = buf.getvalue()
     return (code == 0 and "WAKE" in text
             and f"look.py --event {EID_WAKE} --index 0" in text)
+
+
+# ---------------------------------------------------------------- issue #228
+# 索引 upsert 是读-改-写且无锁时，两个写者进程时间重叠会让后写者整份 replace 抹掉先写者
+# 刚落盘的行。下面三组用真子进程钉死锁内「追加 / 压实」不丢行、硬杀后锁可接管。
+# 子进程用一个独立的 state 隔离（复用本脚本已钉的 STATE 形状），避免污染上面的夹具索引。
+
+CONCURRENCY_STATE = TMP / "concurrency_state"
+CONCURRENCY_IMAGES = CONCURRENCY_STATE / "images"
+
+# 子进程脚本：读满索引后睡 0.25s 再追加一行——复现 issue 复现命令里「读慢」的形状，
+# 把读与写的时间窗口拉到足以被另一个写者撞上。event_id 由 argv 传入，与上面 9001+ 段
+# 错开（用 2280x 段，issue 号命名）。
+_UPSERT_CHILD = r'''
+import os, sys, time, json
+from pathlib import Path
+import wg_images
+eid = int(sys.argv[1])
+real_read = Path.read_text
+def slow_read(self, *a, **k):
+    if self.name == "index.jsonl":
+        text = real_read(self, *a, **k)
+        time.sleep(0.25)
+        return text
+    return real_read(self, *a, **k)
+Path.read_text = slow_read
+wg_images.upsert([{"event_id": eid, "image_index": 0, "at": time.time()}])
+'''
+
+
+def _concurrency_env():
+    """子进程用独立 state 跑 upsert，与本脚本的夹具索引隔离。"""
+    CONCURRENCY_IMAGES.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["TULPA_WG_STATE"] = str(CONCURRENCY_STATE)
+    env["IDLEJOT_WG_STATE"] = str(CONCURRENCY_STATE)
+    env["PYTHONPATH"] = os.pathsep.join([str(STATE.parent), str(ROOT),
+                                         str(ROOT / "water-group" / "daemon")])
+    return env
+
+
+def _child_upsert(eid, env):
+    """起一个子进程带延迟 upsert 一行；返回 Popen（调用方自行 join）。"""
+    return subprocess.Popen(
+        [sys.executable, "-c", _UPSERT_CHILD, str(eid)], env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+
+@case
+def 并发upsert不丢行():
+    """两个写者进程带延迟各 upsert 一行：最终索引里两行都在（issue #228 复现形状）。"""
+    # 干净起点：删掉隔离索引里残留的内容（上轮用例可能留过）。
+    idx = CONCURRENCY_IMAGES / "index.jsonl"
+    if idx.exists():
+        idx.unlink()
+    env = _concurrency_env()
+    # 先种一行 (22801, 0) 进隔离 state，让两个并发写者都从「读到 1 行」开始。
+    # 必须切到隔离 state 写——子进程读的是 CONCURRENCY_IMAGES，主进程默认 STATE/images。
+    saved = (wg_images.IMAGES, wg_images.INDEX)
+    wg_images.IMAGES = CONCURRENCY_IMAGES
+    wg_images.INDEX = idx
+    try:
+        wg_images.upsert([{"event_id": 22801, "image_index": 0, "at": time.time()}])
+    finally:
+        wg_images.IMAGES, wg_images.INDEX = saved
+    a = _child_upsert(22802, env)
+    time.sleep(0.05)             # 让 A 先进入读-睡窗口，B 再撞上来
+    b = _child_upsert(22803, env)
+    a.communicate(timeout=20)
+    b.communicate(timeout=20)
+    # 子进程写的是隔离 state，这里把 state 指过去再读。
+    wg_images.IMAGES = CONCURRENCY_IMAGES
+    wg_images.INDEX = idx
+    try:
+        rows = {int(r["event_id"]) for r in wg_images.load_index().values()}
+    finally:
+        wg_images.IMAGES, wg_images.INDEX = saved
+    return rows >= {22801, 22802, 22803}
+
+
+@case
+def 并发upsert两行都能按sha命中复用():
+    """丢一行的下游症状：find_local_by_sha 认不出已有副本 → 重复落盘。
+    锁修好后，两个并发写者各自落盘的图都该被 find_local_by_sha 命中。"""
+    idx = CONCURRENCY_IMAGES / "index.jsonl"
+    if idx.exists():
+        idx.unlink()
+    env = _concurrency_env()
+    # 两个并发写者各写一张内容不同的图（不同 sha），都 index=True。
+    sha_a = hashlib.sha256(b"image-A-bytes").hexdigest()
+    sha_b = hashlib.sha256(b"image-B-bytes").hexdigest()
+    child = _UPSERT_CHILD.replace(
+        'wg_images.upsert([{"event_id": eid, "image_index": 0, "at": time.time()}])',
+        'wg_images.upsert([{"event_id": eid, "image_index": 0, "sha256": '
+        'sha, "local_path": str(wg_images.IMAGES / f"{eid}-0.jpg"), "at": time.time()}])')
+    child = child.replace('eid = int(sys.argv[1])',
+                          'eid = int(sys.argv[1]); sha = sys.argv[2]')
+    a = subprocess.Popen([sys.executable, "-c", child, "22812", sha_a], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    time.sleep(0.05)
+    b = subprocess.Popen([sys.executable, "-c", child, "22813", sha_b], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    a.communicate(timeout=20)
+    b.communicate(timeout=20)
+    # 在隔离 state 下写两个像素文件，让 find_local_by_sha 的 is_file() 判定成立。
+    (CONCURRENCY_IMAGES / "22812-0.jpg").write_bytes(b"image-A-bytes")
+    (CONCURRENCY_IMAGES / "22813-0.jpg").write_bytes(b"image-B-bytes")
+    saved = (wg_images.IMAGES, wg_images.INDEX)
+    wg_images.IMAGES = CONCURRENCY_IMAGES
+    wg_images.INDEX = idx
+    try:
+        hit_a = bool(wg_images.find_local_by_sha(sha_a))
+        hit_b = bool(wg_images.find_local_by_sha(sha_b))
+    finally:
+        wg_images.IMAGES, wg_images.INDEX = saved
+    return hit_a and hit_b
+
+
+@case
+def 压实不丢新追加的行():
+    """索引灌过 MAX_INDEX_ROWS 后，一个并发 upsert 与压实重叠：新行不能被压实的
+    replace 整份覆盖吃掉。钉的是 issue #228 候选 1 的漏点——「压实 vs 并发追加」。"""
+    idx = CONCURRENCY_IMAGES / "index.jsonl"
+    if idx.exists():
+        idx.unlink()
+    env = _concurrency_env()
+    saved = (wg_images.IMAGES, wg_images.INDEX)
+    wg_images.IMAGES = CONCURRENCY_IMAGES
+    wg_images.INDEX = idx
+    try:
+        # 灌到 MAX_INDEX_ROWS-1：再来一行就恰好越过上限触发压实。
+        base = [{"event_id": 22820 + i, "image_index": 0, "at": float(i)}
+                for i in range(wg_images.MAX_INDEX_ROWS - 1)]
+        wg_images.upsert(base)
+        before = len(idx.read_text(encoding="utf-8").splitlines())
+    finally:
+        wg_images.IMAGES, wg_images.INDEX = saved
+    # 起一个子进程 upsert 一行（会触发压实），与此同时主进程也 upsert 一行（同样触发压实）。
+    a = _child_upsert(22899, env)
+    time.sleep(0.02)
+    # 主进程切到隔离 state 直接写，与子进程并发。
+    wg_images.IMAGES = CONCURRENCY_IMAGES
+    wg_images.INDEX = idx
+    try:
+        wg_images.upsert([{"event_id": 22900, "image_index": 0, "at": 9.0}])
+        a.communicate(timeout=20)
+        lines = idx.read_text(encoding="utf-8").splitlines()
+        # 压实后行数 <= MAX；但 22899 与 22900 两条新行都必须还在（它们是最新的，落在末尾 MAX 内）。
+        eids = set()
+        for line in lines:
+            try:
+                eids.add(int(json.loads(line)["event_id"]))
+            except (ValueError, KeyError, TypeError):
+                continue
+        ok_len = len(lines) <= wg_images.MAX_INDEX_ROWS
+    finally:
+        wg_images.IMAGES, wg_images.INDEX = saved
+    return ok_len and 22899 in eids and 22900 in eids
+
+
+@case
+def 硬杀持锁进程后新进程能接管():
+    """持锁进程被 taskkill /F 硬杀时，Windows 关闭其句柄、字节锁自动释放——
+    新进程 upsert 不卡死、照常落盘。钉的是 commands.py O_EXCL 那套的死锁文件
+    不会在这里复发（issue #228 选 msvcrt.locking 而非 O_EXCL 的理由）。"""
+    idx = CONCURRENCY_IMAGES / "index.jsonl"
+    if idx.exists():
+        idx.unlink()
+    env = _concurrency_env()
+    # 子进程拿到锁后睡很久不释放（模拟卡死），主进程随后 terminate() 它。
+    holder = r'''
+import os, sys, time
+import wg_images
+with wg_images._locked():
+    time.sleep(999)
+'''
+    h = subprocess.Popen([sys.executable, "-c", holder], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    time.sleep(0.5)            # 让它拿到锁
+    h.terminate()              # SIGKILL 等价：不给它跑 finally 释放
+    h.wait(timeout=5)
+    # 现在一个新子进程 upsert，必须在数秒内拿到锁、落盘、退出——不卡死。
+    a = _child_upsert(22877, env)
+    try:
+        a.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        a.kill()
+        return False
+    saved = (wg_images.IMAGES, wg_images.INDEX)
+    wg_images.IMAGES = CONCURRENCY_IMAGES
+    wg_images.INDEX = idx
+    try:
+        rows = {int(r["event_id"]) for r in wg_images.load_index().values()}
+    finally:
+        wg_images.IMAGES, wg_images.INDEX = saved
+    return 22877 in rows
 
 
 def main():

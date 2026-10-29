@@ -290,19 +290,26 @@ def since(after_id, session, not_before=None, limit=50):
     except sqlite3.Error:
         return []
     limit = max(1, int(limit))
-    sql = "SELECT id, payload, media, at FROM chat_inbox WHERE session_id=? AND id>?"
+    # 会话号一并取回（LEFT JOIN）：payload 可能没有 conversation_id（旧行、被裁过
+    # 的行），而会话行上一定有。LEFT JOIN 而不是 JOIN——会话行被删了也要读得出
+    # 消息，宁可群号空着，不能整批消失（issue #219）。
+    sql = ("SELECT i.id, i.payload, i.media, i.at, s.conversation_id"
+           " FROM chat_inbox i LEFT JOIN chat_sessions s ON s.id = i.session_id"
+           " WHERE i.session_id=? AND i.id>?")
     params = [session, int(after_id or 0)]
-    sql += " ORDER BY id LIMIT ?"
+    sql += " ORDER BY i.id LIMIT ?"
     out = []
     try:
         while True:
             rows = db.execute(sql, (*params, limit)).fetchall()
             if not rows:
                 break
-            for event_id, payload, raw_media, at in rows:
+            for event_id, payload, raw_media, at, session_cid in rows:
                 try:
                     data = json.loads(payload)
                 except ValueError:
+                    continue
+                if not isinstance(data, dict):
                     continue
                 try:
                     media = json.loads(raw_media or "[]")
@@ -312,7 +319,10 @@ def since(after_id, session, not_before=None, limit=50):
                     "id": event_id,
                     "sender": data.get("sender") or "",
                     # 追问行也要能取到群号：别名指向按群取覆盖行并集（issue #30）。
-                    "conversation_id": data.get("conversation_id") or "",
+                    # payload 缺键时回查会话行，口径归 `wg_event_ref.row_conversation`
+                    # （issue #219：这里以前只认 payload，读空就退成跨群主档）。
+                    "conversation_id": wg_event_ref.row_conversation(
+                        {"payload": data, "conversation_id": session_cid}),
                     # 闸门用原始文本：text 已经 collapse 空白，会把 " #ping" 洗成
                     # "#ping"；而 commands.command_key 要求行首、不 strip（#70）。
                     "raw": data.get("content") or "",
@@ -459,10 +469,13 @@ def status_text():
 
 
 def _group_of(payload):
-    """(group_id, onebot_message_id) from an inbox payload, or None.
+    """(group_id, onebot_message_id) from an inbox payload **alone**, or None.
 
     字段名兼容（`onebot_message_id` / `message_id`）归 `wg_event_ref`（issue #216）：
     这里只剩「只有 payload、没有行」时的薄封装，别再各写一份键名清单。
+
+    **有行的时候别用这个**——群号可能只在会话行上，payload 缺键它就回 `None`
+    （issue #219）。按 id 取一条走 `lookup()`，批量读走 `wg_event_ref.row_conversation()`。
     """
     return wg_event_ref.group_of_payload(payload)
 
@@ -480,6 +493,9 @@ def lookup(event_id):
 
     issue #203：这个 id 是**会话库 rowid**，所以只问库（``namespace=INBOX``）——
     拿它去问事件流，撞号时会如实返回别群那条，引用就挂错了。
+
+    issue #219：批量读（`since()` / `wg_context.recent_chatter()`）走的是同一个
+    `wg_event_ref.row_conversation()`，别再各写一份「payload.get('conversation_id')」。
     """
     ref = wg_event_ref.resolve_id(event_id, namespace=wg_event_ref.INBOX)
     return ref.target if ref else None

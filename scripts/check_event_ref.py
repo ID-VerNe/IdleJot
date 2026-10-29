@@ -17,9 +17,17 @@ issue #216 的现场：`reply.py --context` / `--show` 读得出一条闲聊的�
 3. 闭环：`--context` 列出的一行（只在 `chat_inbox`）必须能被 `reply.py <id>` 解析
    到本群、`target_group()` 不得抛 `CrossGroup`，且该行自带 `src=chat_inbox`。
 
+issue #219 加第四件：**批量读点同一口径**。`followup.since` / `wg_context.recent_chatter`
+/ `wg_gap._local_state` 在 #216 之后仍各读一次 payload 的 `conversation_id`——写完字一
+缺这个键，追问行与 `--context` 行就退回跨群主档挂别名指向，缺口账本还把那些行判成
+「不是本群」。三处现在都走 ``wg_event_ref.row_conversation``（payload 优先、会话行
+兜底）；门禁钉住三条读点的结果、payload 优先的反例、非对象 payload 不拖垮整批，
+另有一条自检证明「只认 payload」的写法在这个判据下必须红。
+
 基线验证（未打补丁的 base 上必须红，且红在原症状）：
 `--context` 列出 id 11 → `reply.event_target(11)` 为 `None` →
-`target_group` 抛 `CrossGroup('id=11 查不到所属群…')`。
+`target_group` 抛 `CrossGroup('id=11 查不到所属群…')`；
+批量读点：`followup.since(0, SID)[12]["conversation_id"] == ""`（会话行上有群号）。
 
     .venv/Scripts/python.exe scripts/check_event_ref.py
 """
@@ -80,16 +88,17 @@ def build():
     db = sqlite3.connect(DB)
     db.execute("CREATE TABLE chat_sessions (id TEXT, conversation_id TEXT, active INTEGER)")
     db.execute("CREATE TABLE chat_inbox (id INTEGER PRIMARY KEY, session_id TEXT,"
-               " message_id TEXT, payload TEXT, media TEXT NOT NULL DEFAULT '[]')")
+               " message_id TEXT, payload TEXT, at REAL,"
+               " media TEXT NOT NULL DEFAULT '[]')")
     db.execute("INSERT INTO chat_sessions VALUES (?, ?, 1)", (SID, f"10001:group:{GROUP}"))
     # 这条会话没结束、但没有 conversation_id：行在、群号取不到（14 用）。active=0
     # 是为了让 `--context` 的「当前会话」仍然只有一个，不然最近 N 条会挑到它。
     db.execute("INSERT INTO chat_sessions VALUES ('orphan-session', '', 0)")
     for event_id, session_id, message_id, payload in INBOX:
-        db.execute("INSERT INTO chat_inbox (id, session_id, message_id, payload)"
-                   " VALUES (?, ?, ?, ?)",
+        db.execute("INSERT INTO chat_inbox (id, session_id, message_id, payload, at)"
+                   " VALUES (?, ?, ?, ?, ?)",
                    (event_id, session_id, message_id,
-                    json.dumps(payload, ensure_ascii=False)))
+                    json.dumps(payload, ensure_ascii=False), 1792500000.0 + event_id))
     db.commit()
     db.close()
     # 事件流只放 7：同号时它必须赢（来源顺序）。
@@ -225,6 +234,91 @@ def 补读先确认这条在不在():
     with contextlib.redirect_stdout(buf):
         code = look.read_event(9999, 0, "one")
     return code == 1 and "本地没有 id=9999 的记录" in buf.getvalue()
+
+
+# ---- issue #219：批量读点的群号 ----
+#
+# 12 的 payload 一个键都没有（群号只在 `chat_sessions.conversation_id` 上），
+# 正是 issue 的现场形态。三个批量读点以前各读一次 payload，缺键就静默读成空：
+# 追问行与 `--context` 行按跨群主档挂别名指向，缺口账本则把这条判成「不是本群」。
+# 13 是反例：payload 自己有群号时必须以 payload 为准，两条路不许颠倒。
+
+@case
+def 批量读点缺键时回查会话行():
+    """`followup.since` / `wg_context.recent_chatter` / `wg_gap` 三处同一口径。"""
+    import followup
+    import wg_context
+    import wg_gap
+
+    since = {row["id"]: row["conversation_id"] for row in followup.since(0, SID)}
+    context = {row["id"]: row["conversation_id"]
+               for row in wg_context.recent_chatter(20)}
+    want = f"10001:group:{GROUP}"
+    # 缺口账本：只认 payload 群号时，11/12 这两条缺键行被整条跳过，窗口左边界
+    # 停在 10 上；兜底之后 13（payload 自带群号）才是本群最新一条。
+    _, last_at = wg_gap._local_state(GROUP)
+    # 会话行没有群号的那条（14）仍旧读空，不许被兜底成任何人的群。
+    orphan = wg_event_ref.resolve(14)
+    return (since.get(12) == want and context.get(12) == want
+            and last_at == int(1792500000.0 + 13)
+            and orphan is not None and orphan.group_id == "")
+
+
+@case
+def 批量读点以_payload_的群号为准():
+    """13 的 payload 自己写着本群——兜底不许覆盖它。"""
+    import followup
+    import wg_context
+
+    want = f"10001:group:{GROUP}"
+    since = {row["id"]: row["conversation_id"] for row in followup.since(0, SID)}
+    context = {row["id"]: row["conversation_id"]
+               for row in wg_context.recent_chatter(20)}
+    return since.get(13) == want and context.get(13) == want
+
+
+@case
+def 非对象_payload_不拖垮整批():
+    """payload 是 JSON 数组/字符串时不是合法事件：跳过这一条，其余照读。"""
+    import followup
+    import wg_context
+
+    db = sqlite3.connect(DB)
+    db.execute("INSERT INTO chat_inbox (id, session_id, message_id, payload, at)"
+               " VALUES (?, ?, ?, ?, ?)", (15, SID, "", "[1, 2]", 1792500000.0 + 15))
+    db.commit()
+    db.close()
+    try:
+        since = [row["id"] for row in followup.since(0, SID)]
+        context = [row["id"] for row in wg_context.recent_chatter(20)]
+    finally:
+        db = sqlite3.connect(DB)
+        db.execute("DELETE FROM chat_inbox WHERE id=15")
+        db.commit()
+        db.close()
+    return 12 in since and 12 in context and 15 not in since and 15 not in context
+
+
+@case
+def 自检_只读_payload_的写法必须红():
+    """判据随实现翻转：退回改前「只认 payload」，本门禁必须红。
+
+    模拟的是改前那个读点：payload 没这个键就读空（会话行那一列根本没人看）。
+    """
+    real = wg_event_ref.row_conversation
+
+    def only_payload(row):
+        return wg_event_ref.payload_conversation((row or {}).get("payload"))
+
+    wg_event_ref.row_conversation = only_payload
+    try:
+        # 只替换 followup 那一路：since() 走 row_conversation，缺口账本与
+        # --context 走的是 payload_conversation + 会话行（它们的对照在别的用例里）。
+        import followup
+        since = {row["id"]: row["conversation_id"] for row in followup.since(0, SID)}
+        return since.get(12) != f"10001:group:{GROUP}"
+    finally:
+        wg_event_ref.row_conversation = real
 
 
 def main():

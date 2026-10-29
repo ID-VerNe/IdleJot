@@ -799,73 +799,6 @@ def _run_readonly(args, parser):
         return _looking_for(args.who, args.group or latest_group_id())
     return None
 
-def _send_via_onebot(args, ctx):
-    """OneBot 通道：带 @、带图，或能对上原始 message_id 时的唯一选择。
-
-    返回 None 表示这条通道没走通、可以退回计划通道；否则就是退出码。
-    """
-    group_id, target = ctx["group_id"], ctx["target"]
-    bubble_segments, has_at = ctx["bubble_segments"], ctx["has_at"]
-    found = ctx["found"]
-    # 发之前先报账：间隔会吃掉本次调用的等待额度（整次共享的总额，issue #88）。
-    # 这条路径按 `BUBBLE_GAP` 固定节奏算；条数取 `bubble_segments`——图片也是气泡（#136）。
-    wg_bubbles.report_cost(len(bubble_segments), args.wait)
-    message_id = None if args.no_quote else (found[1] if found else None)
-    # 发送 + 失败诊断 + 可选解禁补发全在 wg_send_failure（#132）：首条就失败时
-    # 由它说出真实原因，不再是那句「带 @ 只能走 OneBot」。
-    sent = wg_send_failure.send(group_id, bubble_segments, message_id,
-                                deliver=onebot_send_bubbles, has_at=has_at,
-                                unmute=args.wait_unmute)
-    if sent == len(bubble_segments):
-        record(ctx["answered"], args.text or "")
-        print("SENT")
-        open_followup(target, group_id=group_id,
-                      wanted=not args.no_followup, not_before=ctx["send_started"],
-                      after_ref=ctx["followup_ref"])
-        return wait_for_next(args.wait) if args.wait else 0
-    if sent or has_at:
-        return 1
-    if args.image:
-        # 计划通道只发文字（send() 的气泡写死 kind=text），回退过去图片就没了。
-        print("SEND_FAILED: 带图的消息只能走 OneBot，计划通道会把图片整个丢掉")
-        return 1
-    print("  falling back to the plan path")
-    return None
-
-
-def _send_via_plan(args, sid, ctx):
-    """计划通道：纯文字、且不需要指向旧 batch 里的某条消息时走这里。"""
-    group_id, target = ctx["group_id"], ctx["target"]
-    bubbles = ctx["bubbles"]
-    # 计划通道条数有限，超过就**在发之前**拒绝，别留下半截回复（issue #131）。
-    overflow = wg_bubbles.plan_overflow_message(len(bubbles))
-    if overflow:
-        print(f"REFUSED: {overflow}")
-        return 1
-    wg_bubbles.report_cost(len(bubbles), args.wait, plan_path=True)
-
-    batch = batch_id()
-    if not batch:
-        print("没有可用批次，等 collector 收下一批")
-        return 1
-    plan_id, final_target = plan(sid, batch, target, args.intent, not args.no_quote)
-    if not plan_id:
-        print("PLAN_FAILED")
-        return 1
-    quote = (not args.no_quote) and final_target == target
-    if send(sid, plan_id, bubbles, quote):
-        record(ctx["answered"], args.text)
-        if final_target != target:
-            print(f"note: batch moved, plan target was {final_target}")
-        print("SENT")
-        open_followup(final_target, group_id=group_id,
-                      wanted=not args.no_followup, not_before=ctx["send_started"],
-                      after_ref=wg_event_ref.format_ref(ctx["resolved_ns"], final_target))
-        return wait_for_next(args.wait) if args.wait else 0
-    print("SEND_FAILED")
-    return 1
-
-
 def main():
     parser = _build_parser()
     args = parser.parse_args()
@@ -949,8 +882,14 @@ def main():
     # alone: by the time anyone looks again, those ids would read as [已回].
     # Both directions matter -- answering the *newest* of a pair leaves the older
     # one silent with no warning at all, which is the more common shape.
-    missing = unanswered(answered)
-    if missing:
+    #
+    # issue #207：**只在发出去之后**说（`note_unanswered`）。它是「这条答完了、
+    # 还有 N 条」的提醒，不是发送前的待办——写在发送之前，一次失败的调用会同时
+    # 留下「SEND_FAILED」和这句，读者分不清哪条才代表结果。
+    def note_unanswered():
+        missing = unanswered(answered)
+        if not missing:
+            return
         ids = "、".join(f"{e.get('id')}" + ("（更早）" if (e.get('id') or 0) < target else "")
                         for e in missing)
         print(f"  NOTE 还有 {len(missing)} 条没回：{ids}")
@@ -960,29 +899,74 @@ def main():
     # 自己的时间判，不是本地收到时刻，issue #218）。Agent 拿到唤醒后可能隔十几分钟
     # 才发出回复，这期间群里堆的闲聊 id 都大于被回复的那条，按 id 扫会把它们全算进
     # 预算，窗口开出来就被自己关掉（issue #29）。
-    ctx = {
-        "group_id": group_id, "target": target, "found": found,
-        "bubbles": bubbles, "bubble_segments": bubble_segments,
-        "has_at": has_at, "answered": answered,
-        "send_started": time.time(),
-        # 追问窗口的游标是 **chat_inbox 的 rowid**，与事件流 id 是两套编号：回一条
-        # 追问行必须把它记住成 `q<n>`，否则开出来的窗口从别群同号那条往后看，
-        # 回复挂的引用与窗口听得见的话会指向两条不同的消息（issue #203）。
-        "followup_ref": wg_event_ref.format_ref(resolved_ns, target),
-        "resolved_ns": resolved_ns,
-    }
+    send_started = time.time()
+    # 追问窗口的游标是 **chat_inbox 的 rowid**，与事件流 id 是两套编号：回一条
+    # 追问行必须把它记住成 `q<n>`，否则开出来的窗口从别群同号那条往后看，
+    # 回复挂的引用与窗口听得见的话会指向两条不同的消息（issue #203）。
+    followup_ref = wg_event_ref.format_ref(resolved_ns, target)
 
     # Quote through OneBot first: it is the only path that can point at a message
     # from an older batch, which is the normal case once the group is chatting.
     # It is also the only path that can carry an at or image segment -- plan/send
     # speaks plain text, so a message with either must not be handed to it.
     if has_at or args.image or (not args.no_quote and found):
-        result = _send_via_onebot(args, ctx)
-        if result is not None:
-            return result
+
+        # 发之前先报账：间隔会吃掉本次调用的等待额度（整次共享的总额，issue #88）。
+        # 这条路径按 `BUBBLE_GAP` 固定节奏算；条数取 `bubble_segments`——图片也是气泡（#136）。
+        wg_bubbles.report_cost(len(bubble_segments), args.wait)
+        message_id = None if args.no_quote else (found[1] if found else None)
+        # 发送 + 失败诊断 + 可选解禁补发全在 wg_send_failure（#132）：首条就失败时
+        # 由它说出真实原因，不再是那句「带 @ 只能走 OneBot」。
+        sent = wg_send_failure.send(group_id, bubble_segments, message_id,
+                                    deliver=onebot_send_bubbles, has_at=has_at,
+                                    unmute=args.wait_unmute)
+        if sent == len(bubble_segments):
+            record(answered, args.text or "")
+            print("SENT")
+            note_unanswered()
+            open_followup(target, group_id=group_id,
+                          wanted=not args.no_followup, not_before=send_started,
+                          after_ref=followup_ref)
+            return wait_for_next(args.wait) if args.wait else 0
+        # issue #207：进了 OneBot 直发就**不回退**计划通道，无论发出去几条、本次带没带
+        # `--at`。改前 `if sent or has_at: return 1` 在 `sent=0` 且不带 `--at` 时穿过去，
+        # 落到 `falling back to the plan path`——那条路径真的会把消息交给 `send()`，
+        # 而 `send()` 的气泡写死 `kind=text`：引用段整个丢掉（正是上面那句注释禁止的），
+        # 让 Agent 以为「回退过一次」。首条就失败时 `wg_send_failure.handle()` 已经
+        # 打过 `SEND_FAILED: <真实原因>`（#132），这里只补一句为什么不换通道。
+        print(wg_send_failure.no_fallback_line(has_at=has_at, has_image=bool(args.image)))
+        return 1
     elif not args.no_quote:
         print("  no OneBot id on record for this event; using the plan path")
-    return _send_via_plan(args, sid, ctx)
+
+    # 计划通道条数有限，超过就**在发之前**拒绝，别留下半截回复（issue #131）。
+    overflow = wg_bubbles.plan_overflow_message(len(bubbles))
+    if overflow:
+        print(f"REFUSED: {overflow}")
+        return 1
+    wg_bubbles.report_cost(len(bubbles), args.wait, plan_path=True)
+
+    batch = batch_id()
+    if not batch:
+        print("没有可用批次，等 collector 收下一批")
+        return 1
+    plan_id, final_target = plan(sid, batch, target, args.intent, not args.no_quote)
+    if not plan_id:
+        print("PLAN_FAILED")
+        return 1
+    quote = (not args.no_quote) and final_target == target
+    if send(sid, plan_id, bubbles, quote):
+        record(answered, args.text)
+        if final_target != target:
+            print(f"note: batch moved, plan target was {final_target}")
+        print("SENT")
+        note_unanswered()
+        open_followup(final_target, group_id=group_id,
+                      wanted=not args.no_followup, not_before=send_started,
+                      after_ref=followup_ref)
+        return wait_for_next(args.wait) if args.wait else 0
+    print("SEND_FAILED")
+    return 1
 
 
 if __name__ == "__main__":

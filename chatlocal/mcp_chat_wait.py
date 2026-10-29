@@ -206,7 +206,16 @@ class ChatWaitMixin:
                         live = db.execute("SELECT 1 FROM chat_inbox WHERE session_id=? AND id>? AND id<=? AND coalesce(json_extract(payload,'$.recalled'),0)=0 LIMIT 1",
                             (sid, row['cursor'], waiting['watermark'])).fetchone()
                         new_input = bool(db.execute('SELECT 1 FROM chat_inbox WHERE session_id=? AND id>? LIMIT 1', (sid, waiting['watermark'])).fetchone())
-                if waiting and not live:
+                if waiting and not live and waiting['watermark'] > row['cursor']:
+                    # A non-empty batch with no live input past the cursor is
+                    # a real input_unavailable: ids were promised but none is
+                    # deliverable now (e.g. all recalled). An empty-batch wait
+                    # has watermark == cursor by construction (turns.batch),
+                    # so the live probe is geometrically empty — that plan has
+                    # nothing to promise in the first place and must live to
+                    # its own not_before, where wait_elapsed closes it. The old
+                    # guard cancelled it here and starved the wait_elapsed
+                    # branch below (issue #260).
                     with self.access.connect() as db:
                         db.execute("UPDATE chat_turn_plans SET state='CANCELLED',reason='input_unavailable' WHERE session_id=? AND state='WAITING'", (sid,))
                     waiting = None

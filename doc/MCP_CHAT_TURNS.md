@@ -8,7 +8,7 @@
 2. 调用 `list_chat_personas`。新增 `little_whale_v2` 显示为“小鲸鱼2号”；原 `little_whale` 和自定义卡仍可选。
 3. 停止原群聊会话，用新开始编号 `start_chat_session(persona_preset="little_whale_v2", ...)`。返回的 `session.persona_preset` 和 `chat_prompt.persona` 应为新卡；重复使用旧开始编号仍返回旧快照，不能用它切人格。
 4. `get_chat_session` / `wait_chat_messages` 返回 `input_batch`，包含批次 ID、水位、收集原因及同人短连发的 ID 分组。单条时间、来源和消息 ID 不丢失。
-5. Planner 调用 `plan_chat_reply`，传批次、`wait / silence / reply`、简短沟通意图；参与时选目标、相关话题消息及表达类型。除了 `text / sticker / reaction`，独立授权后还可用 `voice / video / file / ai_voice / qq_action`，具体字段与示例以连接的 `tools/list` 为准。可附少量主题词。这里只记决定，不发送推理或规划文本。
+5. Planner 调用 `plan_chat_reply`，传批次、`reply / ask / wait / silence`、简短沟通意图；参与时选目标、相关话题消息及表达类型。除了 `text / sticker / reaction`，独立授权后还可用 `voice / video / file / ai_voice / qq_action`，具体字段与示例以连接的 `tools/list` 为准。可附少量主题词。四档语义：`reply` 接话；`ask` 刚开口问了一句、等对方回（对方不带 @ 的下一句也作为必须续上的输入交付）；`wait` 暂缓决定但对话窗口不关；`silence` 本轮收场并关掉窗口。这里只记决定，不发送推理或规划文本。
 6. `READY` 后遵循 `next_call`：同一轮选择表达并组织内容，调用 `send_chat_reply` 一次提交 `expression_ids` 和 1–12 个完整语义气泡。有候选时选 0–5 条参考，或用 `expression_ids=[]` 明确不用；漏选返回 `expression_selection_required`，不会派发。没有候选、学习关闭和纯媒体计划自动跳过选择。程序先检查，再依次发送，后续气泡有间隔。一个长解释可以仍是一条；不按标点切句。`select_chat_expressions` 保留为旧宿主兼容入口，正常流程不再单独调用。
 7. 看回执，确认已处理消息水位后继续等待。沉默、只用图或小回应同样是完整参与；程序不补发说明文字。
 
@@ -43,7 +43,7 @@
 
 正常与恢复等待模板统一使用 `timeout_seconds=150`，给 Antigravity 的三分钟工具上限留余量；显式参数允许范围不变。换代理先 `list_chat_sessions`，同目标同人格用 compact 接续；用户明确换人格才停止旧会话并以新编号开始。
 
-wait 已交付材料、无需消息翻页且 `decision_required=true` 时，顶层 `next_call` 直接复用 `input_batch.plan_call` 及其必填参数；由外部模型选择 reply、wait 或 silence，不默认确认这批。分页、idle、已选择短等、学习阶段和处理完成仍沿各自原调用继续，读取本身不确认消息。
+wait 已交付材料、无需消息翻页且 `decision_required=true` 时，顶层 `next_call` 直接复用 `input_batch.plan_call` 及其必填参数；由外部模型选择 reply、ask、wait 或 silence，不默认确认这批。分页、idle、已选择短等、学习阶段和处理完成仍沿各自原调用继续，读取本身不确认消息。
 
 Planner 的 `WAITING` 表示暂缓决定，不是本批已处理；其 `next_call` 不确认本批，旧客户端附上原水位也不会越过待处理输入。到期前无新输入时继续程序内等待，较短调用超时可返回带 `deferred_until` 的 idle；到期后重新交付原输入和新建的可规划批次，不复用过期 batch。新输入按原收集规则交付并取代旧等待，分页可正常推进。成功回复或沉默后仍正常确认；撤回清空待决输入、停止或撤权不会恢复旧等待，取消仅结束当前调用、保留未处理进度供显式接续。没有后台模型或新调度器。
 
@@ -61,7 +61,9 @@ READY 结果的 `quote_guidance` 提供目标之后已读的他人消息数量�
 
 ## 等待与新鲜度
 
-Planner 的 target_event_id 和 topic_event_ids 只能使用所选批次的事件；reply 必须选非空 expressions，wait/silence 省略或 []。这两类可纠正参数拒绝返回原批次有效编号与 recovery.next_call，无需先补读；纠错期间新消息仍使旧批次的回复失效。批次/计划过期则沿 updated_chat 恢复，不自动改写决定或放宽检查。
+Planner 的 target_event_id 和 topic_event_ids 只能使用所选批次的事件；reply 必须选非空 expressions，ask/wait/silence 省略或 []。这三类可纠正参数拒绝返回原批次有效编号与 recovery.next_call，无需先补读；纠错期间新消息仍使旧批次的回复失效。批次/计划过期则沿 updated_chat 恢复，不自动改写决定或放宽检查。
+
+`ask` 与 `wait` 都返回 `state="WAITING"`（读数、等待与恢复流程相同），区别只在 `decision.awaiting=true` 与对话窗口：`wait` 不动窗口，`ask` 把窗口重新装满，因此对方下一句即使没有 @ 本机、也没有回声标记，也会作为必须处理的输入交付；`silence` 把窗口清零。窗口按批递减，不会因同一份计划反复重装。
 
 `wait_chat_messages` 默认 `response_format="compact"`：首次启动/完整读取提供人格与完整规则，后续等待只带动态提示、必要状态和近期目标索引，省去每轮重复的回应目录及长说明。消息正文、消息 ID、图片引用、分页水位和恢复调用模板完整保留；版本变更时仍返回完整更新提示。需要诊断时显式传 `response_format="full"`，或使用 `get_chat_session`。较大的消息批次仍可能被外部宿主保存为文件，Tulpa 不截断群聊内容来强求内联。
 

@@ -108,10 +108,11 @@ async def wire_waiting(service,ui,events):
                     return result.structuredContent
                 async def follow(value,**extra):
                     return await call(value['tool'],**dict(value['arguments'],**extra))
-                async def start():
+                async def start(participation='natural'):
                     nonlocal serial
                     serial+=1
-                    sid=(await call('start_chat_session',conversation_id='111:group:223',persona='fixture',idempotency_key=f'wait-start-{serial}'))['session']['id']
+                    sid=(await call('start_chat_session',conversation_id='111:group:223',persona='fixture',
+                        participation=participation,idempotency_key=f'wait-start-{serial}'))['session']['id']
                     # This suite checks the paused-learning chat mode, like the
                     # main session above. With learning on, a wait that should be
                     # idle can legitimately answer learning_ready instead; that
@@ -120,12 +121,12 @@ async def wire_waiting(service,ui,events):
                     assert paused.status_code==200 and not paused.json()['enabled']
                     return sid
                 sid=await start()
-                def add():
+                def add(text='deferred fixture'):
                     nonlocal serial
                     serial+=1;mid=880000+serial
                     beat()
                     chat.receive(dict(post_type='message',message_type='group',self_id=111,group_id=223,message_id=mid,
-                        user_id=444,time=time.time(),message=[dict(type='text',data=dict(text='deferred fixture'))]))
+                        user_id=444,time=time.time(),message=[dict(type='text',data=dict(text=text))]))
                     with access.connect() as db:return db.execute('SELECT id FROM chat_inbox WHERE session_id=? AND message_id=?',(sid,str(mid))).fetchone()[0],mid
                 async def defer(seconds=20):
                     packet=await call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0)
@@ -218,6 +219,83 @@ async def wire_waiting(service,ui,events):
                 await call('stop_chat_session',session_id=sid)
                 assert (await follow(p['next_call'],timeout_seconds=1))['event']=='stopped'
                 assert not chat.turns.waiting(sid)
+                # `ask` (issue #223): the planner needs a way to say "I just
+                # asked something and am waiting for the answer". It shares the
+                # WAITING state with `wait`, so the read/wait/recovery flow is
+                # unchanged, but it must refill the mention_only dialogue
+                # window — otherwise the answer, which rarely carries another
+                # @, stays invisible and the turn reads as nothing happened.
+                def add_to(target,text,mention):
+                    # A real @ 111 segment is what the mention_only path keys on
+                    # (mcp_chat_wait.py:132), not the text. Each scenario gets a
+                    # fresh session: a `wait` plan keeps collecting for its full
+                    # wait_seconds, so reusing one session would feed the next
+                    # scenario's lines into the previous batch.
+                    nonlocal serial
+                    serial+=1;mid=880000+serial
+                    beat()
+                    seg=[dict(type='at',data=dict(qq='111'))] if mention else []
+                    seg.append(dict(type='text',data=dict(text=text)))
+                    chat.receive(dict(post_type='message',message_type='group',self_id=111,group_id=223,message_id=mid,
+                        user_id=444,time=time.time(),message=seg))
+                    with access.connect() as db:return db.execute('SELECT id FROM chat_inbox WHERE session_id=? AND message_id=?',(target,str(mid))).fetchone()[0]
+                async def decision_window(action):
+                    # A mention_only session: an @ opens the dialogue window, and
+                    # the ask action decides what a later bare answer does. Each
+                    # scenario starts its own session (`ask` and the `wait`
+                    # control must not share a dialogue window) and each read is
+                    # a plain idle one after the plan — no wait plan is left open
+                    # to defer anything, so only the action can hide the answer.
+                    #
+                    # The answer is held until the plan lands: a bare answer that
+                    # arrives while the @ is still unplanned is older input, and
+                    # the `@` is still at `id > cursor` because only `wait` keeps
+                    # a plan open. Spacing them out is what real use looks like
+                    # — the agent plans, then the peer replies.
+                    target=await start(participation='mention_only')
+                    asked=add_to(target,'你刚才说的那个是什么',True)
+                    packet=await call('wait_chat_messages',session_id=target,timeout_seconds=1,quiet_seconds=0)
+                    assert [m['id'] for m in packet['messages']]==[asked],packet
+                    planned=await follow(packet['input_batch']['plan_call'],action=action,intent='fixture intent')
+                    answer_id=add_to(target,'就是那个每日任务',False)
+                    seen=await call('wait_chat_messages',session_id=target,timeout_seconds=1,quiet_seconds=0)
+                    return target,asked,planned,answer_id,seen
+                # `ask` (issue #223): "I just asked something and am waiting for
+                # the answer". It shares WAITING with `wait`, so read/wait/
+                # recovery are unchanged, but it refills the dialogue window —
+                # otherwise the answer, which rarely carries another @, stays
+                # invisible and the turn reads as nothing happened. The marker is
+                # what tells the reader which of the two it is.
+                target,asked,queued,answer,seen=await decision_window('ask')
+                assert queued['state']=='WAITING' and not queued['turn_complete'],queued
+                assert queued['decision']['awaiting'] is True and queued['decision']['action']=='ask'
+                assert 'acknowledge_through_id' not in queued['next_call']['arguments']
+                # The answer carries no @ and comes second in the batch (the @ is
+                # still owed — only `wait` keeps a plan open), yet the `ask`
+                # plan's window makes the batch a decision of its own instead of
+                # letting the answer be swallowed behind the mention.
+                assert [m['id'] for m in seen['messages']]==[asked,answer],seen
+                assert seen['messages'][-1]['content']=='就是那个每日任务',seen
+                assert seen['decision_required'],seen
+                # `silence` still closes the window for real: the bare message
+                # after it stays invisible even though it arrived right after.
+                stopped=await follow(seen['input_batch']['plan_call'],action='silence',intent='本轮收场')
+                assert stopped['state']=='SILENT' and not chat.turns.waiting(target),stopped
+                add_to(target,'那算了',False)
+                silent_tail=await idle_follow(follow,receiver_status,stopped['next_call'],timeout_seconds=1)
+                assert not silent_tail['decision_required'] and not silent_tail['messages'],silent_tail
+                # Control: `wait` on the same wire carries no `awaiting` marker
+                # and, unlike `ask`, never opens the window — the bare answer
+                # stays behind the held @ and is not what the round turns on.
+                target,asked,held,answer,seen=await decision_window('wait')
+                assert held['state']=='WAITING' and not held['decision'].get('awaiting'),held
+                assert seen['decision_required'] and [m['id'] for m in seen['messages']]==[asked,answer],seen
+                assert not seen.get('decision',{}).get('awaiting'),seen
+                # `silence` on top of the held `wait` is still what ends the round.
+                await follow(seen['input_batch']['plan_call'],action='silence',intent='本轮收场')
+                assert not chat.turns.waiting(target)
+                await call('stop_chat_session',session_id=target)
+                sid=target
                 sid=await start();add();_,p=await defer()
                 assert ui.post('/api/mcp/connections/'+g['id']+'/revoke',json={},headers={'Origin':'http://testserver','X-ChatWeave-UI':'1'}).status_code==200
                 denied=await http.post(service.status()['url'],json=dict(jsonrpc='2.0',id=999,method='tools/call',

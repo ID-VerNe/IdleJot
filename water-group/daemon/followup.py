@@ -11,6 +11,13 @@
 ——@ 唤醒看 wg_events.jsonl，追问唤醒看 chat_inbox——互不覆盖，也就不会有
 「collector 正卡在 170 秒长轮询里，改 mention_only 要等它返回才生效」的竞态。
 
+**别把这里的窗口和 `chatlocal/mcp_chat_wait.py` 的 `dialogue_window` 当成一回事**
+（issue #217）：那个是服务端 `wait_chat_messages` 的对话窗口，决定「这次 wait 交不
+交付」，参数是 `followup_turns` / `followup_seconds`，状态落在 `chat_sessions` 的
+`dialogue_until` / `dialogue_turns` 两列；本模块的窗口在守护侧，决定「watch.py 要不
+要唤醒」，状态在 `wg_followup.json`。两者互不依赖，唯一的交集是都读 `chat_inbox`：
+服务端跳批的消息只推游标、不置 `delivered`，所以本模块照样看得见它们。
+
 `#` 指令不走 chat_inbox 的投递过滤（它是直接从库里捞的），所以 `consume()` 里还有
 第二道闸门：`up.is_command()` 认出的指令不算接话——不扣额度、不唤醒、不续期，
 但游标照常推进（跳过 ≠ 卡住，issue #70）。

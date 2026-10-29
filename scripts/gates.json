@@ -48,6 +48,7 @@
     {"name": "check_mcp_onebot.py", "shard": "mcp", "why": "OneBot 设置到工具可见性再到 HTTP notice 读取（隔离夹具）"},
     {"name": "check_mcp_chat_output.py", "shard": "mcp", "why": "轮询输出截断、游标与版本刷新语义"},
     {"name": "check_mcp_chat_turns.py", "shard": "mcp", "why": "对话轮次生命周期与原生引用（19 项并发与防竞争检查）"},
+    {"name": "check_mcp_chat_dialogue_window.py", "shard": "mcp", "why": "mention_only 对话窗口跨 wait 调用与进程重启存活、本机回复重开窗口、跳批只推游标不置 delivered（#217）"},
     {"name": "check_mcp_chat_prompts.py", "shard": "mcp", "why": "提示词装配与人格卡：目录发现、缓存、体积上限与社交状态（#64）"},
     {"name": "check_mcp_picker.py", "shard": "mcp", "why": "平台过滤先于分页、会话搜索与参数校验（#64）"},
     {"name": "check_mcp_reactions.py", "shard": "mcp", "why": "表情回应 dry-run：真实 MCP HTTP + loopback OneBot"},

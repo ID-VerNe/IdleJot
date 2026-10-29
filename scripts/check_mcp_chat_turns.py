@@ -22,6 +22,7 @@ from check_fixture_support import isolated_env, network_guard, temp_dir
 from fixture_server import fixture_server
 from check_mcp_reactions import ReactionBot, Events, eventually, ROOT
 from chatlocal.store import Store
+from chatlocal.mcp_chat import MCPChat
 from chatlocal.mcp_routes import install_mcp_routes
 from chatlocal.mcp_chat_turns import ChatTurns
 import chatlocal.mcp_chat_turns as turns
@@ -768,6 +769,56 @@ def main():
                         tools.chat.recall(dict(self_id=111,group_id=222,message_id=message_id))
                         refused=send(withdrawn)
                         assert refused['error_code']=='target_expired' and 'updated_chat' not in refused,refused
+                        # issue #217：mention_only 的对话窗口要落库，跨 wait 调用与
+                        # 进程重启都存活；窗口关掉后的跳批只推游标，不许把没交付
+                        # 的行记成 delivered=1。以前窗口只在 MCPChat 的内存字典里，
+                        # 换一个实例（服务重启 / collector 重连）就全丢——单次 wait
+                        # 的用例永远看不出这件事。
+                        sid3=call('start_chat_session',conversation_id='111:group:223',persona='fixture',
+                                  idempotency_key=key())['session']['id']
+                        def stored3(mid):
+                            with access.connect() as db:
+                                r=db.execute('SELECT id,delivered FROM chat_inbox WHERE session_id=? AND message_id=?',
+                                             (sid3,str(mid))).fetchone()
+                            return (r[0],r[1]) if r else None
+                        def say3(text,mid,at_me=False,self_sent=False):
+                            uid=111 if self_sent else 444
+                            segs=([dict(type='at',data={'qq':'111'})] if at_me else [])+[dict(type='text',data={'text':text})]
+                            event=dict(post_type='message',message_type='group',self_id=111,group_id=223,message_id=mid,
+                                       message_seq=abs(mid),user_id=uid,sender={'user_id':uid},time=int(time.time()),message=segs)
+                            ReactionBot.history[str(mid)]=deepcopy(event);events.send(event)
+                            eventually(lambda:stored3(mid))
+                            return stored3(mid)[0]
+                        at_id=say3('有人吗',-901,at_me=True)
+                        first=call('wait_chat_messages',session_id=sid3,timeout_seconds=1,quiet_seconds=0,mention_only=True)
+                        assert [m['id'] for m in first['messages']]==[at_id],first
+                        # 服务重启：换一个 MCPChat 实例，内存态到这里全丢
+                        old_chat=tools.chat;old_chat.receiver.stop()
+                        tools.chat=MCPChat(access,tools.actions)
+                        tools.chat.receiver.start()
+                        eventually(lambda:tools.chat.receiver.status()['state']=='connected')
+                        chatter=[say3('哈哈哈哈',-902),say3('确实',-903)]
+                        second=call('wait_chat_messages',session_id=sid3,timeout_seconds=1,quiet_seconds=0,mention_only=True,
+                                    acknowledge_through_id=first['read_through_id'])
+                        assert [m['id'] for m in second['messages']]==chatter,(
+                            'issue #217：服务重启后，回复之后的续接闲聊没有投递',second)
+                        # 窗口关掉：整批跳过，游标推进但 delivered 保持 0
+                        with access.connect() as db:
+                            db.execute('UPDATE chat_sessions SET dialogue_until=0,dialogue_turns=0 WHERE id=?',(sid3,))
+                        skipped=say3('后来的闲聊',-904)
+                        idle=call('wait_chat_messages',session_id=sid3,timeout_seconds=1,quiet_seconds=0,mention_only=True,
+                                  acknowledge_through_id=second['read_through_id'])
+                        assert not idle['messages'],idle
+                        assert tools.chat.row(sid3)['cursor']>=skipped,'跳批没有推进游标，下一轮会重复看见'
+                        assert stored3(-904)[1]==0,'issue #217：跳批把没交付的行记成了 delivered=1'
+                        # 本机发出的回复要重新起算窗口：Agent 想得比 followup_seconds 久
+                        # 时，回复之后那几句仍然接得上
+                        with access.connect() as db:
+                            db.execute('UPDATE chat_sessions SET dialogue_until=0,dialogue_turns=0 WHERE id=?',(sid3,))
+                        say3('我在',-905,self_sent=True)
+                        call('wait_chat_messages',session_id=sid3,timeout_seconds=1,quiet_seconds=0,mention_only=True)
+                        assert tools.chat.row(sid3)['dialogue_until']>time.time(),'issue #217：回复没有重开对话窗口'
+                        results.append('mention_only dialogue window survives a process restart, skip keeps delivered=0, own reply re-anchors it')
                         # Stop/revoke can run while queue sleeps; they cancel remaining work.
                         for mode in ('stop','revoke'):
                             if mode=='revoke':

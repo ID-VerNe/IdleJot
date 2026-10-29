@@ -895,8 +895,14 @@ def main():
     # alone: by the time anyone looks again, those ids would read as [已回].
     # Both directions matter -- answering the *newest* of a pair leaves the older
     # one silent with no warning at all, which is the more common shape.
-    missing = unanswered(answered)
-    if missing:
+    #
+    # issue #207：**只在发出去之后**说（`note_unanswered`）。它是「这条答完了、
+    # 还有 N 条」的提醒，不是发送前的待办——写在发送之前，一次失败的调用会同时
+    # 留下「SEND_FAILED」和这句，读者分不清哪条才代表结果。
+    def note_unanswered():
+        missing = unanswered(answered)
+        if not missing:
+            return
         ids = "、".join(f"{e.get('id')}" + ("（更早）" if (e.get('id') or 0) < target else "")
                         for e in missing)
         print(f"  NOTE 还有 {len(missing)} 条没回：{ids}")
@@ -925,16 +931,18 @@ def main():
         if sent == len(bubble_segments):
             record(answered, args.text or "")
             print("SENT")
+            note_unanswered()
             open_followup(target, group_id=group_id,
                           wanted=not args.no_followup, not_before=send_started)
             return wait_for_next(args.wait) if args.wait else 0
-        if sent or has_at:
-            return 1
-        if args.image:
-            # 计划通道只发文字（send() 的气泡写死 kind=text），回退过去图片就没了。
-            print("SEND_FAILED: 带图的消息只能走 OneBot，计划通道会把图片整个丢掉")
-            return 1
-        print("  falling back to the plan path")
+        # issue #207：进了 OneBot 直发就**不回退**计划通道，无论发出去几条、本次带没带
+        # `--at`。改前 `if sent or has_at: return 1` 在 `sent=0` 且不带 `--at` 时穿过去，
+        # 落到 `falling back to the plan path`——那条路径真的会把消息交给 `send()`，
+        # 而 `send()` 的气泡写死 `kind=text`：引用段整个丢掉（正是上面那句注释禁止的），
+        # 让 Agent 以为「回退过一次」。首条就失败时 `wg_send_failure.handle()` 已经
+        # 打过 `SEND_FAILED: <真实原因>`（#132），这里只补一句为什么不换通道。
+        print(wg_send_failure.no_fallback_line(has_at=has_at, has_image=bool(args.image)))
+        return 1
     elif not args.no_quote:
         print("  no OneBot id on record for this event; using the plan path")
 
@@ -959,6 +967,7 @@ def main():
         if final_target != target:
             print(f"note: batch moved, plan target was {final_target}")
         print("SENT")
+        note_unanswered()
         open_followup(final_target, group_id=group_id,
                       wanted=not args.no_followup, not_before=send_started)
         return wait_for_next(args.wait) if args.wait else 0

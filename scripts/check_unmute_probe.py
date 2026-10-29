@@ -412,6 +412,77 @@ def 禁言期间不扫追问窗口():
 
 
 @case
+def 禁言期间不回退未回唤醒游标():
+    """禁言期 BACKFILL 暂停（issue #269）：游标之前积压未回 @ 时，禁言未解除
+    不许 `rewind_for_backlog()` 把游标回退并 WAKE 退出。
+
+    改前：watch.py 每轮启动立刻 BACKFILL + WAKE + rc=0，listen.py 据此立即重挂，
+    再 BACKFILL+WAKE——每秒数次死循环刷屏，禁言几百秒里整屏都是这两行。
+    改后：禁言期跳过 `rewind_for_backlog()`，与 #197 暂停追问窗口扫描同构；
+    游标不关、`start_cursor` 不动，解禁后由 `poll_unmute()` 触发重挂，重挂首轮
+    的 `check_backlog` 在 `recovered=True` 的账本上（`muted_now()` 为 False）放行，
+    照旧补扫积压。对照组：解禁后（`recovered=True`）同一份积压必须 BACKFILL+WAKE。
+    """
+    now = int(time.time())
+    _reset(now, shut_up=now + 600, all_shut=False)
+    _ledger(now + 600, at=now - 3600)
+    # 游标 12、之前积压 id=10/11 两条新鲜未回 @（与 issue 现象段同形：11433/11434）
+    (STATE / "wg_watch.txt").write_text("12", encoding="utf-8")
+    fresh_ms = (now - 30) * 1000
+    rows = [
+        {"id": 10, "timestamp": fresh_ms, "is_self": False, "sender": "甲",
+         "content": "@机器人 在吗", "segments": [{"type": "at", "qq": SELF}],
+         "conversation_id": f"111:group:{GROUP}", "onebot_message_id": "7010"},
+        {"id": 11, "timestamp": fresh_ms + 1000, "is_self": False, "sender": "乙",
+         "content": "@机器人 说话呀", "segments": [{"type": "at", "qq": SELF}],
+         "conversation_id": f"111:group:{GROUP}", "onebot_message_id": "7011"},
+    ]
+    EVENTS.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+                      encoding="utf-8")
+    before_cursor = int((STATE / "wg_watch.txt").read_text(encoding="utf-8").strip())
+    r = _run("watch.py", "--timeout", "2")
+    after_cursor = int((STATE / "wg_watch.txt").read_text(encoding="utf-8").strip())
+    return (r.returncode == 2 and "TIMEOUT" in r.stdout
+            and "BACKFILL:" not in r.stdout
+            and "WAKE" not in r.stdout
+            and "暂停未回唤醒 BACKFILL" in r.stdout
+            and before_cursor == 12
+            and after_cursor == 12)              # 游标没被回退到 9
+
+
+@case
+def 解禁后未回唤醒照旧回退补扫():
+    """对照组（issue #269）：`recovered=True` 之后同一份积压必须 BACKFILL+WAKE。
+
+    真实时序：`poll_unmute()` 解禁唤醒 → Agent 重挂监听 → 新监听读到账本
+    `recovered=True`（`muted_now()` 为 False），`rewind_for_backlog()` 放行，
+    游标回退到最老未回 @ 之前并重放。断言 `id=10` 被打印、`BACKFILL:` 出现、
+    rc=0 + WAKE——只摘「暂停」那句不是修复。
+    """
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=False)
+    _ledger(now + 600, at=now - 3600, recovered=True, recovered_at=now - 5,
+            recheck_result="released")
+    (STATE / "wg_watch.txt").write_text("12", encoding="utf-8")
+    fresh_ms = (now - 30) * 1000
+    rows = [
+        {"id": 10, "timestamp": fresh_ms, "is_self": False, "sender": "甲",
+         "content": "@机器人 在吗", "segments": [{"type": "at", "qq": SELF}],
+         "conversation_id": f"111:group:{GROUP}", "onebot_message_id": "7010"},
+        {"id": 11, "timestamp": fresh_ms + 1000, "is_self": False, "sender": "乙",
+         "content": "@机器人 说话呀", "segments": [{"type": "at", "qq": SELF}],
+         "conversation_id": f"111:group:{GROUP}", "onebot_message_id": "7011"},
+    ]
+    EVENTS.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+                      encoding="utf-8")
+    r = _run("watch.py", "--timeout", "5")
+    return (r.returncode == 0
+            and "BACKFILL:" in r.stdout
+            and "id=10 " in r.stdout
+            and _last_line(r.stdout) == "WAKE")
+
+
+@case
 def 解禁后追问窗口照旧唤醒():
     """对照组：`recovered=True` 之后同一份窗口必须照常唤醒（抑制不能关死追问）。
 

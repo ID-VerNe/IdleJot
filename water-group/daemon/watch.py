@@ -53,6 +53,17 @@ moment the mute lifts the next listener finds it again. A mute does not silence
 a real mention -- somebody is looking for the bot, and `--wait-unmute` can wait
 inside the budget.
 
+The same gate now also pauses the BACKFILL rewind while the mute is in force
+(issue #269): unanswered mentions piled up before the cursor used to be replayed
+the instant a new listener started, even when the bot could not send a word.
+Each replay woke the caller, which re-hung the listener, which replayed again --
+a tight loop that flooded the output until the mute lifted. The rewind is skipped
+while ``muted_now()`` is true; the cursor is not moved, so ``poll_unmute()``'s
+release path still re-hangs the listener the moment the mute ends, and that
+re-hung listener's own ``check_backlog`` pass picks up the backlog with
+``recovered=True`` on the ledger (no longer muted). `--after` / `--replay` are
+explicit caller starts and never pass through this gate.
+
 Exit codes:
   0  a wake was printed
   2  timed out with nothing new (call again)
@@ -289,9 +300,10 @@ def main():
     # 的起点是调用方显式给的，不许被改写。start_cursor 已是回退前的值，
     # report_expired 的口径不受影响。
     check_backlog = args.after is None and not args.replay
-    # 禁言期间的暂停说明只打一次（issue #197）：这句是「为什么没动静」的解释，
+    # 禁言期间的暂停说明只打一次（issue #197 / #269）：这句是「为什么没动静」的解释，
     # 不是唤醒内容；按轮重复会把它变成噪声，恰好盖住真正要看的东西。
     mute_paused = False
+    backfill_paused = False
 
     while True:
         raw_rows = up.events()
@@ -299,7 +311,18 @@ def main():
         ledger = up.replied_ids()
         if check_backlog:
             check_backlog = False
-            cursor = rewind_for_backlog(rows, cursor, ledger)
+            # 禁言期间暂停未回唤醒 BACKFILL（issue #269）：游标之前积压的未回 @ 此刻
+            # 一条都发不出去（reply.py 必失败），重放只会让 watch.py 立刻 WAKE、
+            # listen.py 立即重挂、再 BACKFILL+WAKE，每秒数次死循环刷屏。与 #197 暂停
+            # 追问窗口扫描同构：游标不关，解禁后由 poll_unmute() 触发重挂，重挂首轮
+            # 的 check_backlog 仍会补扫积压（账本 recovered=True 后 muted_now() 为 False，
+            # 这条闸门放行）。`--after` / `--replay` 不经此路（check_backlog 恒 False）。
+            if wg_send_failure.muted_now():
+                if not backfill_paused:
+                    backfill_paused = True
+                    print("# 禁言中：暂停未回唤醒 BACKFILL（解禁后自动补扫，待回时效照旧）")
+            else:
+                cursor = rewind_for_backlog(rows, cursor, ledger)
         # 过滤把自己的会话滤空了要出声（issue #164）：群号/self_account/状态目录
         # 配错时，「过滤生效」与「群里没人说话」在输出里长得一模一样。每轮只报一次。
         empty_note = wg_isolation.filter_report(raw_rows)

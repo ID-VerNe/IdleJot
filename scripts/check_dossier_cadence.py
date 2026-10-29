@@ -56,7 +56,8 @@ issue #162 的现象：`dossier.py --check` 只有两条阈值（攒够 `burst_m
 23. **下限的读法与机器速度无关**（issue #196）：同一份 mark、同一组**模拟**时刻，
     只把下限从「已过」换到「未过」，跨度读数必须一正一反。用例 13 走真实子进程，
     它的跨度必然掺进进程启动耗时；这条把那一维搬进进程内 patch 时钟，快慢都红
-    不了，也挡住「把下限调松换绿」的修法。
+    不了，也挡住「把下限调松换绿」的修法：两档与用例 13 共用 `FIXTURE_*` 常量、由
+    `fixture_floor_is_tight()` 钉住「恰好等于回推跨度」（issue #215）。
 
 已知边界（这条门禁**不**声称能抓住的）：
 
@@ -104,6 +105,17 @@ ISOLATING_VARS = ("IDLEJOT_WG_STATE", "TULPA_WG_STATE", "IDLEJOT_WG_DB",
 
 
 # ---------- 夹具 ----------
+
+# 用例 13 的端到端夹具，也是用例 23 的两档：共用常量才可能「一起调才同时绿」（#215）。
+FIXTURE_ROUND_SECONDS = 30      # `--round-seconds` 回推的跨度
+FIXTURE_FLOOR_MINUTES = 0.5     # 必须恰好等于上面那 30s，见 fixture_floor_is_tight
+BLOCKED_FLOOR_MINUTES = 1.5     # 「未过」档：必须高于合成跨度 2×0.5min
+
+
+def fixture_floor_is_tight(round_seconds=FIXTURE_ROUND_SECONDS,
+                           floor_minutes=FIXTURE_FLOOR_MINUTES):
+    """下限必须**恰好**等于单轮回推跨度：偏大 → 又变成机器速度的函数（#196 复发），偏小 → 只是白给（#215）。"""
+    return floor_minutes == round_seconds / 60.0
 
 
 def write_config(home, dossier=None):
@@ -599,20 +611,20 @@ def test_default_config_fires_on_round_three(home):
     #
     # 真实耗时那一截必须**不是必要条件**（issue #196）。早先写成
     # `--round-seconds 1` + 下限 0.02min（1.2s），跨度 = 1s 回推 + 耗时：
-    # 首轮落盘之后只要再快 0.2s 就翻红，CI 快 runner 正是这样红的
-    # （PR #194 的 storage 分片 48 秒那趟），本机重跑又绿。
+    # 首轮落盘之后只要再快 0.2s 就翻红（PR #194 的 storage 分片），本机重跑又绿。
     # 现在回推 30s、下限 0.5min（30s）：跨度 >= 30s，耗时压到 0 也不低于下限。
     # `--round-seconds` 只写进 mark、不 sleep，进程开销与原来一样。
-    round_seconds = 30
-    floor_minutes = 0.5
-    assert round_seconds / 60.0 >= floor_minutes, (
-        f"夹具自相矛盾：单轮回推 {round_seconds}s 不足下限 {floor_minutes}min，"
-        f"结论又变成机器速度的函数了（issue #196）")
-    write_config(home, {"quiet_minutes": floor_minutes})
+    #
+    # 这两个数提成模块级常量、与用例 23 共用（issue #215），且**恰好相等**：偏大重新
+    # 变成机器速度的函数，偏小只是让断言更好过、门禁不再钉住任何东西。
+    assert fixture_floor_is_tight(), (
+        f"夹具自相矛盾：单轮回推 {FIXTURE_ROUND_SECONDS}s 与下限 {FIXTURE_FLOOR_MINUTES}min "
+        f"不相等——偏大时结论变成机器速度的函数（#196），偏小时只是让断言更好过（#215）")
+    write_config(home, {"quiet_minutes": FIXTURE_FLOOR_MINUTES})
     reset = tick(home, "reset")
     assert reset.returncode == 0, (reset.returncode, reset.stdout, reset.stderr)
     for _ in range(3):
-        done = tick(home, "--round-seconds", str(round_seconds))
+        done = tick(home, "--round-seconds", str(FIXTURE_ROUND_SECONDS))
         assert done.returncode == 0, (done.returncode, done.stdout, done.stderr)
     state = mark(home)
     assert state.get("quiet_rounds") == 3, state
@@ -628,17 +640,18 @@ def test_default_config_fires_on_round_three(home):
 def test_floor_reading_survives_a_slow_host():
     """同一份 mark、同一组时刻，只改下限，`--check` 的结论必须翻转（issue #196）。
 
-    用例 13 走真实子进程，它的跨度必然掺进「进程启动 + 落盘」的真实耗时；一旦
-    夹具把余量留到零点几秒，结论就变成机器速度的函数——CI 快 runner 上间歇翻红，
-    本机重跑又绿（PR #194 的 storage 分片就是这么红的）。这条用进程内 patch 时钟
+    用例 13 走真实子进程，它的跨度必然掺进「进程启动 + 落盘」的真实耗时；一旦夹具把
+    余量留到零点几秒，结论就变成机器速度的函数（PR #194 的 storage 分片就是这么红的）。这条用进程内 patch 时钟
     把「跨度」与「下限」都变成合成量：同一组 `quiet_since` 与 `now`，下限取
     「已过」与「未过」两档，`quiet_minutes_elapsed()` 必须一正一反。它不读真实
-    时钟，所以快慢都红不了，同时挡住「把下限调松以换绿」的修法——调松之后第二档
-    对照组就翻不过来了。
+    时钟，所以快慢都红不了，同时挡住「把下限调松以换绿」的修法。
+
+    两档下限取自用例 13 的夹具常量（#215）：早先各写一份字面量，把夹具调松到 0.01 时这条
+    照样全绿；现在共用 `FIXTURE_*`，偏松偏紧都由下面的判据翻红。
     """
     dossier = _dossier_module()
     start = 1_700_000_000.0
-    round_seconds = 30
+    round_seconds = FIXTURE_ROUND_SECONDS
     with temp_dir(prefix="wg-cadence-") as home, \
             patch.object(dossier, "MARK", home / MARK_REL):
         for index in range(3):
@@ -652,17 +665,22 @@ def test_floor_reading_survives_a_slow_host():
         # `--check` 判 DUE 的那一刻：首轮 tick 之后 >= 30s。
         now = start + round_seconds
         elapsed = dossier.quiet_minutes_elapsed(now)
-        assert elapsed >= round_seconds / 60.0, (
-            f"跨度算错了：{elapsed:.3f}min，应 >= {round_seconds / 60.0:.3f}min")
-        passed = dict(dossier.DEFAULTS, quiet_minutes=0.5)   # 30s：刚好够
-        blocked = dict(dossier.DEFAULTS, quiet_minutes=1.5)  # 90s：不够
-        # 判据是 `elapsed >= cfg["quiet_minutes"]`（`dossier.py:438-440`），这里
-        # 直接比同一对量，不调 cmd_check（那要真实会话与库）。
-        assert elapsed >= passed["quiet_minutes"], (
-            f"下限 0.5min 应已过，实际跨度 {elapsed:.3f}min")
-        assert elapsed < blocked["quiet_minutes"], (
-            f"对照组失效：跨度 {elapsed:.3f}min 也过了 1.5min 下限，这条就只剩一半")
-    print(f"✓ 23. 同一份 mark、同一组时刻：下限 0.5min 已过、1.5min 未过"
+    assert elapsed >= round_seconds / 60.0, f"跨度算错了：{elapsed:.3f}min"
+    passed = dict(dossier.DEFAULTS, quiet_minutes=FIXTURE_FLOOR_MINUTES)    # 刚好够
+    blocked = dict(dossier.DEFAULTS, quiet_minutes=BLOCKED_FLOOR_MINUTES)   # 不够
+    # 夹具下限必须恰好等于回推跨度（#215）；两个变异对照证明这条判据不是「常量等于
+    # 常量」的空话——调松（0.01）与相对偏小（跨度翻倍）都必须判「不紧」。
+    assert fixture_floor_is_tight(), (
+        f"夹具下限 {FIXTURE_FLOOR_MINUTES}min ≠ 回推跨度 {round_seconds / 60.0}min（#215）")
+    assert not fixture_floor_is_tight(floor_minutes=0.01), "调松到 0.01 也判「够紧」（#215）"
+    assert not fixture_floor_is_tight(round_seconds=round_seconds * 2), "跨度翻倍也判「够紧」（#215）"
+    # 判据是 `elapsed >= cfg["quiet_minutes"]`（`dossier.py:438-440`），这里直接比同一对量。
+    assert elapsed >= passed["quiet_minutes"], (
+        f"下限 {FIXTURE_FLOOR_MINUTES}min 应已过，实际跨度 {elapsed:.3f}min")
+    assert elapsed < blocked["quiet_minutes"], (
+        f"对照组失效：跨度 {elapsed:.3f}min 也过了 {BLOCKED_FLOOR_MINUTES}min 下限，"
+        f"这条就只剩一半")
+    print(f"✓ 23. 下限 {FIXTURE_FLOOR_MINUTES}min 已过、{BLOCKED_FLOOR_MINUTES}min 未过"
           f"（跨度 {elapsed:.3f}min，不读真实时钟）")
 
 

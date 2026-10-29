@@ -681,10 +681,21 @@ def serve():
         release_lock()
 
 
-def plugin_counts():
-    """启动日志里的插件指纹：``名字:指令数,名字:指令数``。缺项 = 那个插件没加载起来。"""
-    return ",".join(f"{plugin.name}:{len(plugin.commands)}"
-                    for plugin in PLUGINS.plugins())
+def plugin_counts(settings):
+    """启动日志里的插件指纹：``名字:活跃指令数,名字:活跃指令数``。
+
+    与 ``status_line`` 同一条口径：数**过门控**的指令（``plugin.enabled(settings)
+    and cmd.available(settings)``），不再数注册数。改前写 ``sixty:14``（注册了 14
+    条），``--status`` 写 ``sixty 停用(0 指令)``，启动行让人以为可用、探针说停用、
+    #天气 又没反应——三方看起来打架（issue #259）。改后启动行也写 ``sixty:0``，
+    与探针/运行期闸门一致。缺项仍是「插件没加载起来」（``load_error``）。
+    """
+    parts = []
+    for plugin in PLUGINS.plugins():
+        live = sum(1 for cmd in plugin.commands
+                   if plugin.enabled(settings) and cmd.available(settings))
+        parts.append(f"{plugin.name}:{live}")
+    return ",".join(parts)
 
 
 def _emit_group_message(event, settings, self_ids):
@@ -737,10 +748,11 @@ def _emit_group_message(event, settings, self_ids):
 
 def _serve(settings, connect, ConnectionClosed, box=None):
     # handler 计数写进启动日志：进程是不是旧代码，看这行数字对不对就知道（issue #68）。
-    # 插件计数按 `名字:指令数` 列出（issue #4 PA），坏掉的插件在这里是 0 或缺项。
+    # 插件计数按 `名字:活跃指令数` 列出（issue #4 PA / #259）：与 status_line 同口径，
+    # 关掉的插件写 :0、缺项才是没加载起来。
     log(f"commands start, prefix={settings['prefix']!r} "
         f"keywords={sorted(settings['commands'])} groups={sorted(settings['groups'])} "
-        f"handlers={len(HANDLERS)} plugins={plugin_counts()}")
+        f"handlers={len(HANDLERS)} plugins={plugin_counts(settings)}")
     self_ids = {settings["self_account"]} - {""}
     state = new_state()
     backoff = 1

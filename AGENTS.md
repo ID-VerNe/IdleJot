@@ -475,7 +475,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 68 | `reply` | `check_repeater.py` | 复读/接龙：三人不同 QQ 才跟、接龙四种格式跟下一号、指令/敏感词/本机名字/外链/超长/带 @ 带图一律不跟、一波只尝试一次且冷却跨重启（#155）；「本机名字」闸门读配置而非夹具字面值（换名照样挡、空表照跟两条对照），夹具里不留像真实昵称的常量（#254） |
 | 69 | `reply` | `check_pending_reply.py` | 待回时效：超时唤醒不再算待回 |
 | 70 | `reply` | `check_reply_context.py` | reply.py --context 回之前看得到群聊上下文 |
-| 71 | `reply` | `check_event_ref.py` | 事件 id 只有一个权威解析入口（#216）：字段名兼容（onebot_message_id/message_id）、列兜底（chat_sessions.conversation_id / chat_inbox.message_id）、来源顺序 wg_events 优先；两种「查不到」分开说；--context 的行能被 reply.py 解析到本群且自带 src=chat_inbox |
+| 71 | `reply` | `check_event_ref.py` | 事件 id 只有一个权威解析入口（#216）：字段名兼容（onebot_message_id/message_id）、列兜底（chat_sessions.conversation_id / chat_inbox.message_id）、来源顺序 wg_events 优先；两种「查不到」分开说；--context 的行能被 reply.py 解析到本群且自带 src=chat_inbox；批量读点（followup.since / wg_context.recent_chatter / wg_gap._local_state）与单条解析同一口径——payload 缺键时回查会话行、非对象 payload 不拖垮整批（#219） |
 | 72 | `reply` | `check_bubble_cap.py` | 单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131） |
 | 73 | `reply` | `check_reply_quote.py` | OneBot mention 与引用预检 |
 | 74 | `reply` | `check_reply_send_failure.py` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）；禁言到点必须复查，过期预测不许继续当此刻事实（#145） |

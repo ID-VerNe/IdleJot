@@ -69,6 +69,7 @@ def schema(tool):
     return [tool('plan_chat_reply',
         'Planner 阶段：根据 get/wait 返回的 input_batch.id 决定。target_event_id/topic_event_ids 都来自所选批次；reply 选非空 expressions，ask/wait/silence 不带表达。'
         '四种决定的区别：reply=接话；ask=刚开口问了一句、等对方回，对方下一句即使不 @ 也会作为必须续上的输入；wait=暂缓决定但仍不关对话窗口；silence=本轮收场、关掉对话窗口。'
+        'wait/ask 不是结束本轮：计时到期而仍无新输入时，下一次 wait 返回 event=wait_elapsed（含 wait_plan 与 decision_required），那时必须接话或 silence，不能继续无声地 wait。'
         '程序核对相关消息静默与新鲜度；READY 返回候选，下一次直接 send_chat_reply 同时提交 expression_ids 和 bubbles，选择与表达合为一次决策。只写简短沟通意图，不发进群。',
         dict(session_id=sid,idempotency_key=key,batch_id=sid,
              action=dict(type='string',enum=['wait','silence','reply','ask']),
@@ -77,7 +78,7 @@ def schema(tool):
              expressions=dict(type='array',maxItems=3,uniqueItems=True,description='action=reply 时非空；ask/wait/silence 省略或传 []。',items=dict(type='string',enum=['text','sticker','reaction','voice','video','file','ai_voice','qq_action'])),
              intent=dict(type='string',minLength=1,maxLength=200),
              wait_seconds=dict(type='number',minimum=0,maximum=TURN_MAX_WAIT_SECONDS,
-                description='action=wait 时计划内的推迟秒数，只推迟本轮发送决定，不承诺到点自动叫醒；上限与冷却同源（见 TURN_MAX_WAIT_SECONDS）。')),
+                description='action=wait 时计划内的推迟秒数，只推迟本轮发送决定，不承诺到点自动叫醒；上限与冷却同源（见 TURN_MAX_WAIT_SECONDS）。到期无新输入时下一次 wait 返回 event=wait_elapsed，必须作出决定。')),
         ['session_id','batch_id','action','intent']),
         tool('send_chat_reply',
         'Replyer 阶段：按 READY 计划一次提交 1–12 个语义气泡，不按标点机械拆句。'

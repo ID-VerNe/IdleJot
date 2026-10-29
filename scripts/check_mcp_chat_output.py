@@ -38,6 +38,14 @@ def main():
     idle=compact_wait(packet)
     deferred=compact_wait(dict(packet,deferred_until=12345))
     assert deferred['deferred_until']==12345 and '暂缓决定' in deferred['chat_guidance']['reminders'][0]
+    # A wait that elapsed on its own must say so and keep the plan it names; the
+    # expiry reminder outranks the deferral one when a packet carries both.
+    wait_plan=dict(plan_id='plan-wait',action='wait',not_before=1234)
+    elapsed=compact_wait(dict(deciding,event='wait_elapsed',wait_plan=wait_plan))
+    assert '暂缓的等待已到期' in elapsed['chat_guidance']['reminders'][0]
+    assert elapsed['wait_plan']==wait_plan and '暂缓决定' not in elapsed['chat_guidance']['reminders'][0]
+    assert elapsed['next_call']==deciding['input_batch']['plan_call'] and elapsed['input_batch']==deciding['input_batch']
+    assert '暂缓的等待已到期' in compact_wait(dict(packet,event='wait_elapsed',wait_plan=wait_plan,deferred_until=12345))['chat_guidance']['reminders'][0]
     assert len(json.dumps(idle,ensure_ascii=False))<1400
     assert idle['chat_guidance']['reaction_notices']==packet['chat_guidance']['reaction_notices']
     refresh=dict(packet,chat_prompt=dict(behavior='new behavior',persona='immutable snapshot'),prompt_changed=True)
@@ -95,7 +103,7 @@ def main():
         uncertain=dict(sent,state=state);assert compact_sent(uncertain)==uncertain
     other=deepcopy(sent);other['bubbles'][0]['receipt']['kind']='reaction'
     assert compact_sent(other)==other
-    print('PASS: no message truncation or source mutation; ACK/pagination, media targets, notices, offline identity and full version refresh preserved; idle <1400 chars.')
+    print('PASS: no message truncation or source mutation; ACK/pagination, media targets, notices, offline identity and full version refresh preserved; idle <1400 chars; elapsed wait names its plan and outranks the idle hint.')
     print('PASS: compact recovery preserves messages, cursors and UNKNOWN audit; unchanged static context omitted, full version refresh retained.')
 
 

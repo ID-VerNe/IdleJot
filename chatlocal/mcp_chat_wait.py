@@ -267,13 +267,37 @@ class ChatWaitMixin:
                                 has_more=not deferred and len(pending)>len(items),continue_waiting=True,acknowledged_sent_echoes=echoes,
                                 receiver=status,gap_count=row['gap_count'],gap_note='接收曾中断或缓存溢出，不保证消息完整。' if row['gap_count'] else '',
                                 note='处理后以 read_through_id 确认；idle 继续等待，不表示整个聊天结束。')
-                    if len(pending)>limit:collection['reason']='page_limit'
-                    elif now>=end:collection['reason']='timeout'
                     result['input_batch']=self.turns.batch(row,items,collection)
                     changed=bool(args.get('known_prompt_version') and args['known_prompt_version']!=prompts.version(row))
                     result['chat_guidance']=self.guidance(grant,row,items,through=through,
                         event=kind if ready else 'source_unavailable',has_more=result['has_more'])
                     result['decision_required']=bool(ready and (any(not m.get('recalled') for m in items) or result['chat_guidance']['reaction_notices'].get('new_items')))
+                    if len(pending)>limit:collection['reason']='page_limit'
+                    elif now>=end:collection['reason']='timeout'
+                    # A `wait` that reached its own deadline with no input to
+                    # hand back is the agent's "接话窗口到了" event (issue #222).
+                    # The plan stays WAITING until the agent decides, the input
+                    # is untouched, and the packet must say so out loud — else
+                    # the round ends on a plain idle that reads like "no
+                    # traffic". When the wait was holding input, that input is
+                    # returned as `messages` instead: same deadline, but the
+                    # packet already carries something to decide on.
+                    # `not_before` is wall-clock (turns.plan stores `now+wait`),
+                    # while `now` above is monotonic: compare like with like.
+                    wait_elapsed=(not items and waiting and not deferred and waiting.get('action')=='wait'
+                                  and time.time()>=waiting['not_before'])
+                    if wait_elapsed:
+                        # `turns.waiting()` returns the plan payload only, so the
+                        # id has to be read next to it: a null plan_id would send
+                        # the agent looking for a plan it cannot name.
+                        with self.access.connect() as db:
+                            pid=db.execute("SELECT id FROM chat_turn_plans WHERE session_id=? AND state='WAITING' ORDER BY created DESC LIMIT 1",(sid,)).fetchone()
+                        result['event']=kind='wait_elapsed'
+                        result['wait_plan']=dict(plan_id=pid[0] if pid else None,action='wait',
+                                                 not_before=waiting['not_before'])
+                        result['decision_required']=True
+                        result['note']=(f'第 {waiting["batch_id"]} 批暂缓的等待已到期；原输入未变，'
+                                       '现在决定接话（reply/ask）或明确收场（silence），不要无声地再等一次。')
                     result['next_call']=result['chat_guidance']['continue_with']
                     if result['decision_required'] and not result['has_more']:
                         result['next_call']=result['input_batch']['plan_call']

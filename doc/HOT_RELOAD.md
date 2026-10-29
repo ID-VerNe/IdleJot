@@ -56,18 +56,30 @@ CLI 只做两件事：写 `~/.water-group/state/wg_reload.request`，轮询结�
 - **语法错整批拒绝**：guard 用 `compile()` 预检所有变更文件；任一文件有 `SyntaxError`，整批不执行，旧进程继续跑，结果里带行号。
 - **启动失败熔断**：同一 target 连续 3 次启动失败 → 进入 quarantine，`supervise` 不再反复重启；5 分钟后半开重试，失败按 5→10→20 分钟退避，上限 1 小时。状态在 `~/.water-group/state/wg_reload_failed.json`。
 - **请求原子认领**：请求先 `os.replace` 到 `wg_reload.request.inflight`，结果写完才删。guard 中途被杀，下次启动会看到未完成请求并写失败结果。
-- **deferred 不阻塞**：NapCat 不健康时 `watchdog` 不重启；其余 target 照常处理。
+- **deferred 不阻塞别人，但对调用方是失败**：NapCat 不健康时 `watchdog` 不重启，其余 target 照常处理；被推迟的那个 target 拿 `code=5`，`ok=False`，`reload.ps1` 退出 5，输出里单独一行「未生效（推迟）: watchdog —— 原因」。改 `watchdog.py` 时这条最要紧：退出 0 只代表真重启了（issue #229）。
 - **`--full` 未实现（P0）**：改 guard 自身代码后，请从 explorer 双击 `water-group/start-bot.pyw`。`--full` 会直接返回 2 并提示。
+
+## 退出码
+
+| code | 含义 | 改动的代码生效了吗 |
+| --- | --- | --- |
+| 0 | 全部 target 重启成功（或本次没有 target 需要重启） | 是 |
+| 2 | 请求被拒绝（guard-owned / 依赖文件 / 语法错 / 未知 target） | 否，旧进程原样跑 |
+| 3 | CLI 等结果超时（guard 没写结果文件） | 未知 |
+| 4 | 执行失败（起不来 / 端口没释放 / reload 崩溃） | 否 |
+| 5 | 有 target 被推迟（NapCat 不健康、quarantine），下一 tick 补做 | 否，**至少那个 target 还是旧代码** |
+
+`reload.ps1` 末行 `exit $LASTEXITCODE` 把 CLI 退出码原样透出，所以 `0` 是唯一能说「已生效」的取值。
 
 ## 状态与日志
 
 - `~/.water-group/state/wg_guard.json`：guard pid / 启动时间 / sandbox / build。
-- `~/.water-group/state/wg_reload_state.json`：watch 开关、上次时间/耗时/文件/重启 target。
+- `~/.water-group/state/wg_reload_state.json`：watch 开关、上次时间/耗时/文件/重启 target，以及 `last_deferred` / `last_deferred_at`——**还欠着、仍是旧代码**的 target。只有该 target 自己被成功重启（无论是这次请求还是下一 tick 的补做）才会从里面消失；别的 target 成功重载、或只切 `--watch` 开关，都不会抹掉它（issue #229）。
 - `~/.water-group/state/wg_reload_failed.json`：quarantine 状态。
 - `~/.water-group/state/wg_reload_snapshot.json`：上次成功重载后的文件指纹。
-- `~/.water-group/logs/wg-reload.log`：每次重载一行。
+- `~/.water-group/logs/wg-reload.log`：每次重载一行（含 `deferred=`）。
 
-`up.py --status` 会多一行“热重载”，直接读上述 state 文件，不需要 guard 配合。
+`up.py --status` 会多一行“热重载”，直接读上述 state 文件，不需要 guard 配合；`last_deferred` 非空时这一行会带「有 N 个 target 推迟未生效」，不会只说「重启 -」。
 
 ## 明确不做
 
@@ -85,6 +97,7 @@ CLI 只做两件事：写 `~/.water-group/state/wg_reload.request`，轮询结�
 4. `guard 不在线` → 先双击 `water-group/start-bot.pyw`；不要从沙箱起栈。
 5. `ports 47860/48777 still busy; not spawning` → 旧 server 没退干净；看 `~/.water-group/logs/app.log`，必要时 `.\stop.ps1` 后从 explorer 重启。
 6. 改了 `up.py` / `supervisor.py` / `reload.py` / `bootstrap.py` → 普通 reload 必然拒绝，这是设计，不是 bug。
+7. 退出码 5 / 输出「未生效（推迟）: watchdog」→ NapCat 不健康或该 target 在 quarantine，改动还是旧代码。先让 NapCat 恢复（或等 quarantine 半开），下一 tick 会自动补做；`.\reload.ps1 --status` 会显示还欠哪个 target（issue #229）。
 
 ## 相关
 

@@ -86,15 +86,21 @@ QQ 群 ── NapCat WS 43001 ──┬─ 客户端① chatlocal 后端（现�
   "sixty": {"enabled": false, "options": {"base_url": "", "allow": ["简报", "天气"]}}
 },
 "groups": {
-  "123456789": {"plugins": {"sixty": false}}
+  "123456789": {"enabled": true, "plugins": {"sixty": false}}
 }
 ```
+
+群条目里的 `enabled` **不能省**：`#` 指令只收 `groups` 里 `enabled: true` 的群
+（`water-group/daemon/commands.py:275-276`），只写 `plugins` 的群等于没进白名单。
+删掉示例里的 `enabled`，该群所有 `#xxx`（含 `#帮助`）就静默无响应——症状看着像
+「进程没起来」，实际是群不在白名单（issue #235）。
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | 插件自报（`miyoushe` 开、`sixty` 关） | 总开关；关掉后该插件的指令全部落空、`#帮助` 也不列 |
 | `groups` | `[]` | 只在这些群开；空 = 所有群 |
 | `options` | 插件自报 | 插件私有字段；默认值与类型归一（`ck` 字符串→列表一类）由插件负责 |
+| `groups.<群号>.enabled` | `false` | 该群进不进 `#` 白名单（见 §4）；**不写等于不在白名单**，与 `config.example.json` 的 `groups.<群号>` 同形 |
 | `groups.<群号>.plugins.<名字>: false` | — | 群级关闭，优先级最高 |
 
 旧写法 `slash_commands.<名字>` 仍然认：除 `enabled`/`groups` 外的键整体当

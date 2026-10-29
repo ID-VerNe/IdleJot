@@ -20,28 +20,20 @@ sys.path.insert(0, str(HERE))
 
 import mcp_client  # noqa: E402
 import session  # noqa: E402
-import wg_event_ref  # noqa: E402  (id / qid 两套命名空间，issue #203)
+import wg_event_ref  # noqa: E402  (id / qid 两套命名空间 + 事件 id 的唯一解析入口，#203/#216)
 import wg_images  # noqa: E402
 import winconsole  # noqa: E402
 
-EVENTS = wg_images.IMAGES.parent / "wg_events.jsonl"
-
 
 def events():
-    rows = []
-    try:
-        for line in EVENTS.read_text(encoding="utf-8").splitlines():
-            try:
-                rows.append(json.loads(line))
-            except ValueError:
-                continue
-    except OSError:
-        pass
-    return rows
+    """`wg_events.jsonl` 的行：来源顺序与读取口径归 `wg_event_ref`（issue #216）。
 
-
-def event_by_id(event_id):
-    return next((row for row in reversed(events()) if row.get("id") == event_id), {})
+    改前这个文件自带一份事件流读取与 `event_by_id()`，只扫 `wg_events.jsonl`：
+    `--context` 里的闲聊（mention_only 滤掉、只在 `chat_inbox`）补读到像素时，
+    落盘那一行拿不到 sender / ts / quote_of，图片索引里就少一半信息。现在按 id
+    取行走 `wg_event_ref.resolve_id()`，这里只留「整份事件流」这一个用途。
+    """
+    return wg_event_ref.events()
 
 
 def stamp(ts):
@@ -127,6 +119,13 @@ def read_event(event_id, index, frames):
         show(row)
         print("本地已缓存，未调用 MCP。")
         return 0
+    # 先按同一个解析入口确认这条 id 在不在：两个来源都没有时，补读接口同样拿不到
+    # 像素，先在这里说清是「没有这条」而不是让 MCP 回一句泛泛的失败（issue #216）。
+    ref = wg_event_ref.resolve_id(event_id)
+    if ref is None:
+        print(f"本地没有 id={event_id} 的记录（wg_events 与 chat_inbox 都没有），无法补读。")
+        print("可能已被 chat_inbox 的 1000 条上限挤掉，或这个 id 从来不存在。")
+        return 1
     sid = session.current()
     if not sid:
         print("没有活动会话：先起栈（start-bot.pyw），或 wg_session.txt 缺失。")
@@ -144,7 +143,7 @@ def read_event(event_id, index, frames):
     if not blocks:
         print(f"没有拿到像素：{json.dumps(data, ensure_ascii=False)[:300]}")
         return 1
-    event = event_by_id(event_id)
+    event = ref.payload
     saved = wg_images.save_pixels(
         event_id, index, blocks,
         sender=event.get("sender") or row.get("sender") or "",

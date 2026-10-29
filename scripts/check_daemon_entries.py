@@ -15,11 +15,11 @@ replaying those out of context would fail for the wrong reason.
 """
 import ast
 import json
-import subprocess
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
+
 ENTRY_DIR = ROOT / "water-group" / "daemon"
 
 # `python <script>` puts the script's directory at sys.path[0]; `-c` would not, and
@@ -93,9 +93,11 @@ def deferred_imports(source):
 
 def check_entry(script):
     specs = deferred_imports(script.read_text(encoding="utf-8"))
-    proc = subprocess.run(
-        [sys.executable, "-P", "-c", CHILD, str(script), json.dumps(specs)],
-        capture_output=True, text=True, timeout=120, cwd=str(ROOT),
+    # `-P` 是解释器开关，但排在 `-c` 之前时由 CPython 照常识别，可以当子进程 argv
+    # 传给 run_python。入口都会 ensure_utf8_stdio，解码钉在 run_python 里（issue #240）。
+    proc = fs.run_python(
+        ["-P", "-c", CHILD, str(script), json.dumps(specs)],
+        cwd=ROOT, timeout=120,
     )
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout).strip().splitlines()

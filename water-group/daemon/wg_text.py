@@ -24,22 +24,14 @@ issue #32 的翻车形态：唤醒行 `(content or '')[:80]` 硬切 80 字，而
 `python water-group/daemon/xxx.py` 直接跑，`sys.path[0]` 是 daemon 目录自身，
 仓库根不在路径上——与 `dossier.py:event_ceiling()` 同一范式（issue #90）。
 """
-import json
-import os
 import re
-import sqlite3
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 
-from wg_paths import data_dir, state_dir
-
-STATE = state_dir()
-EVENTS = STATE / "wg_events.jsonl"
-DB = Path(os.environ.get("IDLEJOT_WG_DB")
-          or os.environ.get("TULPA_WG_DB", data_dir() / "mcp-access.sqlite3"))
+import wg_event_ref  # noqa: E402  (按 id 取行与来源顺序的唯一入口，issue #216)
 
 # 四个调用点的显示额度。曾经是 80 / 50 / 120 / 40 四个散落字面量；收口到这里
 # 之后改一处即四处一致，且每个数字的名字说明了它服务哪一行。
@@ -205,68 +197,6 @@ def bounded_handler(fn, *, limit, need_ck=True):
     return wrapped
 
 
-def _read_events():
-    rows = []
-    try:
-        for line in EVENTS.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line:
-                try:
-                    rows.append(json.loads(line))
-                except ValueError:
-                    continue
-    except OSError:
-        pass
-    return rows
-
-
-def _inbox_row(event_id):
-    """chat_inbox 里按全局 rowid 取一行；拿不到或库不可读都返回 None。
-
-    只读连接走 `wg_text.connect_ro`（issue #169 PC：`?mode=ro` 的唯一归属在
-    `chatlocal.sqlite_util.connect_ro`，本模块延迟导入），与 followup.lookup /
-    reply.recent_chatter 同一套姿势——这条路径永远不改库。
-    """
-    row = _inbox_select(event_id, "payload")
-    if row is None:
-        return None
-    try:
-        payload = json.loads(row[0])
-    except ValueError:
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _inbox_select(event_id, columns):
-    """会话库里按 rowid 取一行指定列；没有或库不可读都返回 None 行。
-
-    ``chat_inbox.id`` 是 AUTOINCREMENT 全局 rowid（issue #203），撞号时
-    「哪一列」比「取没取到」更要紧：``session_id`` 与 ``payload`` 必须来自**同一
-    行**，分成两次查询就可能跨在两行之间读到自相矛盾的组合。
-    """
-    try:
-        db = connect_ro(DB, timeout=5)
-    except sqlite3.Error:
-        return None
-    try:
-        return db.execute(f"SELECT {columns} FROM chat_inbox WHERE id=?",
-                          (int(event_id),)).fetchone()
-    except sqlite3.Error:
-        return None
-    finally:
-        db.close()
-
-
-def inbox_session_of(event_id):
-    """这条库行是**哪个会话**收下来的；没有或读不到返回空串（issue #203）。
-
-    与群号校验并列的第二道：``chat_inbox`` 是跨会话的全局表，光有群号分不出
-    「本会话在群里看到的那条」与「另一个会话在同一个群里的另一条」。
-    """
-    row = _inbox_select(event_id, "session_id")
-    return str(row[0] or "") if row else ""
-
-
 def _print_event(event_id, payload, source, name=None):
     """一条消息的全文。引用/转发展开字段在就原样附在后面，不截断。
 
@@ -330,26 +260,27 @@ def show_event(event_id, namespace=None):
     ``namespace`` 显式给出时只查那一处（``wg_event_ref.EVENT`` / ``.INBOX``）；
     省略时保留改前的回退链（事件流优先，未命中回库）——直接调本函数的旧调用方
     不受影响，``reply.py --show`` 则由 ``wg_event_ref.parse`` 给出命名空间。
+
+    issue #216：来源顺序与「按 id 取行」都归 `wg_event_ref`——这里以前自己写了一份
+    「先扫事件流、再查库」的扫描，与 `reply.event_target` 各认一套字段名，于是同一个
+    id 两个入口给出两种结论（这里读得到、那边回不了）。命名空间决定问哪一处，
+    回退仍然只发生在裸数字上。
     """
-    import wg_event_ref
+    ref = wg_event_ref.resolve_id(event_id, namespace=namespace)
+    if ref is not None:
+        name = wg_event_ref.format_ref(ref.namespace, ref.event_id)
+        return _print_event(event_id, ref.payload, ref.source, name=name)
+    # 读不到时记号按**字面**写法打：裸数字没说要看哪套，就用裸数字问一遍。
+    name = (wg_event_ref.format_ref(namespace, event_id) if namespace
+            else str(event_id))
+    return _missing(name, src_name(namespace))
 
-    name = wg_event_ref.format_ref(namespace, event_id) if namespace else None
-    if namespace == wg_event_ref.INBOX:
-        payload = _inbox_row(event_id)
-        if payload is not None:
-            return _print_event(event_id, payload, "chat_inbox", name=name)
-        return _missing(name, "chat_inbox")
 
-    for row in _read_events():
-        if row.get("id") == event_id:
-            return _print_event(event_id, row, "wg_events", name=name)
-    if namespace == wg_event_ref.EVENT:
-        return _missing(name, "wg_events")
-
-    payload = _inbox_row(event_id)
-    if payload is not None:
-        return _print_event(event_id, payload, "chat_inbox", name=None)
-    return _missing(event_id, "")
+def src_name(namespace):
+    """命名空间 -> ``_missing`` 认的来源名（``wg_events`` / ``chat_inbox`` / ``""``）。"""
+    if namespace is None:
+        return ""
+    return wg_event_ref.SRC_INBOX if namespace == wg_event_ref.INBOX else wg_event_ref.SRC_EVENTS
 
 
 def _missing(ref, source):

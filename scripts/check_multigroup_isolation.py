@@ -513,14 +513,14 @@ CLASH = 7
 def seed_inbox(rows):
     """造一份只装 ``chat_inbox`` 的库：``rows`` 是 ``(session_id, payload)`` 对。
 
-    写的是 ``wg_text.DB`` 实际打开的那个文件，不是本脚本自己声明的 ``DB``：
+    写的是 ``wg_event_ref.DB`` 实际打开的那个文件，不是本脚本自己声明的 ``DB``：
     ``IDLEJOT_WG_DB`` 只有逗号分隔时才被 `chatlocal/config.py` 当路径用，否则回落
     到数据根下的 ``mcp-access.sqlite3``——按 ``DB`` 造夹具等于让 reply.py 去读一个
     空库，撞号根本造不出来（本门禁最初的 3 项失败就是这个假夹具，不是实现问题）。
     """
-    import wg_text
+    import wg_event_ref
 
-    target = Path(wg_text.DB)
+    target = Path(wg_event_ref.DB)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.unlink(missing_ok=True)
     conn = sqlite3.connect(str(target))

@@ -68,7 +68,7 @@ import wg_gap  # noqa: E402  (停机窗口缺口账本，issue #114)
 import winconsole  # noqa: E402
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #128)
-import wg_event_ref  # noqa: E402  (id / qid 两套命名空间的唯一归属，issue #203)
+import wg_event_ref  # noqa: E402  (id / qid 两套命名空间 + 事件 id 的唯一解析入口，#203/#216)
 import wg_images  # noqa: E402
 import wg_isolation  # noqa: E402  (群身份与跨群护栏，issue #164)
 import wg_members  # noqa: E402  (花名 -> QQ 的唯一出口，issue #30/#203)
@@ -276,13 +276,16 @@ AT_TOKEN = re.compile(r"@\{([^{}\n\\]{1,24})\}")
 
 
 def event_target(event_id):
-    """(group_id, onebot_message_id) for a message, by its namespace (issue #203).
+    """``(group_id, onebot_message_id)``；群号拿得到、编号拿不到时回 ``(群号, "")``。
 
-    ``event_id`` 可以是 ``7`` / ``id:7``（事件流）或 ``q7`` / ``qid:7``（会话库），
-    写法见表在 ``wg_event_ref`` 的模块 docstring。改前这里只有裸 id：先遍历
-    ``wg_events.jsonl``，未命中再回库兜底——两套编号各撞各的号时，追问行那条
+    issue #203：记号自己带命名空间——``7`` / ``id:7`` 是事件流，``q7`` / ``qid:7``
+    是会话库，写法见表在 ``wg_event_ref`` 的模块 docstring。改前这里只有裸 id：
+    先遍历 ``wg_events.jsonl``，未命中再回库兜底——两套编号各撞各的号时，追问行那条
     ``id=7`` 会被静默解析成群 111 的事件，引用于是挂到另一个群的消息上。
-    现在记号自己带命名空间，撞号只可能指回自己那条。
+
+    issue #216：行在但编号取不到（payload 少键）时不再与「id 根本不存在」一样回
+    ``None``——那条能回，只是挂不上引用（钉死群下直接抛 ``CrossGroup`` 是改前的
+    谎报）。群号与编号都解析不出来才回 ``None``。
     """
     return resolve_target(event_id)[2]
 
@@ -295,25 +298,39 @@ def resolve_target(event_id):
     非法记号返回 ``(None, None, None)``。
     """
     try:
-        return wg_event_ref.resolve(event_id, _event_target_of, _inbox_target_of)
+        namespace, number = wg_event_ref.parse(event_id)
     except wg_event_ref.BadRef:
         return None, None, None
+    ref = event_ref(number, namespace)
+    return namespace, number, (ref.target if ref else None)
 
 
-def _event_target_of(event_id):
-    """事件流里这一条按 id 反查 ``(群号, message_id)``；没有或不可引用都返回 None。
+def event_ref(event_id, namespace=wg_event_ref.EVENT):
+    """一条事件的 `Ref`（来源 + 群 + 编号），一次解析到位。
 
-    非群会话（私聊、频道）同样返回 None：没有群号就发不出去，返回半截反而会让
-    调用方以为查到了。
+    解析归 `wg_event_ref` 一处——字段名兼容与「回查库列」都在那里（issue #216）；
+    `namespace` 决定问哪套编号（issue #203），默认事件流。
+
+    解析器两个来源都没有，才问插件那一路：`event_lookup` 是扩展点（私有插件可以
+    自己接），默认实现 `followup.lookup` 就是同一个解析器——所以这条只在「id 真的
+    不在库里」时多走一次，不会盖掉上面的结论。插件那一路只认库记号（它拿
+    ``q<n>`` 去查），所以事件流编号不会走到这里。
     """
-    for row in read_events():
-        if row.get("id") != event_id:
-            continue
-        parts = str(row.get("conversation_id") or "").split(":")
-        if len(parts) == 3 and parts[1] == "group" and row.get("onebot_message_id"):
-            return parts[2], str(row["onebot_message_id"])
+    ref = None
+    try:
+        if namespace == wg_event_ref.INBOX:
+            ref = wg_event_ref._ref_from_inbox(int(event_id))  # noqa: SLF001
+        else:
+            ref = wg_event_ref.resolve_id(event_id)
+    except (TypeError, ValueError):
         return None
-    return None
+    if ref is not None or namespace == wg_event_ref.INBOX:
+        return ref
+    target = plugins.emit("event_lookup", {"event_id": f"qid:{int(event_id)}"})
+    if not target:
+        return None
+    return wg_event_ref.Ref(event_id=int(event_id), source=wg_event_ref.SRC_PLUGIN,
+                            group_id=str(target[0]), message_id=str(target[1] or ""))
 
 
 def _inbox_target_of(event_id):
@@ -326,8 +343,8 @@ def _inbox_target_of(event_id):
 
 
 def _inbox_session_of(event_id):
-    """这条会话库行是哪个会话收到的；读不到返回空串（issue #203，见 wg_text）。"""
-    return wg_text.inbox_session_of(event_id)
+    """这条会话库行是哪个会话收到的；读不到返回空串（issue #203）。"""
+    return wg_event_ref.inbox_session_of(event_id)
 
 
 def resolve_member(name, group_id):
@@ -881,6 +898,9 @@ def main():
     if resolved is None:
         return 1
     resolved_ns, target, found = resolved
+    # 这条的 `Ref` 只用来打来源标记：解析结论已由 `resolve_target` 给出，同一结论
+    # 不再走第二遍（`--show` 与唤醒行用的是同一个 `src=` 口径，issue #216）。
+    ref = event_ref(target, resolved_ns)
     group_id = found[0] if found else (args.group or latest_group_id())
     if not group_id:
         print("不知道该发到哪个群：事件里没有 group 信息")
@@ -911,8 +931,8 @@ def main():
     if also_inbox:
         print(f"  note: --also {'、'.join(f'q{i}' for i in also_inbox)} 是会话库里的"
               f"闲聊，不进取答账本（追问窗口自己推游标）")
-    print(f"target={target} group={group_id} session={sid}")
-
+    print(f"target={target} group={group_id} session={sid}"
+          + (f" {ref.describe()}" if ref else ""))
     # 图片先校验再动手（issue #128）：坏路径在这里就退，一张都不发，也不打印后面
     # 那行「还有 N 条没回」——那会让 Agent 以为图已经发出去了。`limit` 一起传进去：
     # 图也是气泡，正文 + 图超过上限就在发之前拒（间隔 1.2s 会吃掉发送预算，#131）。

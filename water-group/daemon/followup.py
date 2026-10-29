@@ -11,6 +11,13 @@
 ——@ 唤醒看 wg_events.jsonl，追问唤醒看 chat_inbox——互不覆盖，也就不会有
 「collector 正卡在 170 秒长轮询里，改 mention_only 要等它返回才生效」的竞态。
 
+**别把这里的窗口和 `chatlocal/mcp_chat_wait.py` 的 `dialogue_window` 当成一回事**
+（issue #217）：那个是服务端 `wait_chat_messages` 的对话窗口，决定「这次 wait 交不
+交付」，参数是 `followup_turns` / `followup_seconds`，状态落在 `chat_sessions` 的
+`dialogue_until` / `dialogue_turns` 两列；本模块的窗口在守护侧，决定「watch.py 要不
+要唤醒」，状态在 `wg_followup.json`。两者互不依赖，唯一的交集是都读 `chat_inbox`：
+服务端跳批的消息只推游标、不置 `delivered`，所以本模块照样看得见它们。
+
 `#` 指令不走 chat_inbox 的投递过滤（它是直接从库里捞的），所以 `consume()` 里还有
 第二道闸门：`up.is_command()` 认出的指令不算接话——不扣额度、不唤醒、不续期，
 但游标照常推进（跳过 ≠ 卡住，issue #70）。
@@ -49,6 +56,7 @@ import wg_event_ref  # noqa: E402  (id / qid 两套命名空间，issue #203)
 import wg_images  # noqa: E402  (图片标记渲染，issue #35 追问行同款)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #164 PC)
+import wg_event_ref  # noqa: E402  (事件 id 的唯一解析入口，issue #216)
 import wg_text  # noqa: E402  (issue #169 PC：connect_ro 延迟导入门面)
 from wg_paths import data_dir, state_dir
 STATE = state_dir()
@@ -168,7 +176,7 @@ def _after_id_of(ref):
 
     窗口游标的语义**只有一种**：库 rowid。``q7`` 是它的标准写法，``qid:7`` 是它的
     长写法，裸数字是改前就已经在用的写法（``reply.py`` 一直传裸数字），三者在这里
-    一起落到同一个 rowid。**不**经 ``wg_event_ref.resolve``：那条链会先问事件流，
+    一起落到同一个 rowid。**不**经 ``wg_event_ref.resolve_id``：那条链会先问事件流，
     而游标问事件流只会把「刚回复的那条 @ 唤醒」与「同号的闲聊」搅在一起。
     看不懂的记号返回 0（= 从头看），不让开窗本身把回复链路打挂。
     """
@@ -451,40 +459,30 @@ def status_text():
 
 
 def _group_of(payload):
-    """(group_id, onebot_message_id) from an inbox payload, or None."""
-    parts = str(payload.get("conversation_id") or "").split(":")
-    if len(parts) != 3 or parts[1] != "group":
-        return None
-    message_id = payload.get("onebot_message_id")
-    if not message_id:
-        return None
-    return parts[2], str(message_id)
+    """(group_id, onebot_message_id) from an inbox payload, or None.
+
+    字段名兼容（`onebot_message_id` / `message_id`）归 `wg_event_ref`（issue #216）：
+    这里只剩「只有 payload、没有行」时的薄封装，别再各写一份键名清单。
+    """
+    return wg_event_ref.group_of_payload(payload)
 
 
 def lookup(event_id):
     """任意事件的 (group_id, onebot_message_id)，闲聊也找得到。
 
     reply.py 以前只查 wg_events.jsonl，而追问唤醒要回的消息是被 mention_only
-    滤掉的闲聊，压根不在那里面。chat_inbox 两条信息都有，拿它兜底，引用才挂得上去。
+    滤掉的闲聊，压根不在那里面。chat_inbox 有这些行，拿它兜底，引用才挂得上去。
     id 是 AUTOINCREMENT 的全局 rowid，跨会话唯一，不用再按会话过滤。
+
+    issue #216：解析统一走 `wg_event_ref`——payload 缺字段时它回查
+    `chat_sessions.conversation_id` 与 `chat_inbox.message_id` 列。改前这里只认
+    payload 里的两个键，少一个就静默 `None`，而同一行 `--show` 读得出来。
+
+    issue #203：这个 id 是**会话库 rowid**，所以只问库（``namespace=INBOX``）——
+    拿它去问事件流，撞号时会如实返回别群那条，引用就挂错了。
     """
-    try:
-        db = wg_text.connect_ro(DB, timeout=5)
-    except sqlite3.Error:
-        return None
-    try:
-        row = db.execute("SELECT payload FROM chat_inbox WHERE id=?",
-                         (int(event_id),)).fetchone()
-    except sqlite3.Error:
-        return None
-    finally:
-        db.close()
-    if not row:
-        return None
-    try:
-        return _group_of(json.loads(row[0]))
-    except ValueError:
-        return None
+    ref = wg_event_ref.resolve_id(event_id, namespace=wg_event_ref.INBOX)
+    return ref.target if ref else None
 
 
 def latest_group_id():
@@ -498,7 +496,7 @@ def latest_group_id():
         return ""
     try:
         row = db.execute(
-            "SELECT payload FROM chat_inbox WHERE session_id=? ORDER BY id DESC LIMIT 1",
+            "SELECT id FROM chat_inbox WHERE session_id=? ORDER BY id DESC LIMIT 1",
             (sid,)).fetchone()
     except sqlite3.Error:
         return ""
@@ -506,11 +504,8 @@ def latest_group_id():
         db.close()
     if not row:
         return ""
-    try:
-        found = _group_of(json.loads(row[0]))
-    except ValueError:
-        return ""
-    return found[0] if found else ""
+    ref = wg_event_ref.resolve_id(row[0], namespace=wg_event_ref.INBOX)
+    return ref.group_id if ref else ""
 
 
 def show():

@@ -34,6 +34,7 @@ issue 要的是「群友自发复读时机器人跟一句」，而这类功能�
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,7 +52,7 @@ os.environ["TULPA_WG_STATE"] = str(_SCRATCH / "state")
 
 import commands  # noqa: E402
 import repeater  # noqa: E402
-from plugins.base import Plugin, PluginError  # noqa: E402
+from plugins.base import Hooks, Plugin, PluginError  # noqa: E402
 from plugins.registry import Registry  # noqa: E402
 
 FAILED = []
@@ -690,6 +691,112 @@ def test_host_dispatch():
           repr(result))
 
 
+def _log_lines():
+    """读本轮 ``commands.LOG`` 的全部行（门禁已把它改道临时文件）。"""
+    try:
+        return commands.LOG.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+
+
+def test_emit_budget():
+    """事件型派发有耗时预算（issue #225）：慢插件超时跳过、记慢日志，不挡 # 指令。
+
+    issue 复发钉子原文：注册一个 ``time.sleep`` 的夹具插件，断言 ``_emit_group_message``
+    在预算内返回、记了一行慢日志，且紧随其后的 ``dispatch()`` 仍能处理 ``#`` 指令。
+    """
+    print("[派发耗时预算（issue #225）]")
+    # 夹具：一个 on_event 里 sleep 的事件型插件。直接挂进注册表（不进 LOADERS——
+    # 它是测试探针，不是真插件），让 PLUGINS.emit 能派发到它。
+    def slow_event(_event, _ctx):
+        time.sleep(3)  # 远超 EMIT_TIMEOUT
+        return "should-never-arrive"
+
+    probe = Plugin(name="slow-probe-225", hooks=Hooks(on_event=slow_event))
+    conf = commands.settings_from({
+        "self_account": SELF,
+        "groups": {GROUP: {"enabled": True}},
+        "slash_commands": {"enabled": True, "commands": {"ping": {"reply": "pong"}}},
+    })
+    commands.SETTINGS_BOX["settings"] = conf
+
+    real_sender = commands.PLUGINS.host._sender
+    sent = []
+    commands.PLUGINS.host._sender = lambda s, gid, payload: sent.append((gid, payload))
+    # dispatch 走的是 send_group_msg（OneBot HTTP），不是 host._sender——桩掉它，
+    # 否则没真服务器时 #ping 的发送会失败、dispatch 返回 False，测不到「指令照常派发」。
+    real_send = commands.send_group_msg
+    sent_cmd = []
+    commands.send_group_msg = lambda s, gid, segs: sent_cmd.append((gid, segs)) or {"data": {"message_id": 999}}
+    registered = False
+    budget = commands.EMIT_TIMEOUT
+    try:
+        commands.PLUGINS.register(probe)
+        registered = True
+        fresh()
+        before = set(_log_lines())
+        t0 = time.monotonic()
+        result = commands._emit_group_message(text_event("草", uid="1", mid=1),
+                                              conf, SELF_IDS)
+        elapsed = time.monotonic() - t0
+        after = set(_log_lines())
+        slow_log = [ln for ln in after - before if "event plugin slow" in ln]
+        # 慢插件被预算挡住：返回 None、远不到 sleep 的 3s、记了一行慢日志、没发出去
+        check("慢插件超时返回 None", result is None, repr(result))
+        check("返回在预算内（不真等 sleep 的 3s）",
+              elapsed < budget + 1.0, f"elapsed={elapsed:.2f}s budget={budget}s")
+        check("记了一行 event plugin slow 日志", len(slow_log) == 1,
+              f"{len(slow_log)} 行: {slow_log}")
+        check("慢插件期间没发复读", not sent, repr(sent))
+
+        # issue 核心症状：慢插件挡不住紧随其后的 # 指令派发。
+        ping_event = text_event("#ping", uid="2", mid=2)
+        state = commands.new_state()
+        dispatched = commands.dispatch(ping_event, conf, SELF_IDS, state)
+        check("慢插件期间 #ping 仍派发成功", dispatched is True, repr(dispatched))
+        # dispatch 把 group_id 当 int 发（event 里就是 int），GROUP 是字符串——按值比。
+        check("#ping 回复已发出",
+              bool(sent_cmd) and str(sent_cmd[0][0]) == GROUP, repr(sent_cmd))
+    finally:
+        commands.PLUGINS.host._sender = real_sender
+        commands.send_group_msg = real_send
+        if registered:
+            # 探针从注册表摘掉，别污染同一进程里后续用例的 PLUGINS.plugins()
+            commands.PLUGINS._plugins.pop(probe.name, None)
+            for cmd in probe.commands:
+                commands.PLUGINS._owners.pop(cmd.name, None)
+                commands.PLUGINS._commands.pop(cmd.name, None)
+
+    # 变异自检：把预算调大，慢插件就该等到结果（不再是「怎么测都超时跳过」）。
+    # 参照 test_judgement_integrity 的 real/try/finally 还原模式。
+    real_budget = commands.EMIT_TIMEOUT
+    commands.EMIT_TIMEOUT = 10  # 远大于 sleep(0.2)，让快派发不被预算挡
+    try:
+        def quick_event(_event, _ctx):
+            return None  # 没人接的形状，亚毫秒返回
+
+        quick = Plugin(name="quick-probe-225", hooks=Hooks(on_event=quick_event))
+        commands.PLUGINS.register(quick)
+        try:
+            fresh()
+            t0 = time.monotonic()
+            commands._emit_group_message(text_event("草", uid="1", mid=1),
+                                         conf, SELF_IDS)
+            elapsed = time.monotonic() - t0
+            before = set(_log_lines())
+            commands._emit_group_message(text_event("草", uid="1", mid=1),
+                                         conf, SELF_IDS)
+            after = set(_log_lines())
+            slow_log = [ln for ln in after - before if "event plugin slow" in ln]
+            check("预算够大时快派发不记慢日志", not slow_log, repr(slow_log))
+            check("快派发不触发预算（远小于 budget）",
+                  elapsed < commands.EMIT_TIMEOUT, f"elapsed={elapsed:.2f}s")
+        finally:
+            commands.PLUGINS._plugins.pop(quick.name, None)
+    finally:
+        commands.EMIT_TIMEOUT = real_budget
+
+
 # ---- 5. 判据完整性自检 ---------------------------------------------------------
 
 def test_judgement_integrity():
@@ -790,8 +897,8 @@ def test_event_stream_only():
 def main():
     for fn in (test_normalize, test_repeat_basics, test_chain, test_chain_parse,
                test_gates, test_frequency, test_ledger_robustness,
-               test_plugin_wiring, test_host_dispatch, test_event_stream_only,
-               test_judgement_integrity):
+               test_plugin_wiring, test_host_dispatch, test_emit_budget,
+               test_event_stream_only, test_judgement_integrity):
         try:
             fn()
         except Exception as exc:  # noqa: BLE001

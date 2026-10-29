@@ -140,6 +140,10 @@ cat ~/.water-group/state/wg_commands_heartbeat  # unix 时间戳
 ```
 
 - 栈运行中由 `supervisor.py` 看护：进程退出或心跳卡死（>300s）自动重启。
+- 事件型派发有耗时预算 `EMIT_TIMEOUT`（默认 1s）：事件型插件（复读/接龙）的 `on_event`
+  经 `_EMIT_POOL` 跑，超时本轮跳过并记一行 `event plugin slow: …ms` 日志——慢插件不挡
+  紧随其后的 `#` 指令派发（`commands.py:_emit_group_message` 在 `dispatch` 之前，慢插件
+  会把 `#` 指令挡在帧队列里且无回执，issue #225）。`on_event` 不得做阻塞 I/O。
 - 纯 Python 进程，**不需要** explorer 代启动（那是 NapCat/QQ 注入链的要求）。
 - 单实例锁 `~/.water-group/state/wg_commands.lock`：两个守护同时在线会把每条指令回两遍，所以
   第二个实例见到活锁就退出；锁里的 pid 死了才接管。误锁死删这个文件即可。

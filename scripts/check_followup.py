@@ -87,7 +87,7 @@ def append(rows):
         data = dict(payload)
         data["conversation_id"] = f"111:group:{GROUP}"
         data["onebot_message_id"] = ONEBOT.get(event_id, str(7000 + event_id))
-        db.execute("INSERT INTO chat_inbox VALUES (?, ?, ?, ?, '[]')",
+        db.execute("INSERT INTO chat_inbox(id,session_id,payload,at,media) VALUES (?, ?, ?, ?, '[]')",
                    (event_id, SID, json.dumps(data, ensure_ascii=False), at))
     db.commit()
     db.close()
@@ -104,7 +104,7 @@ def build():
     foreign = dict(FOREIGN[1])
     foreign["conversation_id"] = "100:group:999"
     foreign["onebot_message_id"] = ONEBOT[FOREIGN[0]]
-    db.execute("INSERT INTO chat_inbox VALUES (?, ?, ?, ?, '[]')",
+    db.execute("INSERT INTO chat_inbox(id,session_id,payload,at,media) VALUES (?, ?, ?, ?, '[]')",
                (FOREIGN[0], "dead-session", json.dumps(foreign, ensure_ascii=False), FOREIGN[2]))
     db.commit()
     db.close()
@@ -725,6 +725,39 @@ def check_bare_at_others_watch():
     print("  ok  watch.py 追问行只放真接话：@别人+空白不出现，@我+空白照旧（issue #138）")
 
 
+def check_skipped_rows_still_wake():
+    """issue #217：服务端跳批的行 delivered=0，追问窗口照样要捞到。
+
+    两套窗口互不依赖，唯一的交集是 `chat_inbox`：服务端「这批不投递」不等于
+    「追问也不许看」。修复前服务端跳批会把整批置 `delivered=1`，`--context`
+    看得见、追问窗口看不见（靠 delivered 判已处理的下游也会漏），两个入口对
+    「群里还在聊」给出不同答案。
+    """
+    db = sqlite3.connect(DB)
+    columns = {r[1] for r in db.execute("PRAGMA table_info(chat_inbox)")}
+    if "delivered" not in columns:
+        db.execute("ALTER TABLE chat_inbox ADD COLUMN delivered INTEGER NOT NULL DEFAULT 0")
+    db.commit()
+    db.close()
+    now = time.time()
+    append([
+        (1301, {"sender": "甲", "content": "跳批的闲聊",
+                "segments": [{"type": "text", "text": "跳批的闲聊"}]}, now),
+        (1302, {"sender": "乙", "content": "投递过的闲聊",
+                "segments": [{"type": "text", "text": "投递过的闲聊"}]}, now),
+    ])
+    db = sqlite3.connect(DB)
+    db.execute("UPDATE chat_inbox SET delivered=1 WHERE id=1302")
+    db.commit()
+    db.close()
+    state = followup.open(1300, max_messages=4, idle_seconds=60)
+    rows = followup.since(1300, SID)
+    assert [r["id"] for r in rows] == [1301, 1302], [r["id"] for r in rows]
+    woke = followup.consume(state, rows)
+    assert [r["id"] for r in woke] == [1301, 1302], "delivered=0 的行被追问窗口跳过了"
+    print("  ok  delivered=0 的跳批行照样唤醒追问窗口（与 #217 口径一致）")
+
+
 def main():
     build()
     print("追问窗口回归：")
@@ -757,6 +790,8 @@ def main():
     # 用例之后——否则会被它们当成接话捞进去。
     check_bare_at_others()
     check_bare_at_others_watch()
+    # issue #217 专项：追加 id 1301+ 的新消息，同样排在所有 `since(小 anchor)` 之后
+    check_skipped_rows_still_wake()
     print("PASS")
     return 0
 

@@ -7,6 +7,19 @@ public surface. ``ChatStopped`` and the water-group config loader stay on
 ``mcp_chat`` (raised and used by the session lifecycle that remains there) and
 are imported per call -- the same cycle break this package already uses for
 ``ChatMedia``.
+
+``mention_only`` groups keep a **dialogue window** (``chat_sessions.dialogue_until``
+/ ``dialogue_turns``, issue #217): while it is open, chatter without a fresh @ is
+still delivered. The window is durable on purpose -- it survives the process, so
+the collector reconnecting or the server restarting does not lose the "reply then
+keep listening" tail. It is opened by a mention and re-anchored by **our own send
+receipt**, because the agent usually takes longer to compose a reply than
+``followup_seconds``.
+
+Do not confuse it with ``water-group/daemon/followup.py``: that is a separate,
+daemon-side window that reads ``chat_inbox`` after ``reply.py`` sends and wakes
+``watch.py``. Neither module depends on the other; only the word "followup" is
+shared, and this one never gates what ``--context`` can see.
 """
 import json
 import threading
@@ -18,6 +31,17 @@ from .mcp_chat_limits import WAIT_TIMEOUT_SECONDS
 
 
 class ChatWaitMixin:
+    def set_dialogue_window(self,sid,until,turns):
+        """把 mention_only 的对话窗口写回会话行（issue #217）。
+
+        窗口以前只活在 ``MCPChat.dialogue_windows`` 的内存字典里，服务重启就没了；
+        落库之后 collector 重连、reload.ps1、整栈重启都接得上。``until`` 用墙钟，
+        跨进程才有意义；写入只发生在开窗 / 续期 / 扣轮次三处，轮询不碰库。
+        """
+        with self.access.connect() as db:
+            db.execute('UPDATE chat_sessions SET dialogue_until=?,dialogue_turns=? WHERE id=? AND active=1',
+                       (float(until),int(turns),sid))
+
     def wait(self, grant, args, cancel, *, allow_learning=True):
         from .mcp_chat import ChatStopped, load_water_group_config
         sid=args['session_id'];gid=grant['id']
@@ -55,13 +79,19 @@ class ChatWaitMixin:
             account=row['conversation_id'].split(':')[0]
             followup_turns=args.get('followup_turns', 3)
             followup_seconds=args.get('followup_seconds', 60)
-            dialogue_window=self.dialogue_windows.setdefault(sid, {'active_until': 0, 'remaining_followups': 0})
+            # issue #217：窗口从行里读，不再挂在 MCPChat 的内存字典上——服务重启
+            # 后 collector 接回来，窗口还在；时间基准必须是墙钟，monotonic 跨进程
+            # 不可比。写入只发生在下面三处（开窗 / 续期 / 扣轮次），别在轮询里刷。
+            dialogue_until=float(row.get('dialogue_until') or 0)
+            dialogue_turns=int(row.get('dialogue_turns') or 0)
+            window_anchor=0
             with self.access.connect() as db:
                 last_turn=db.execute("SELECT payload FROM chat_turn_plans WHERE session_id=? ORDER BY created DESC LIMIT 1",(sid,)).fetchone()
-                if last_turn:
+                if last_turn and dialogue_turns:
                     try:
                         if json.loads(last_turn['payload']).get('action')=='silence':
-                            dialogue_window['remaining_followups']=0
+                            dialogue_turns=0
+                            self.set_dialogue_window(sid,dialogue_until,dialogue_turns)
                     except Exception:pass
             while True:
                 if cancel.is_set():return dict(event='cancelled',messages=[],note='仅取消此次等待；会话未停止，原进度可接续。')
@@ -86,6 +116,7 @@ class ChatWaitMixin:
                 is_in_dialogue=False
                 if mention_only:
                     allow_learning=False
+                    own_sent=False
                     if pending:
                         with self.access.connect() as db:
                             own_rows=db.execute("SELECT message_id FROM chat_inbox WHERE session_id=? AND coalesce(json_extract(payload,'$.is_self'),0)=1 ORDER BY id DESC LIMIT 50",(sid,)).fetchall()
@@ -116,6 +147,12 @@ class ChatWaitMixin:
                         for r in pending:
                             payload = json.loads(r['payload'])
                             if payload.get('is_self'):
+                                # 本机发出的回复：窗口要按「回复之后」重算起算点
+                                # （issue #217）。reply.py 直发的回执没有
+                                # send_request.operation_id，consume_sent_echoes
+                                # 不认，只能在这里认。
+                                if not payload.get('recalled'):
+                                    own_sent = True
                                 continue
                             segs = payload.get('segments', [])
                             if any(s.get('type') == 'at' and str(s.get('qq', '')) in (account, cfg_account, 'all') for s in segs):
@@ -130,11 +167,16 @@ class ChatWaitMixin:
                                 has_mention = True
                                 break
 
-                    if has_mention:
-                        dialogue_window['remaining_followups'] = followup_turns
-                        dialogue_window['active_until'] = time.monotonic() + followup_seconds
+                    # 开窗 / 续期只在「出现新的 @ 或本机新发出的话」时做一次，别在
+                    # 0.4 秒一轮的轮询里反复写库；anchor 用批尾 id 认这一批。
+                    anchor=pending[-1]['id'] if pending else 0
+                    if (has_mention or own_sent) and anchor!=window_anchor:
+                        window_anchor=anchor
+                        dialogue_turns=followup_turns
+                        dialogue_until=time.time()+followup_seconds
+                        self.set_dialogue_window(sid,dialogue_until,dialogue_turns)
 
-                    is_in_dialogue = bool(dialogue_window.get('remaining_followups', 0) > 0 and time.monotonic() < dialogue_window.get('active_until', 0))
+                    is_in_dialogue=bool(dialogue_turns>0 and time.time()<dialogue_until)
 
                     if not has_mention and not is_in_dialogue and now < end:
                         if len(pending) > 15:
@@ -172,12 +214,16 @@ class ChatWaitMixin:
                             if pending:
                                 through = pending[-1]['id']
                                 with self.access.connect() as db:
+                                    # 只推游标，不置 delivered（issue #217）：这批一条
+                                    # 都没交给过 Agent，`delivered` 不能替它签字。上面
+                                    # 的 trim 分支早就是这个口径，--context 与追问窗口
+                                    # 都只认游标，三处因此一致。
                                     db.execute('UPDATE chat_sessions SET cursor=?,offered=max(offered,?) WHERE id=? AND active=1', (through, through, sid))
-                                    db.executemany('UPDATE chat_inbox SET delivered=1 WHERE session_id=? AND id=?', [(sid, m['id']) for m in pending])
                                 pending = []
                         elif not has_mention and is_in_dialogue and ready_to_return:
-                            dialogue_window['remaining_followups'] -= 1
-                            dialogue_window['active_until'] = time.monotonic() + followup_seconds
+                            dialogue_turns -= 1
+                            dialogue_until = time.time() + followup_seconds
+                            self.set_dialogue_window(sid, dialogue_until, dialogue_turns)
                     items=self.details.enrich(grant,row,self.messages(pending[:limit] if not deferred else []),cancel)
                     through=items[-1]['id'] if items else max(row['cursor'],row['dropped_through'])
                     with self.lock:

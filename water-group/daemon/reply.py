@@ -646,9 +646,10 @@ def _plugin_settings():
 def open_followup(event_id, group_id="", wanted=True, not_before=None):
     """发送成功后开追问窗口，让话题继续；wanted=False 或插件停了就不开。
 
-    not_before 是发送开始的墙上时间：窗口只收这之后的发言，避免把 Agent 思考
-    期间堆下的历史闲聊算成接话（issue #29）。group_id 带进去，三态门控按群判
-    （issue #4 PD2a）——这个群关了追问窗口，别的群照开。
+    not_before 是发送开始的墙上时间，只作**预算标记**：处理期间堆下的历史闲聊照常
+    唤醒但不扣额度（issue #29 / #117），只有发送开始之后开口的接话才占额度——「开口」
+    按消息自己的时间判，不是本地收到时刻（issue #218）。group_id 带进去，三态门控
+    按群判（issue #4 PD2a）——这个群关了追问窗口，别的群照开。
     """
     if not wanted:
         return None
@@ -901,9 +902,10 @@ def main():
         print(f"  NOTE 还有 {len(missing)} 条没回：{ids}")
         print("       一条答得完就加 --also，答不完就先回这条再接着回")
 
-    # 追问窗口的时间下界：只把「发送开始之后」的发言算成接话。Agent 拿到唤醒后
-    # 可能隔十几分钟才发出回复，这期间群里堆的闲聊 id 都大于被回复的那条，按 id
-    # 扫会把它们全算进预算，窗口开出来就被自己关掉（issue #29）。
+    # 追问窗口的时间下界：只把「发送开始之后**开口**」的发言算成接话（开口按消息
+    # 自己的时间判，不是本地收到时刻，issue #218）。Agent 拿到唤醒后可能隔十几分钟
+    # 才发出回复，这期间群里堆的闲聊 id 都大于被回复的那条，按 id 扫会把它们全算进
+    # 预算，窗口开出来就被自己关掉（issue #29）。
     send_started = time.time()
 
     # Quote through OneBot first: it is the only path that can point at a message

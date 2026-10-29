@@ -450,6 +450,75 @@ def 无禁言账本时追问正常唤醒():
 
 
 @case
+def 抖动后孤立muted不永久停扫():
+    """issue #205：全员禁言被复查过一次，那一次 `group_all_shut` 读不到 → 账本只剩
+    孤立的 `recheck_result="muted"`（`mute_until=None` + `group_shut=None`）。
+
+    改前死结：`muted_now()` 恒 True（不看 `mute_until` 缺失）→ `watch.py` 每轮跳过
+    追问扫描；`probe()` 恒 idle（前置 `if not until and group_shut is not True` 直接
+    返回）→ `poll_unmute()` 永不探测、`UNMUTED:` 永不出现。两边都不会自己恢复。
+
+    改后：`muted_now()` 对孤立的 muted 降级成 False（解除停扫），`probe()` 把孤立的
+    muted/unknown 当成可复查对象探一次（带节流）。这一轮 `group_all_shut` 又读到了
+    → 探到仍禁言，如实留 `group_shut=True` + `muted`，`muted_now()` 回到 True（有
+    事实撑着）。下一轮再抖动 → unknown，`muted_now()` 又降级 False，停扫再解除。
+
+    本用例钉的是「死结解开后时序能自洽」：第一次 probe 必须探（不再 idle），探到
+    muted 后账本要有 `group_shut=True` 撑着；同一个账本 `muted_now()` 必须与
+    `probe()` 结论一致——不允许「仍在禁言」与「无需探测」同时成立。
+    """
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=True)           # 这一轮又能读到全员禁言
+    # 账本停在「上一轮探测失败、group_shut 被擦掉、只剩孤立 muted」的现场
+    _ledger(None, at=now - 3600, group_shut=None,
+            recheck_result="muted", rechecked_at=now - 90)   # 节流已过
+    r = _run("watch.py", "--timeout", "5")
+    rec = _read_ledger()
+    # 不变量：muted_now() 与 probe() 对同一账本不得给出「仍在禁言」+「无需探测」
+    # 这里 probe 必须探到 muted（夹具 shut_up=0 + all_shut=True），muted_now() 必须为 True
+    # （group_shut=True 撑住了）——死结解开，但结论如实。
+    return (FIX["member_queries"] == 1               # 不再 idle，探了一次
+            and rec.get("recheck_result") == "muted"
+            and rec.get("group_shut") is True        # 这一轮读到了，撑住结论
+            and rec.get("recovered") is None)        # 没冒充解禁
+
+
+@case
+def 抖动擦掉group_shut后不再永久停扫():
+    """issue #205 第二条时序：上一轮 `group_shut=True` 撑着 muted，这一轮 `group_info`
+    抖动读不到 → 账本被擦成 `group_shut=None` + `recheck_result="unknown"`。
+
+    改前：`group_shut=True` 被这一轮探测自己擦掉（`fresh["group_shut"]=None` 先写
+    再探），下一轮前置 `if not until and group_shut is not True` 直接 idle，永久
+    不再探——「下一次探测的资格」被这次探测自己取消。
+
+    改后：孤立的 `recheck_result="unknown"`（`mute_until=None` + `group_shut=None`）
+    同样让 `muted_now()` 降级 False（停扫解除），`probe()` 仍把它当成可复查对象探
+    一次（带节流）。这一轮 `group_info` 又抖动 → 仍是 unknown，但 `watch.py` 不会再
+    因为孤立的 muted 永久停扫——停扫只在有事实撑着时才发生。
+
+    本用例钉的是「擦掉 group_shut 后能恢复」：probe 必须探（不再 idle），结论是
+    unknown，但 `muted_now()` 必须为 False（孤立 unknown 不算仍在禁言）——watch 的
+    追问扫描恢复，不再被这一轮探测自己永久关死。
+    """
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=False, group_fails=True)   # group_info 这一轮抖动
+    # 账本停在「上一轮 group_shut=True 撑着 muted，这一轮刚擦掉」之后的状态
+    _ledger(None, at=now - 3600, group_shut=None,
+            recheck_result="unknown", rechecked_at=now - 90)   # 节流已过
+    r = _run("watch.py", "--timeout", "2")
+    rec = _read_ledger()
+    # 关键不变量：muted_now() 与 probe() 不得同时给出「仍在禁言」+「无需探测」
+    # 这里 probe 探了一次（unknown），muted_now() 必须为 False（孤立 unknown 不算仍在禁言）
+    # ——停扫解除，watch 不会再被这条账本永久关死。
+    return (FIX["member_queries"] == 1               # 不再 idle，探了一次
+            and rec.get("recheck_result") == "unknown"
+            and rec.get("group_shut") is None
+            and rec.get("recovered") is None         # 没冒充解禁
+            and "暂停追问窗口扫描" not in r.stdout)   # 停扫解除
+
+
+@case
 def 监听转述解禁唤醒():
     """端到端接线：`listen.py` 的 `run_passthrough` 要把 UNMUTED 块转述出来，
     `RESTART:` 仍是末行（#69 契约 1），退出码 0 表示「有活」。"""

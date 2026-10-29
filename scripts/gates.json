@@ -65,7 +65,7 @@
     {"name": "check_group_memory.py", "shard": "storage", "why": "记忆引擎、MCP 读写工具与两层存储"},
     {"name": "check_group_notes.py", "shard": "storage", "why": "群级结构化术语读写闭环（#31）"},
     {"name": "check_dossier_ingest.py", "shard": "storage", "why": "dossier 写入动词：--ingest / --through / --apply / --dry-run（#6）"},
-    {"name": "check_dossier_cadence.py", "shard": "storage", "why": "画像沉淀时机：连续 N 轮无人指名即触发，quiet_since 只写首轮、WAKE 与 --mark 清零、--no-digest 与 --probe 不计数、NO 行字段逐项正确（#162）；积压不再冒充爆发、同一批 DUE 只叫一次、--digest --reap 兜底推进停滞游标（#183）；下限的读法与机器速度无关（#196）"},
+    {"name": "check_dossier_cadence.py", "shard": "storage", "why": "画像沉淀时机：连续 N 轮无人指名即触发，quiet_since 只写首轮、WAKE 与 --mark 清零、--no-digest 与 --probe 不计数、NO 行字段逐项正确（#162）；积压不再冒充爆发、同一批 DUE 只叫一次、--digest --reap 兜底推进停滞游标（#183）；下限的读法与机器速度无关、夹具下限与用例 13 共用常量且调松即红（#196/#215）"},
     {"name": "check_pollution_scrub.py", "shard": "storage", "why": "跨群主档污染审计、清理与还原（#34）"},
     {"name": "check_qr_login.py", "shard": "storage", "why": "每用户扫码登录：passport 双流、DPAPI、限流、隐私（#6）"},
     {"name": "check_upgrade.py", "shard": "storage", "why": "升级用真实 SQLite/WAL 夹具"},

@@ -43,6 +43,7 @@
     {"name": "check_napcat_qq_probe.py", "shard": "runtime", "why": "NapCat 探针契约：假消息 + loopback HTTP"},
     {"name": "check_qq_account_diagnostics.py", "shard": "runtime", "why": "QQ 账号诊断：目录夹具、失败分类、隐私"},
     {"name": "check_issue_16_audit_fixes.py", "shard": "mcp", "why": "#16 审计缺陷回归：store 异常类型、grants 排序、MCP 响应解析、会话活性"},
+    {"name": "check_mint_grant_scope.py", "shard": "mcp", "why": "冷启动 grant 默认 scope 不许静默开 chat_video/chat_files（#201）：常量口径与 collector 实际所需对齐、空表回落不泄漏、mint() 真实 POST body 媒体授权为关且字段齐全"},
     {"name": "check_mcp.py", "shard": "mcp", "why": "MCP 协议层契约：真实 MCP HTTP + 隔离源夹具，从不发 QQ 消息"},
     {"name": "check_mcp_onebot.py", "shard": "mcp", "why": "OneBot 设置到工具可见性再到 HTTP notice 读取（隔离夹具）"},
     {"name": "check_mcp_chat_output.py", "shard": "mcp", "why": "轮询输出截断、游标与版本刷新语义"},

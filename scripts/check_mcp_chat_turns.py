@@ -236,38 +236,39 @@ async def wire_waiting(service,ui,events):
                 # stays WAITING, the input is untouched, and the packet carries
                 # the plan instead of a plain idle that reads like "no traffic".
                 #
-                # This wire case cannot run today: an empty batch pins
-                # `watermark` to the cursor (turns.batch), so the
-                # `input_unavailable` guard cancels the plan before its deadline.
-                # That defect is tracked as issue #260 and must not be pinned
-                # here as expected behaviour — the branch asserts the contract,
-                # and only falls back when the plan was
-                # cancelled for that reason. Verified by disabling that guard
-                # locally: the assertions below then pass against this build.
+                # issue #260: an empty batch pins `watermark` to the cursor
+                # (turns.batch), so the live probe `id>cursor AND id<=cursor`
+                # is geometrically empty. The old `input_unavailable` guard
+                # read that as "no input to deliver" and cancelled the plan
+                # before its deadline, starving the wait_elapsed branch. The
+                # guard now fires only when the batch actually had ids to
+                # deliver (watermark > cursor) — an empty-batch wait lives to
+                # its not_before and is closed here by wait_elapsed.
                 packet=await call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0)
                 p=await follow(packet['input_batch']['plan_call'],action='wait',intent='等人接话',wait_seconds=20)
                 due(p)
                 cursor=chat.row(sid)['cursor']
                 elapsed=await follow(chat.continuation(sid),timeout_seconds=1)
-                if chat.turns.waiting(sid):
-                    assert elapsed['event']=='wait_elapsed',elapsed
-                    assert elapsed['decision_required'] and not elapsed['messages'],elapsed
-                    assert elapsed['wait_plan']['plan_id']==p['plan_id'] and elapsed['wait_plan']['action']=='wait',elapsed
-                    assert elapsed['wait_plan']['not_before']==chat.turns.waiting(sid)['not_before']
-                    assert elapsed['input_batch']['phase']=='DECIDING',elapsed
-                    assert elapsed['next_call']==elapsed['input_batch']['plan_call'],elapsed
-                    assert chat.row(sid)['cursor']==cursor,'elapsed wait acknowledged input on its own'
-                    silent=await follow(elapsed['next_call'],action='silence',intent='到期后收场')
-                    await idle_follow(follow,receiver_status,silent['next_call'],timeout_seconds=1)
-                else:
-                    with access.connect() as db:
-                        reason=db.execute("SELECT reason FROM chat_turn_plans WHERE id=? AND session_id=?",(p['plan_id'],sid)).fetchone()
-                    assert not reason or reason[0]=='input_unavailable',('wait plan vanished for an unexpected reason',reason,elapsed)
-                    assert elapsed.get('event')!='wait_elapsed' and 'wait_plan' not in elapsed,elapsed
-                    print('SKIP: wait_elapsed unreachable while the empty-batch plan is cancelled (input_unavailable)')
+                assert chat.turns.waiting(sid),'empty-batch wait plan must survive to its deadline (issue #260)'
+                assert elapsed['event']=='wait_elapsed',elapsed
+                assert elapsed['decision_required'] and not elapsed['messages'],elapsed
+                assert elapsed['wait_plan']['plan_id']==p['plan_id'] and elapsed['wait_plan']['action']=='wait',elapsed
+                assert elapsed['wait_plan']['not_before']==chat.turns.waiting(sid)['not_before']
+                assert elapsed['input_batch']['phase']=='DECIDING',elapsed
+                assert elapsed['next_call']==elapsed['input_batch']['plan_call'],elapsed
+                assert chat.row(sid)['cursor']==cursor,'elapsed wait acknowledged input on its own'
+                silent=await follow(elapsed['next_call'],action='silence',intent='到期后收场')
+                await idle_follow(follow,receiver_status,silent['next_call'],timeout_seconds=1)
                 assert not chat.turns.waiting(sid)
-                await idle_follow(follow,receiver_status,(await call('wait_chat_messages',session_id=sid,
-                    timeout_seconds=1,quiet_seconds=0))['next_call'],timeout_seconds=1)
+                # Reverse (issue #260): with no WAITING plan, an empty wait
+                # returns idle — not wait_elapsed, and carrying no wait_plan.
+                # This pins that wait_elapsed only fires when a wait plan is
+                # actually live at its deadline, not on any plain quiet wait.
+                plain=await call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0)
+                assert plain['event']=='idle',plain
+                assert 'wait_plan' not in plain and plain.get('event')!='wait_elapsed',plain
+                assert not plain['decision_required'] and not plain['messages'],plain
+                await idle_follow(follow,receiver_status,plain['next_call'],timeout_seconds=1)
                 # `ask` shares WAITING with `wait` but means "I put a question
                 # out". Its expiry is not the "接话窗口到了" event, and a wire
                 # case cannot show it here (an `ask` batch is never empty, so

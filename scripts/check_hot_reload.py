@@ -208,6 +208,16 @@ def check_deferred_reports_failure():
     assert state.get("last_deferred") == ["watchdog"], state
     assert "推迟未生效：watchdog" in reload.status_line(), reload.status_line()
 
+    # 该 target 自己后来正常重载成功，欠账要消——这条钉住 `_note_deferred` 里的
+    # `difference_update(restarted)`，否则欠账再也清不掉，--status 永远假报警
+    # （第二轮复核的 M1 变异：删掉那行原本仍全绿）。
+    recovered = reloader._result(
+        "recover-nonce", "reload", time.monotonic(), ["watchdog"], [], [], [], [])
+    reloader._write_state(last_result=recovered)
+    state = wg_daemon.read_json(reload._state(reload.STATE_NAME)) or {}
+    assert not state.get("last_deferred"), state
+    assert "推迟未生效" not in reload.status_line(), reload.status_line()
+
     # 补做失败：代码还是旧的，账不能清（复核意见 2）。
     failing = reload.Reloader(spawn=lambda name: None, healthy=lambda: True, verify=False)
     failing._write_state(last_result=result)

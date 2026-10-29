@@ -468,7 +468,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 65 | `reply` | `check_wake_ledger.py` | 已回判定：一条回复不得把后续 @ 洗成已回 |
 | 66 | `reply` | `check_forward_wake.py` | 合并转发里的 @ 与关键词参与唤醒（#9） |
 | 67 | `reply` | `check_followup.py` | 追问窗口：回复之后还能听见群里说什么 |
-| 68 | `reply` | `check_repeater.py` | 复读/接龙：三人不同 QQ 才跟、接龙四种格式跟下一号、指令/敏感词/本机名字/外链/超长/带 @ 带图一律不跟、一波只尝试一次且冷却跨重启（#155） |
+| 68 | `reply` | `check_repeater.py` | 复读/接龙：三人不同 QQ 才跟、接龙四种格式跟下一号、指令/敏感词/本机名字/外链/超长/带 @ 带图一律不跟、一波只尝试一次且冷却跨重启（#155）；「本机名字」闸门读配置而非夹具字面值（换名照样挡、空表照跟两条对照），夹具里不留像真实昵称的常量（#254） |
 | 69 | `reply` | `check_pending_reply.py` | 待回时效：超时唤醒不再算待回 |
 | 70 | `reply` | `check_reply_context.py` | reply.py --context 回之前看得到群聊上下文 |
 | 71 | `reply` | `check_event_ref.py` | 事件 id 只有一个权威解析入口（#216）：字段名兼容（onebot_message_id/message_id）、列兜底（chat_sessions.conversation_id / chat_inbox.message_id）、来源顺序 wg_events 优先；两种「查不到」分开说；--context 的行能被 reply.py 解析到本群且自带 src=chat_inbox |

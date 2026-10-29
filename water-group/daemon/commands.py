@@ -40,6 +40,7 @@ ROOT = Path(__file__).resolve().parents[2]
 import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收口)
 import reload as wg_reload  # noqa: E402  (热重载合作退出检查点，不 spawn)
 from wg_daemon import beater, logger, pid_alive
+from wg_emit_pool import EmitPool  # noqa: E402  (事件型派发耗时预算池，issue #225)
 from wg_paths import logs_dir, state_dir
 STATE_DIR = state_dir()
 LOG = logs_dir() / "wg_commands.log"
@@ -47,6 +48,7 @@ HEARTBEAT = STATE_DIR / "wg_commands_heartbeat"
 
 RELAY_SECONDS = 30        # 配置热重载周期
 RECV_TIMEOUT = 2          # WS 单次 recv 超时（热重载检查点；心跳节拍）
+EMIT_TIMEOUT = 1          # 事件型派发耗时预算（issue #225）：超时跳过本轮，不挡 # 指令
 SEEN_MAX = 4096           # 已处理 message_id 的去重窗口
 LOCK = STATE_DIR / "wg_commands.lock"   # 单实例锁，卡死可手删
 
@@ -110,6 +112,12 @@ HANDLERS = PLUGINS.commands()
 
 # 取数层异常的统一出口：插件声明自己的域异常，宿主统一「str(exc) 当回复」。
 FETCH_ERRORS = PLUGINS.error_types()
+
+# 事件型派发的耗时预算池（issue #225）：单 daemon worker，``_emit_group_message``
+# 经它跑插件 ``on_event``，``EMIT_TIMEOUT`` 秒内拿不到结果就跳过本轮、记慢日志，
+# 不让一个慢插件把紧随其后的 ``#`` 指令挡在帧队列里。import 期起线程，与
+# ``PLUGINS`` 同一时机；``serve()`` 的 ``finally`` 里 ``shutdown``。
+_EMIT_POOL = EmitPool()
 
 # §4.2：未绑定群友的取数指令统一回这句，不再拿管理员的全局 CK 顶。
 BIND_HINT = plugins.BIND_HINT
@@ -669,6 +677,7 @@ def serve():
         return _serve(settings, connect, ConnectionClosed, SETTINGS_BOX)
     finally:
         PLUGINS.stop_all()
+        _EMIT_POOL.shutdown()
         release_lock()
 
 
@@ -686,20 +695,32 @@ def _emit_group_message(event, settings, self_ids):
     失败处理都在宿主里），不是本进程私开一条 HTTP——否则「插件不碰传输」这条边界
     在这里就被绕开了。
 
-    整段吞异常：一条复读跟不出去，不该让 WS 循环（以及指令守护）跟着死。
+    整段吞异常 + 耗时预算（issue #225）：插件 ``on_event`` 经 ``_EMIT_POOL.run`` 跑，
+    ``EMIT_TIMEOUT`` 秒内拿不到结果就跳过本轮、记一行 ``event plugin slow: …ms``。
+    这条预算挡的是「慢插件把紧随其后的 ``#`` 指令挡在帧队列里、群里看到发了指令
+    完全没反应」——``#`` 指令没有任何「我收到了」的回执，被挡住就是静默停摆。
+    ``beat()`` 排在派发之前仍照写心跳，所以慢插件期间 ``--status`` 仍报在线，诊断
+    靠这一行慢日志。超时后 worker 仍在后台跑完那次卡死调用（daemon 兜底，进程退出
+    不挂，见 ``wg_emit_pool``）。
     """
     if event.get("message_type") != "group":
         return None
+    ctx = {"settings": settings, "event": event, "self_ids": set(self_ids)}
+    started = time.monotonic()
     try:
-        reply = PLUGINS.emit("group_message", {
-            "settings": settings,
-            "event": event,
-            "self_ids": set(self_ids),
-        })
+        reply = _EMIT_POOL.run(lambda c: PLUGINS.emit("group_message", c),
+                               ctx, EMIT_TIMEOUT)
     except Exception as exc:  # noqa: BLE001  插件判定炸了不能杀死监听
         log(f"group_message plugin failed: {type(exc).__name__}: {exc}")
         return None
-    if not reply:
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    if reply is None:
+        # ``run`` 超时返回 None；没人接 / 插件返回 None 也走这里，但那些亚毫秒
+        # 返回，触发不了这条阈值。日志不写插件名——宿主不该知道是哪个插件接了
+        # 这一手（同 app 侧「宿主里不许出现插件名字面量」）。
+        if elapsed_ms >= int(EMIT_TIMEOUT * 1000) - 50:
+            log(f"event plugin slow: {elapsed_ms}ms group={event.get('group_id')} "
+                f"msg={event.get('message_id')} (budget={EMIT_TIMEOUT}s, skipped)")
         return None
     try:
         PLUGINS.host.send(str(event.get("group_id") or ""), str(reply))

@@ -81,6 +81,13 @@
 整栈」；账本段的上一轮历史统一带「仅供参考」，不再与现刻结论同形；空栈跑 `--stop`
 会多一句「栈本来就没在跑：无事可做」（退出码仍为 0，`start-bot.pyw` 的幂等前停依赖它）。
 
+**WAKE 退出空窗不说「消息照收」（issue #212）**：「消息照收」说的是「NapCat 在线 ∧ collector
+在跑」两环，与「有没有人在值守」无关。账本最近一条 stop 原因为 `WAKE` 时，正是刚叫醒、
+等重挂的空窗——消息在落盘但没人值守把它变成唤醒，空窗内新 @ 只能靠重挂后首轮 `BACKFILL`
+补扫。此刻监听行改说「等待重挂——空窗内新 @ 靠重挂后首轮 BACKFILL 补扫（此刻无人值守）」，
+不与「消息照收」并排。判据钉死在 `reason == "WAKE"`：NO_WORK / DOSSIER_DUE / WATCH_FAILED /
+硬杀 / 无账本一律仍说「消息照收」。
+
 **禁言解禁会叫醒监听（issue #192）**：账本（`state/wg_send_failure.json`）上压着未定论的
 禁言时，`watch.py` 每 15 秒现查一次 `shut_up_timestamp` / `group_all_shut`；确认解禁就打印
 `UNMUTED: 禁言已于 HH:MM:SS 实测解除（账本原判 …）`，照常以 `WAKE` 收尾并返回 0，所以
@@ -457,7 +464,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 54 | `storage` | `check_group_memory.py` | 记忆引擎、MCP 读写工具与两层存储 |
 | 55 | `storage` | `check_group_notes.py` | 群级结构化术语读写闭环（#31） |
 | 56 | `storage` | `check_dossier_ingest.py` | dossier 写入动词：--ingest / --through / --apply / --dry-run（#6） |
-| 57 | `storage` | `check_dossier_cadence.py` | 画像沉淀时机：连续 N 轮无人指名即触发，quiet_since 只写首轮、WAKE 与 --mark 清零、--no-digest 与 --probe 不计数、NO 行字段逐项正确（#162）；积压不再冒充爆发、同一批 DUE 只叫一次、--digest --reap 兜底推进停滞游标（#183）；下限的读法与机器速度无关、夹具下限与用例 13 共用常量且调松即红（#196/#215） |
+| 57 | `storage` | `check_dossier_cadence` | 画像沉淀时机：连续 N 轮无人指名即触发，quiet_since 只写首轮、WAKE 与 --mark 清零、--no-digest 与 --probe 不计数、NO 行字段逐项正确（#162）；积压不再冒充爆发、同一批 DUE 只叫一次、--digest --reap 兜底推进停滞游标（#183）；下限的读法与机器速度无关、夹具下限与用例 13 共用常量且调松即红（#196/#215）。#247：单文件顶到 1000 行红线后按 #169 PF-2 先例拆成 `scripts/check_dossier_cadence/` 包（_common/quiet_rounds/clock_fields/floor_reading/backlog_cursor），入口名不变、对 gates.json 与 CI 透明。 |
 | 58 | `storage` | `check_pollution_scrub.py` | 跨群主档污染审计、清理与还原（#34） |
 | 59 | `storage` | `check_qr_login.py` | 每用户扫码登录：passport 双流、DPAPI、限流、隐私（#6） |
 | 60 | `storage` | `check_upgrade.py` | 升级用真实 SQLite/WAL 夹具 |

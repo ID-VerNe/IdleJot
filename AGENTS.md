@@ -160,13 +160,15 @@
 判据看 `~/.water-group/logs/wg_commands.log` 的启动行：
 
 ```
-commands start, prefix='#' keywords=[...] groups=[...] handlers=<N> plugins=miyoushe:21,sixty:14
+commands start, prefix='#' keywords=[...] groups=[...] handlers=<N> plugins=miyoushe:21,sixty:0
 ```
 
 这行**时间早于提交时间** = 进程还是旧代码，此时新指令会被当未知指令**静默丢弃**
 （`unknown_reply` 默认空串，症状是「发了完全没反应」，见 issue #68）。`plugins=`
-里缺某个插件或写成 `:0` = 那个插件没加载起来（issue #4 PA：注册表按插件记
-`load_error`，`up.py --status` 的 `插件` 行也会列出来）。
+里**缺某个插件** = 它压根没加载起来（issue #4 PA：注册表按插件记 `load_error`，
+`up.py --status` 的 `插件` 行也会列出来）；写成 `名字:0` = 插件在但 0 条指令过门控
+（被 `enabled=false` 关掉、或事件型插件无 `#` 指令，issue #259），与 `--status`
+的「停用(0 指令)」同口径——不是「没注册」。
 
 重启单棵树（别整栈停，supervisor 会在 8 秒内拉起）：
 
@@ -178,9 +180,9 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
 **群里发 `#` 指令没反应时，按这三步查**（`#` 指令是独立进程，别的日志帮不上忙）：
 
 1. `tail ~/.water-group/logs/wg_commands.log` —— 有 `replied #xxx` 就是已回；**没有**说明压根没被识别，往下走；
-2. 看启动行 `commands start ... handlers=<N> plugins=<名字:指令数,…>`（例：`plugins=miyoushe:21,sixty:14`）：
+2. 看启动行 `commands start ... handlers=<N> plugins=<名字:活跃指令数,…>`（例：`plugins=miyoushe:21,sixty:0`）：
    时间早于提交时间 = 旧进程；`plugins=` 里**缺某个插件** = 它压根没加载起来（注册表记 `load_error`），
-   写成 `sixty:0` = 插件在但一条指令都没注册（两种导入失败现在都会 `log`，见 issue #68 / #4 PA）；
+   写成 `sixty:0` = 插件在但 0 条指令过门控（被 `enabled=false` 关掉、或事件型插件无 `#` 指令，与 `--status` 的「停用(0 指令)」同口径，见 issue #259）；
 3. 取数失败看 `~/.water-group/logs/wg_sixty.log` —— 它**只记失败**，成功不落日志，所以「文件不存在」是正常现象。
 
 ---

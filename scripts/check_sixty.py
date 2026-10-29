@@ -301,6 +301,30 @@ def test_registry_and_merge():
     check("#kfc 命中 #KFC", commands.match_handler("kfc") == ("KFC", ""))
 
 
+def test_plugin_counts_matches_probe():
+    print("[plugin_counts 与探针同口径（issue #259）]")
+    # issue 现场：config 没显式配 plugins.sixty → default_enabled=False 让两边都判停用。
+    # 启动行 plugin_counts 与 --status 的 status_line 必须一致，不能一个写 14、一个写 0。
+    bare = commands.settings_from({})
+    counts = commands.plugin_counts(bare)
+    status = commands.PLUGINS.status_line(bare)
+    check("未配 sixty 时 plugin_counts 写 sixty:0", "sixty:0" in counts, counts)
+    check("未配 sixty 时 status_line 写 sixty 停用", "sixty 停用" in status, status)
+    # 反向：显式开 sixty 时两边都得是非零活跃数
+    on = commands.settings_from({"plugins": {"sixty": {
+        "enabled": True, "options": {"base_url": FIXTURE_BASE}}}})
+    counts_on = commands.plugin_counts(on)
+    status_on = commands.PLUGINS.status_line(on)
+    check("开 sixty 时 plugin_counts 写 sixty:14", "sixty:14" in counts_on, counts_on)
+    check("开 sixty 时 status_line 写 sixty 已启用", "sixty 已启用" in status_on, status_on)
+    # 群白名单插件在 group_id="" 时只判总开关：活跃数 = 全部指令数（不被群白名单压成 0）
+    only = commands.settings_from({"plugins": {"sixty": {
+        "enabled": True, "groups": ["2"],
+        "options": {"base_url": FIXTURE_BASE}}}})
+    counts_only = commands.plugin_counts(only)
+    check("群白名单插件在启动行不计群级覆盖", "sixty:14" in counts_only, counts_only)
+
+
 def test_settings_from():
     print("[settings_from / 插件三态]")
     bare = commands.settings_from({})
@@ -769,7 +793,9 @@ def main():
             try:
                 with patch("socket.create_connection", restrict):
                     for fn in (test_normalize_city, test_allowed_gate,
-                               test_registry_and_merge, test_settings_from,
+                               test_registry_and_merge,
+                               test_plugin_counts_matches_probe,
+                               test_settings_from,
                                test_gate_end_to_end, test_fetch_envelope,
                                test_weather_query_param, test_cache,
                                test_cache_eviction, test_p0_forecast,

@@ -197,16 +197,20 @@ def wait_plan(mute, budget=None, elapsed=0.0):
     「等不起」不是失败，是边界事实：宿主在 `AGENT_TOOL_TIMEOUT` 处砍进程树，
     硬睡到解禁等于把「发不出去」变成「进程静默消失」（#79）。`elapsed` 是这次调用
     已经用掉的秒数（诊断与发送本身就吃掉一部分）——额度是**整次调用共享的总额**，
-    所以走 `wg_budget.clamp_wait()` 而不是自己减预算（#88）。
+    所以剩余额度从 `wg_budget.remaining_budget()` 取原始浮点（#224）——判定要的是
+    事实，不是 ceil 后的整数；`clamp_wait()` 留给取睡眠秒数的调用方。
     """
     budget = wg_budget.WAIT_BUDGET if budget is None else int(budget)
     need = int(mute) + UNMUTE_MARGIN
     # 两个上限都要满足：调用方给的预算（本模块里恒等于 WAIT_BUDGET，但形参不能只进文案）
-    # 与整次调用剩余额度（clamp_wait 按 elapsed 算，#88）。
-    allowance = min(int(budget), wg_budget.clamp_wait(need, elapsed))
-    if allowance < need:
+    # 与整次调用剩余额度（#88 的总额口径）。判定走原始浮点 `remaining_budget()`，
+    # 不走 `clamp_wait()` 的 ceil——ceil 是给「等最多 Ns」类调用方取睡眠秒数的，
+    # 拿它当 `allowance < need` 的操作数会把 90>89.6 读成 90≯90，判成等得起、
+    # 睡 90s，叠加已用秒数与发送余量超出宿主 120s（issue #224）。
+    remaining = wg_budget.remaining_budget(elapsed)
+    if need > min(int(budget), remaining):
         return None, [f"  需等 {need} 秒才解禁，超出单次调用等待预算 {budget}s"
-                      f"（已用 {max(0, int(elapsed))}s，剩 {allowance}s）："
+                      f"（已用 {round(max(0.0, float(elapsed)), 1)}s，剩 {int(remaining)}s）："
                       f"这次不硬等，请稍后重挂再发（失败已记进 {LEDGER.name}）"]
     return need, [f"  等 {need} 秒解禁后补发（--wait-unmute，等待预算 {budget}s 内）…"]
 
@@ -547,6 +551,10 @@ def handle(sent, attempt, failure, *, group_id, bubbles, has_at, unmute=False):
         print(line)
     if wait is None:
         return sent
+    # 钉住复发（#224）：被宿主在 120s 处砍掉时，这一行是 Agent 看到的最后一句真话——
+    # 补发时刻、已用秒数都按 started 算，不靠事后补写。
+    print(f"  补发时刻预计在 {wg_clock.stamp(started + (time.time() - started) + wait)}"
+          f"，本次调用已用 {int(time.time() - started)}s")
     SLEEP(wait)
     retry_failure = {}
     retried = attempt(retry_failure)

@@ -324,15 +324,29 @@ def 全员禁言与单人禁言分开说():
 
 @case
 def 等待预算_边界与唯一出处():
-    """85+5=90 正好等于预算 → 允许；86+5=91 → 拒绝（预算是 wg_budget 的唯一出口）。"""
+    """85+5=90 正好等于预算 → 允许；86+5=91 → 拒绝（预算是 wg_budget 的唯一出口）。
+
+    issue #224 的钉子：`wait_plan` 的「等不等得起」判定走 `remaining_budget()` 的
+    原始浮点，不走 `clamp_wait()` 的 ceil——`clamp_wait(90, 0.4)` 会回 90（ceil 89.6），
+    拿它当 `allowance < need` 的操作数就把 `90 > 89.6` 读成「90 不大于 90」，
+    判成等得起、睡 90s，叠加 0.4s 已用 + 30s 发送就超出宿主 120s。
+    """
     allowed, _ = wg_send_failure.wait_plan(wg_budget.WAIT_BUDGET - wg_send_failure.UNMUTE_MARGIN)
     refused, lines = wg_send_failure.wait_plan(
         wg_budget.WAIT_BUDGET - wg_send_failure.UNMUTE_MARGIN + 1)
     # 形参 budget 必须真的参与判定，不能只进文案（复核遗留 2）；elapsed 同理。
     tight, _ = wg_send_failure.wait_plan(30, budget=30)   # need=35 > 预算 30
     spent, _ = wg_send_failure.wait_plan(60, elapsed=30)
+    # issue #224：已用 0.4s 时真实剩余 89.6，need=90 不该塞进去。
+    # 85+5=90（need=90）在剩余 89.6 内塞不进 → None；84+5=89（need=89）塞得进 → 89。
+    ceil_skipped, _ = wg_send_failure.wait_plan(
+        wg_budget.WAIT_BUDGET - wg_send_failure.UNMUTE_MARGIN, elapsed=0.4)
+    one_short, _ = wg_send_failure.wait_plan(
+        wg_budget.WAIT_BUDGET - wg_send_failure.UNMUTE_MARGIN - 1, elapsed=0.4)
     return (allowed == wg_budget.WAIT_BUDGET and refused is None and tight is None
             and spent is None
+            and ceil_skipped is None            # need=90 > remaining=89.6 → 不硬等
+            and one_short == wg_budget.WAIT_BUDGET - 1   # mute=84 → need=89 塞得进，返回 need
             and any(f"超出单次调用等待预算 {wg_budget.WAIT_BUDGET}s" in ln for ln in lines))
 
 

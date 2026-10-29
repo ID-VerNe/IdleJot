@@ -629,13 +629,24 @@ def open_followup(event_id, group_id="", wanted=True, not_before=None, after_ref
     """
     if not wanted:
         return None
-    state = plugins.emit("reply_sent", {
-        "settings": _plugin_settings(),
-        "group_id": group_id,
-        "event_id": event_id,
-        "after_ref": event_id if after_ref is None else after_ref,
-        "not_before": not_before,
-    })
+    # 开窗是「附加能力」，开不出来最多少收几条接话；已经发出去的那条回复不该因此
+    # 变成一次异常退出（issue #227）。save() 的 OSError、插件 fn() 的异常都从这里
+    # 冒出来——一个 try 同时盖住，与同文件 _plugin_settings() 的「设置坏了不该让
+    # 已发出的回复报错」同一句口径。打一行失败行后返回 None，调用点形状不变：
+    # SENT 与退出码仍只由发送结果决定。
+    try:
+        state = plugins.emit("reply_sent", {
+            "settings": _plugin_settings(),
+            "group_id": group_id,
+            "event_id": event_id,
+            # 窗口游标的记号（issue #203）：回唤醒行给裸数字 / ``id:<n>``，回追问行
+            # 给 ``q<n>``。省略时退回 ``event_id``，与改前一致。
+            "after_ref": event_id if after_ref is None else after_ref,
+            "not_before": not_before,
+        })
+    except Exception as exc:  # noqa: BLE001  开窗坏了不该让已发出的回复报错
+        print(f"[追问] 开窗失败：{type(exc).__name__}: {exc}（消息已发送，本轮不会再开窗）")
+        return None
     if state:
         print(f"[追问] 窗口已开：还可跟 {state['budget']} 条，"
               f"静默 {state['idle_seconds']}s 后收回")

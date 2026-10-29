@@ -81,6 +81,13 @@
 整栈」；账本段的上一轮历史统一带「仅供参考」，不再与现刻结论同形；空栈跑 `--stop`
 会多一句「栈本来就没在跑：无事可做」（退出码仍为 0，`start-bot.pyw` 的幂等前停依赖它）。
 
+**WAKE 退出空窗不说「消息照收」（issue #212）**：「消息照收」说的是「NapCat 在线 ∧ collector
+在跑」两环，与「有没有人在值守」无关。账本最近一条 stop 原因为 `WAKE` 时，正是刚叫醒、
+等重挂的空窗——消息在落盘但没人值守把它变成唤醒，空窗内新 @ 只能靠重挂后首轮 `BACKFILL`
+补扫。此刻监听行改说「等待重挂——空窗内新 @ 靠重挂后首轮 BACKFILL 补扫（此刻无人值守）」，
+不与「消息照收」并排。判据钉死在 `reason == "WAKE"`：NO_WORK / DOSSIER_DUE / WATCH_FAILED /
+硬杀 / 无账本一律仍说「消息照收」。
+
 **禁言解禁会叫醒监听（issue #192）**：账本（`state/wg_send_failure.json`）上压着未定论的
 禁言时，`watch.py` 每 15 秒现查一次 `shut_up_timestamp` / `group_all_shut`；确认解禁就打印
 `UNMUTED: 禁言已于 HH:MM:SS 实测解除（账本原判 …）`，照常以 `WAKE` 收尾并返回 0，所以

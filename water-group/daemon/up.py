@@ -233,8 +233,21 @@ def report(exclude_pids=None, resident_pid=None):
             silent.append("NapCat 离线，消息到不了本机")
         if not collector_pids(exclude=exclude_pids):
             silent.append("collector 未运行，消息不会被写入本地事件")
+        # issue #212：「消息照收」说的是「NapCat 在线 ∧ collector 在跑」两环，与
+        # 「有没有人在值守」无关。WAKE 退出正是刚叫醒、等重挂的空窗——消息确实在落盘，
+        # 但没人值守把它变成唤醒，这几分钟的新 @ 只能靠重挂后的 BACKFILL 事后补扫。
+        # 此时还说「消息照收」会让空窗读起来像一切正常，所以结论改成「等待重挂」，
+        # 与「消息照收」显式分开。判据钉死在账本最近一条 reason==WAKE：NO_WORK /
+        # DOSSIER_DUE / WATCH_FAILED / 硬杀（心跳过期无退出记录）/ 无账本一律保持原样。
+        # 不能图省事用「没有 specs」当判据——#142 的 healthy 对照组（空 specs、无账本）
+        # 必须仍说「消息照收」。
+        wake_just_fired = (lambda rec: bool(rec)
+                           and rec.get("state") == "exited"
+                           and rec.get("reason") == "WAKE")(wg_listener_state.read())
         if silent:
             listener += "，" + "；".join(silent) + "——收不到任何消息，也没人会叫醒你"
+        elif wake_just_fired:
+            listener += "，等待重挂——空窗内新 @ 靠重挂后首轮 BACKFILL 补扫（此刻无人值守）"
         else:
             listener += "，消息照收，但没人会叫醒你"
         # issue #112：这一行以前只有现算的进程结论。空窗期里没人跑 --status 时，

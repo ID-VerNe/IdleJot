@@ -56,6 +56,7 @@ for path in ("home", "state"):
 
 from fixture_server import FixtureHandler, fixture_server  # noqa: E402
 import reply  # noqa: E402
+import followup  # noqa: E402  (open_followup 写盘护栏的 monkeypatch 点，issue #227)
 import wg_budget  # noqa: E402
 import wg_clock  # noqa: E402
 import wg_send_failure  # noqa: E402
@@ -401,6 +402,47 @@ def 成功路径文案不变():
     code, out = _run(["1", TEXT, "--at", "群友A", "--no-wait"])
     return (code == 0 and "send: retcode=0 message_id=4242" in out
             and "SENT" in out and "SEND_FAILED" not in out)
+
+
+@case
+def 开窗失败不拖垮已发出的回复():
+    """issue #227：开窗写盘失败不许让一次成功的发送表现为失败。
+
+    现场是「窗口父目录建不出来」（磁盘/权限/占位文件的真实形态）：`reply.main()`
+    在 `print("SENT")` 之后调 `open_followup()`，`followup.save()` 的 `STATE.mkdir` /
+    `WINDOW.write_text` 抛 `OSError` 系，旧实现一路冒泡到 CLI，进程带 traceback 退出、
+    退出码非 0——而群里那条已经发出去。Agent 按 `SENT`+traceback + 非零退出码读成
+    「发送可能失败」，于是同一条消息再回一遍（重复回复）；`--wait` 续挂也被整段跳过。
+
+    用 monkeypatch `followup.save` 抛 `OSError` 站在 issue 复现里「窗口父目录不可建」
+    的位置（避开 Windows mkdir-on-file 的 OS 特异性，CI matrix 可移植）。断言输出里
+    **有** `SENT`、**有** `[追问] 开窗失败`、**有** `消息已发送`，**没有** `Traceback`、
+    **没有** `SEND_FAILED`、**没有** `窗口已开`（没开成就不许说开了），且 `main()` 正常
+    返回 0——`SENT` 与退出码只由发送结果决定。
+
+    对照组：门控关（`--no-followup`）时 `wanted=False`，连 `plugins.emit` 都不调，
+    不出失败行——这条不能被「开窗失败」的 monkeypatch 误染（门控不开是合法的静默 None）。
+    """
+    _reset(time.time(), shut_up=0)
+    real = followup.save
+    followup.save = lambda _state: (_ for _ in ()).throw(
+        OSError("窗口父目录建不出来（issue #227 复现形态）"))
+    try:
+        code, out = _run(["1", TEXT, "--at", "群友A", "--no-wait"])
+    finally:
+        followup.save = real
+    ok = (code == 0 and "SENT" in out and "[追问] 开窗失败" in out
+          and "消息已发送" in out and "Traceback" not in out
+          and "SEND_FAILED" not in out and "窗口已开" not in out)
+    if not ok:
+        print(f"    退出码={code} 输出={out.strip()!r}")
+    if not ok:
+        return False
+    # 对照组：门控关时不走 emit，不该有失败行
+    _reset(time.time(), shut_up=0)
+    code2, out2 = _run(["1", TEXT, "--at", "群友A", "--no-wait", "--no-followup"])
+    return (code2 == 0 and "SENT" in out2 and "开窗失败" not in out2
+            and "窗口已开" not in out2)
 
 
 @case

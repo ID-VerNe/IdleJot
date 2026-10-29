@@ -75,6 +75,7 @@ import wg_aliases  # noqa: E402  (别名指向渲染，issue #30)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_dossiers  # noqa: E402  (群友画像 / 群级术语，issue #163)
 import wg_images  # noqa: E402  (图片标记渲染)
+import wg_videos  # noqa: E402  (视频标记渲染，issue #200)
 import wg_isolation  # noqa: E402  (本会话只管一个群，issue #164 PA)
 import wg_listener_state  # noqa: E402  (监听存亡账本的续心跳，issue #112)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
@@ -320,7 +321,7 @@ def main():
             print(wg_clock.now_line())
             for e in fresh:
                 stamp = wg_clock.clock_ms(e.get("timestamp"))
-                images = wg_images.render(e)
+                images = wg_images.render(e) + wg_videos.render(e)
                 quotes = wg_quotes.render_event(e)
                 # 正文按正文字数裁、截断了带 --show 指引（issue #32）：
                 # 80 字额度不再被 [引用 QQ 消息 <id>]@<qq> 这类段占位吃掉。

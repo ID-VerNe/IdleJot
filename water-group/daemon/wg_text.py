@@ -246,6 +246,7 @@ def _print_event(event_id, payload, source):
     import wg_clock
     import wg_images
     import wg_quotes
+    import wg_videos
 
     stamp = wg_clock.stamp((payload.get("timestamp") or 0) / 1000)
     print(f"id={event_id} {stamp} {payload.get('sender') or '?'}（{source}）")
@@ -259,10 +260,13 @@ def _print_event(event_id, payload, source):
         print(line)
     suffix = wg_quotes.render_event(payload)
     images = wg_images.render(payload)
+    videos = wg_videos.render(payload)
     if suffix:
         print(suffix)
     if images:
         print(images)
+    if videos:
+        print(videos)
     return 0
 
 

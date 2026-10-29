@@ -474,7 +474,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 71 | `reply` | `check_unmute_probe.py` | 禁言解禁要叫醒值守的监听：解禁瞬时 WAKE、仍禁言/探测失败/全员禁言静默且不冒充解禁、节流两档、只读入口口径不变、listen 转述完整（#192）；禁言期间不扫追问窗口、窗口原封不动、解禁与无账本两组对照照常 [追问] 唤醒（#197） |
 | 72 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
 | 73 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
-| 74 | `reply` | `check_video_visibility.py` | 视频段标记可执行：唤醒行/--list/--show 三处都带 video.py 命令、无地址与文件段误判都会说明、daemon 下载判据与服务端同值（#200） |
+| 74 | `reply` | `check_video_visibility.py` | 视频段标记可执行：唤醒行/--list/--show 三处都带 video.py 命令、无地址与文件段误判都会说明、daemon 下载判据与服务端同值；抽帧在缺 ffmpeg / 时长未知 / 短时长/失败时都说实话（#200） |
 | 75 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、四种格式都真能发、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度（超了拒、额度内照发）、不回退计划通道、发图也记账（#128） |
 | 76 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
 | 77 | `reply` | `check_wake_dossier.py` | 沉淀的群友画像必须到达唤醒行 / --list / --context（不是只挂在 MCP 的 chat_guidance 里）：命中才附、不串到别人身上、每人一行有硬顶且不挤正文额度、群级术语一次一块不跨群、引擎坏了照常唤醒（#163） |

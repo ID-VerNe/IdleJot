@@ -4,6 +4,7 @@
 video.py --event <id> --index <i>」时就跑它。
 
     video.py --event 10123 [--index 0] [--max-mb 40]
+    video.py --frames --event 10123 [--index 0]     # 抽首/中/尾 3 帧（需要 ffmpeg）
     video.py --recent 10
     video.py --list
 
@@ -299,7 +300,31 @@ def fetch(event_id, index, max_mb):
                source="renewed" if tried > len(attempts) else "stored")
     print(f"{row['local_path']}")
     print(f"字节：{row['bytes']}，sha256：{row['sha256'][:12]}…")
+    print(f"下一步看内容：video.py --frames --event {event_id} --index {index}")
     return 0
+
+
+def frames(event_id, index):
+    """抽帧：已缓存的视频就地抽，没缓存先下再抽。返回进程退出码。
+
+    与 ``fetch`` 分开是刻意的——下载可能因 rkey 过期失败，而抽帧是在**已有文件**
+    上做；把两件事混成一个函数会让「只想重抽一次」也必须走下载分支。
+    """
+    import wg_frames  # noqa: PLC0415  延迟导入：不抽帧的运行不需要探测 ffmpeg
+
+    cached = load_index().get((event_id, index)) or {}
+    local = cached.get("local_path") if cached.get("local_path") else ""
+    if not local or not Path(local).is_file():
+        print(f"id={event_id} i={index} 还没下载到本地，先下载。")
+        code = fetch(event_id, index, MAX_MB)
+        if code != 0:
+            return code
+        cached = load_index().get((event_id, index)) or {}
+        local = cached.get("local_path") or ""
+    out = VIDEOS / f"{event_id}-{index}-frames"
+    result = wg_frames.extract(local, out, stem=f"{event_id}-{index}")
+    print(wg_frames.render(result, event_id=event_id, index=index))
+    return 0 if result["ok"] else 1
 
 
 def recent(limit):
@@ -345,8 +370,12 @@ def main(argv=None):
     parser.add_argument("--max-mb", type=int, default=MAX_MB, help=f"单文件上限 MB，默认 {MAX_MB}")
     parser.add_argument("--recent", type=int, help="列出最近 N 条下载记录")
     parser.add_argument("--list", action="store_true", help="列出事件流里的视频段，不下载")
+    parser.add_argument("--frames", action="store_true",
+                        help="抽首/中/尾三帧 PNG（需要 ffmpeg），配合 --event/--index")
     args = parser.parse_args(argv)
     if args.event is not None:
+        if args.frames:
+            return frames(args.event, args.index)
         return fetch(args.event, args.index, args.max_mb)
     if args.recent is not None:
         return recent(args.recent)

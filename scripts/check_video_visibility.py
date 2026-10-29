@@ -4,13 +4,18 @@
 ``url`` 留在了 ``unsupported.raw`` 里，但唤醒行只印中文标签——「可下载」不是一句
 状态词，必须带具体命令，否则 Agent 每次都要现场试错。
 
-本门禁钉住四件事：
+本门禁钉住五件事：
 
   1. 唤醒行 / ``--list`` / ``--show`` 三处都带 ``video.py --event <id> --index <i>``；
   2. 没有下载地址时明说「无下载地址」，不许留一个裸 ``[视频]``；
   3. ``file`` 段只有在名字像视频时才当视频，普通文档不冒充；
   4. daemon 侧的下载判据与 ``chatlocal/mcp_media_transport.py`` 同值（重定向上限、
-     超时、拒绝非公网、只认 http/https）——判据漂移就是安全边界漂移。
+     超时、拒绝非公网、只认 http/https）——判据漂移就是安全边界漂移；
+  5. 抽帧：ffmpeg 缺失时**明说缺什么**、时长未知时只抽首帧而不是猜、
+     短时长去重不抽三张一样的图。
+
+抽帧那组用假子进程桩（``winconsole.run_hidden``）与假 ffmpeg 可执行文件，所以
+**CI 上没装 ffmpeg 也能验**——否则「本机有、CI 没有」会让这组静默跳过。
 
     .venv/Scripts/python.exe scripts/check_video_visibility.py
 """
@@ -18,6 +23,7 @@ import contextlib
 import io
 import json
 import os
+import stat
 import sys
 import time
 from pathlib import Path
@@ -36,6 +42,7 @@ SELF = "10001"
 os.environ["TULPA_WG_STATE"] = str(STATE)
 
 import wg_download  # noqa: E402
+import wg_frames  # noqa: E402
 import wg_videos  # noqa: E402
 import video  # noqa: E402
 
@@ -199,6 +206,115 @@ def 列表入口读得到视频段():
         video.list_candidates()
     text = buf.getvalue()
     return f"{EID_WAKE} i=0" in text
+
+
+# ---- 抽帧（P3）：用假 ffmpeg/ffprobe，CI 上没装也能验 ----------------------
+
+
+class FakeRun:
+    """替换 ``winconsole.run_hidden``：按命令里有没有 ``-show_entries`` 区分
+    ffprobe（报关时长）与 ffmpeg（写出一张假 PNG）。"""
+
+    def __init__(self, duration="6.0", ffmpeg_ok=True, write=True):
+        self.duration = duration
+        self.ffmpeg_ok = ffmpeg_ok
+        self.write = write
+        self.calls = []
+
+    def __call__(self, command, **kwargs):
+        self.calls.append(command)
+        if "-show_entries" in command:
+            out = "" if self.duration is None else self.duration
+            return type("R", (), {"returncode": 0 if self.duration else 1,
+                                  "stdout": out, "stderr": ""})()
+        if self.write:
+            target = Path(command[-1])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+        if self.ffmpeg_ok:
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        return type("R", (), {"returncode": 1, "stdout": "",
+                              "stderr": "Invalid data found when processing input"})
+
+
+@contextlib.contextmanager
+def fake_tools(run, have=True):
+    """临时替换 ``wg_frames.fftools`` 与 ``winconsole.run_hidden``。"""
+    real_tools = wg_frames.fftools
+    real_run = wg_frames.winconsole.run_hidden
+    wg_frames.fftools = lambda: (("ffmpeg", "ffprobe") if have else (None, None))
+    wg_frames.winconsole.run_hidden = run
+    try:
+        yield run
+    finally:
+        wg_frames.fftools = real_tools
+        wg_frames.winconsole.run_hidden = real_run
+
+
+@case
+def ffmpeg_缺失时明说缺什么():
+    """缺 ffmpeg 不许静默变成「没有内容」——那会让 Agent 以为视频是空的。"""
+    with fake_tools(FakeRun(), have=False):
+        result = wg_frames.extract(TMP / "whatever.mp4", TMP / "f0")
+    text = wg_frames.render(result)
+    return (not result["ok"]) and "ffmpeg" in result["problem"] and "PATH" in text
+
+
+@case
+def 抽帧三帧并带具体路径():
+    src = TMP / "t.mp4"
+    src.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    with fake_tools(FakeRun(duration="6.0")) as run:
+        result = wg_frames.extract(src, TMP / "f1", stem="x")
+    if not result["ok"] or len(result["frames"]) != 3:
+        return False
+    # 首/中/尾，且都真的落在候选时刻上
+    if [f["at"] for f in result["frames"]] != [0.0, 3.0, 5.4]:
+        print(f"    实际时刻：{[f['at'] for f in result['frames']]}")
+        return False
+    rendered = wg_frames.render(result, event_id=EID_OK, index=0)
+    return all(f["path"] in rendered for f in result["frames"])
+
+
+@case
+def 时长未知只抽首帧不猜():
+    """问不到时长就只抽首帧。猜一个时长去抽中间，等于编内容。"""
+    src = TMP / "t2.mp4"
+    src.write_bytes(b"x")
+    with fake_tools(FakeRun(duration=None)):
+        result = wg_frames.extract(src, TMP / "f2", stem="y")
+    return result["ok"] and [f["at"] for f in result["frames"]] == [0.0]
+
+
+@case
+def 短时长不抽三张一样的图():
+    """0.6 秒的视频：0/0.3/0.54 三帧几乎一样，去重后不该超过 2 帧。"""
+    src = TMP / "t3.mp4"
+    src.write_bytes(b"x")
+    with fake_tools(FakeRun(duration="0.6")):
+        result = wg_frames.extract(src, TMP / "f3", stem="z")
+    times = [f["at"] for f in result["frames"]]
+    return result["ok"] and len(times) < 3 and len(set(times)) == len(times)
+
+
+@case
+def 抽帧失败要说真实原因():
+    """解码失败时把 ffmpeg 的那句话带出来，不许只说「失败」。"""
+    src = TMP / "t4.mp4"
+    src.write_bytes(b"not really a video")
+    with fake_tools(FakeRun(ffmpeg_ok=False, write=False)):
+        result = wg_frames.extract(src, TMP / "f4", stem="w")
+    text = wg_frames.render(result)
+    return (not result["ok"]) and "Invalid data" in result["problem"]
+
+
+@case
+def 子进程不开黑框():
+    """抽帧走 winconsole.run_hidden（issue #39），不许自己手写 creationflags。"""
+    source = (ROOT / "water-group" / "daemon" / "wg_frames.py").read_text(encoding="utf-8")
+    return ("winconsole.run_hidden" in source
+            and "CREATE_NO_WINDOW" not in source
+            and "creationflags" not in source)
 
 
 def main():

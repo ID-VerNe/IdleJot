@@ -110,6 +110,9 @@ NO_RESTART = {
     # 所以**不**在这一列。
     "water-group/daemon/video.py": "one-shot CLI",
     "water-group/daemon/wg_download.py": "one-shot CLI (video) downloader",
+    # issue #200 P3：抽帧只被 video.py --frames 用；ffmpeg 是可选外部依赖，
+    # 守护进程里没有它的副本，改了下次调用自然生效。
+    "water-group/daemon/wg_frames.py": "one-shot CLI (video) frame extractor",
     "water-group/daemon/reply.py": "one-shot CLI",
     "water-group/daemon/watch.py": "one-shot CLI",
     "water-group/daemon/wg_logs.py": "one-shot log reader",

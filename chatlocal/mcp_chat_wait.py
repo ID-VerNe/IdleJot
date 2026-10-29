@@ -60,8 +60,19 @@ class ChatWaitMixin:
                 last_turn=db.execute("SELECT payload FROM chat_turn_plans WHERE session_id=? ORDER BY created DESC LIMIT 1",(sid,)).fetchone()
                 if last_turn:
                     try:
-                        if json.loads(last_turn['payload']).get('action')=='silence':
+                        # Only `silence` closes the window ("this round is over").
+                        # `wait` deliberately leaves it alone: it means "not
+                        # deciding yet", not "nobody is talking to me". `ask`
+                        # fills it — the agent just opened its mouth and a peer's
+                        # next message, even without an @, is the answer it must
+                        # see. Filling happens once per plan, before the
+                        # decrement below, so the budget still runs out normally.
+                        action = json.loads(last_turn['payload']).get('action')
+                        if action=='silence':
                             dialogue_window['remaining_followups']=0
+                        elif action=='ask':
+                            dialogue_window['remaining_followups']=followup_turns
+                            dialogue_window['active_until']=time.monotonic()+followup_seconds
                     except Exception:pass
             while True:
                 if cancel.is_set():return dict(event='cancelled',messages=[],note='仅取消此次等待；会话未停止，原进度可接续。')

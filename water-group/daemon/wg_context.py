@@ -33,6 +33,7 @@ if str(HERE) not in sys.path:
 import wg_aliases  # noqa: E402  (群号 → 别名视图，issue #30)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_dossiers  # noqa: E402  (群友画像，issue #163)
+import wg_event_ref  # noqa: E402  (来源标记的唯一格式，issue #216)
 import wg_images  # noqa: E402  (图片标记渲染，issue #27)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
@@ -82,19 +83,26 @@ def recent_chatter(limit, around=None):
         db = wg_text.connect_ro(DB, timeout=5)
     except sqlite3.Error:
         return []
-    sql = "SELECT id, payload, media FROM chat_inbox WHERE session_id=?"
+    # 会话号一并取回（LEFT JOIN，issue #219）：payload 缺 conversation_id 的行走
+    # 会话行那一路；JOIN 会把这些行整批吞掉，所以要 LEFT。
+    sql = ("SELECT i.id, i.payload, i.media, s.conversation_id"
+           " FROM chat_inbox i LEFT JOIN chat_sessions s ON s.id = i.session_id"
+           " WHERE i.session_id=?")
     params = [sid]
     if around:
-        sql += " AND id<=?"
+        sql += " AND i.id<=?"
         params.append(int(around))
-    sql += " ORDER BY id DESC LIMIT ?"
+    sql += " ORDER BY i.id DESC LIMIT ?"
     params.append(max(1, int(limit)))
     out = []
     try:
-        for event_id, payload, raw_media in reversed(db.execute(sql, params).fetchall()):
+        for event_id, payload, raw_media, session_cid in reversed(
+                db.execute(sql, params).fetchall()):
             try:
                 data = json.loads(payload)
             except ValueError:
+                continue
+            if not isinstance(data, dict):
                 continue
             if data.get("synthetic"):
                 continue
@@ -109,8 +117,11 @@ def recent_chatter(limit, around=None):
                 "ts": data.get("timestamp"),
                 "self": bool(data.get("is_self")),
                 "recalled": bool(data.get("recalled")),
-                # 群号：别名指向按群取覆盖行并集（issue #30）。
-                "conversation_id": data.get("conversation_id") or "",
+                # 群号：别名指向按群取覆盖行并集（issue #30）。payload 优先、会话行
+                # 兜底，与 `followup.since` / `wg_event_ref.resolve` 同一口径
+                # （issue #219：各读一次 payload，缺键就把整批读成跨群）。
+                "conversation_id": wg_event_ref.row_conversation(
+                    {"payload": data, "conversation_id": session_cid}),
                 # 引用原文：payload 里只有编号，父消息在同一会话的库里就查得到（issue #94）。
                 "quote": wg_quotes.render_payload(db, sid, data),
                 # 图片标记让 Agent 知道这条能看图，以及是否已经落盘（issue #27）。
@@ -167,5 +178,7 @@ def show_context(limit, around=None):
         tail = f"  <- {'、'.join(marks)}" if marks else ""
         quote = ("  " + row["quote"]) if row.get("quote") else ""
         alias_tail = "".join("  " + h for h in hits)
-        print(f"{row['id']} {stamp} {who}{tag}: {text}{quote}{('  ' + row['images']) if row.get('images') else ''}{alias_tail}{cards}{tail}")
+        # 行首编号后面紧跟来源（issue #216 / #204 的同形契约）：这些 id 只活在
+        # chat_inbox，`reply.py <id>` 与 `look.py --event <id>` 都按这个来源解析。
+        print(f"{row['id']} src={wg_event_ref.SRC_INBOX} {stamp} {who}{tag}: {text}{quote}{('  ' + row['images']) if row.get('images') else ''}{alias_tail}{cards}{tail}")
     return 0

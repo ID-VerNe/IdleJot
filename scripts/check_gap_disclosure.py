@@ -41,6 +41,10 @@
 14. `reply.py --list` 的缺口段标题下面紧跟窗口上下文（与 `--status` 同一份措辞），
     且排在 `id=-` 行之前（issue #148）：只列漏掉的 @ 而不给窗口时，读者仍然分不清
     这是昨夜停机账本还是刚发生的事故。
+15. `wg_gap._local_state` 的会话号解析与 `#219` 同一口径（payload 优先、会话行
+    兜底），但缺 `chat_sessions` 表时（夹具/旧库）必须退回只读 payload 的老写法，
+    不得把整段静默归零（issue #219）：LEFT JOIN 撞缺表会抛 `sqlite3.Error`，被
+    `except` 吞掉会让缺口报得**比实际小**，比改前的「报得大」更危险。
 
 全程临时 `WATER_GROUP_HOME` + `IDLEJOT_WG_DB`，不碰实机状态：
 
@@ -606,6 +610,51 @@ def 本地为空不报缺口():
             restore()
     g = entry["groups"][GROUP]
     return g["missing"] == 0 and g["at_me"] == 0 and g["window_start"] is None
+
+
+@case
+def 缺会话表时按payload算缺口():
+    """降级分支（issue #219）：`_local_state` 现在 LEFT JOIN `chat_sessions` 做会话号
+    兜底，但夹具/旧库可能没有那张表——LEFT JOIN 撞缺表会抛 `sqlite3.Error`，被
+    `except` 静默吞掉会让缺口**算成空的**（比改前的「报得比实际大」更危险，把真
+    漏的消息洗成「没漏」）。缺表时必须退回只读 payload 的老写法：payload 带键的
+    行仍要计入缺口，且不崩。
+
+    与 `compute_diff正确` 同一批假消息，唯一差别是显式保证没有 `chat_sessions`
+    表（`DROP TABLE IF EXISTS`，不依赖 `seed_inbox` 恰好不建它——若哪天夹具加了
+    那张表，这条仍钉着缺表降级分支，而不会悄悄改测 LEFT JOIN 路径）。若实现把
+    整段静默归零，这里 `missing` 会算成 4（b/c/d/e 全不在本地集合），断言即红。
+    """
+    with temp_dir(prefix="wg-gap-") as home:
+        fixture_home(home)
+        restore = gap_at(home)
+        try:
+            now = int(time.time())
+            write_launch(home, now)
+            seed_inbox(home, [("a", now - 3600, f"1:group:{GROUP}"),
+                              ("b", now - 3500, f"1:group:{GROUP}"),
+                              ("c", now - 3400, f"1:group:{GROUP}")])
+            # 显式去掉会话表：这条用例钉的是缺表降级，不依赖 seed_inbox 的默认形状。
+            db = sqlite3.connect(str(home / "data" / "mcp-access.sqlite3"))
+            try:
+                db.execute("DROP TABLE IF EXISTS chat_sessions")
+                db.commit()
+            finally:
+                db.close()
+            msgs = [
+                onebot_msg("b", now - 3500, "甲", "在"),
+                onebot_msg("c", now - 3400, "甲", "好"),
+                onebot_msg("d", now - 600, "乙", "在吗", at_qq=ACCOUNT),
+                onebot_msg("e", now - 300, "丙", "你好"),
+            ]
+            entry = wg_gap.compute(group_ids=[GROUP], fetch=make_fetcher(msgs), now=now)
+        finally:
+            restore()
+    g = entry["groups"][GROUP]
+    return (g["missing"] == 2 and g["at_me"] == 1
+            and len(g["at_me_lines"]) == 1
+            and g["at_me_lines"][0]["sender"] == "乙"
+            and "在吗" in g["at_me_lines"][0]["body"])
 
 
 # ---------- 契约 10：窗口右边界取 launch_epoch ----------

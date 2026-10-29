@@ -54,6 +54,7 @@ import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_images  # noqa: E402  (图片标记渲染，issue #35 追问行同款)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #164 PC)
+import wg_event_ref  # noqa: E402  (事件 id 的唯一解析入口，issue #216)
 import wg_text  # noqa: E402  (issue #169 PC：connect_ro 延迟导入门面)
 from wg_paths import data_dir, state_dir
 STATE = state_dir()
@@ -262,19 +263,26 @@ def since(after_id, session, not_before=None, limit=50):
     except sqlite3.Error:
         return []
     limit = max(1, int(limit))
-    sql = "SELECT id, payload, media, at FROM chat_inbox WHERE session_id=? AND id>?"
+    # 会话号一并取回（LEFT JOIN）：payload 可能没有 conversation_id（旧行、被裁过
+    # 的行），而会话行上一定有。LEFT JOIN 而不是 JOIN——会话行被删了也要读得出
+    # 消息，宁可群号空着，不能整批消失（issue #219）。
+    sql = ("SELECT i.id, i.payload, i.media, i.at, s.conversation_id"
+           " FROM chat_inbox i LEFT JOIN chat_sessions s ON s.id = i.session_id"
+           " WHERE i.session_id=? AND i.id>?")
     params = [session, int(after_id or 0)]
-    sql += " ORDER BY id LIMIT ?"
+    sql += " ORDER BY i.id LIMIT ?"
     out = []
     try:
         while True:
             rows = db.execute(sql, (*params, limit)).fetchall()
             if not rows:
                 break
-            for event_id, payload, raw_media, at in rows:
+            for event_id, payload, raw_media, at, session_cid in rows:
                 try:
                     data = json.loads(payload)
                 except ValueError:
+                    continue
+                if not isinstance(data, dict):
                     continue
                 try:
                     media = json.loads(raw_media or "[]")
@@ -284,7 +292,10 @@ def since(after_id, session, not_before=None, limit=50):
                     "id": event_id,
                     "sender": data.get("sender") or "",
                     # 追问行也要能取到群号：别名指向按群取覆盖行并集（issue #30）。
-                    "conversation_id": data.get("conversation_id") or "",
+                    # payload 缺键时回查会话行，口径归 `wg_event_ref.row_conversation`
+                    # （issue #219：这里以前只认 payload，读空就退成跨群主档）。
+                    "conversation_id": wg_event_ref.row_conversation(
+                        {"payload": data, "conversation_id": session_cid}),
                     # 闸门用原始文本：text 已经 collapse 空白，会把 " #ping" 洗成
                     # "#ping"；而 commands.command_key 要求行首、不 strip（#70）。
                     "raw": data.get("content") or "",
@@ -427,40 +438,33 @@ def status_text():
 
 
 def _group_of(payload):
-    """(group_id, onebot_message_id) from an inbox payload, or None."""
-    parts = str(payload.get("conversation_id") or "").split(":")
-    if len(parts) != 3 or parts[1] != "group":
-        return None
-    message_id = payload.get("onebot_message_id")
-    if not message_id:
-        return None
-    return parts[2], str(message_id)
+    """(group_id, onebot_message_id) from an inbox payload **alone**, or None.
+
+    字段名兼容（`onebot_message_id` / `message_id`）归 `wg_event_ref`（issue #216）：
+    这里只剩「只有 payload、没有行」时的薄封装，别再各写一份键名清单。
+
+    **有行的时候别用这个**——群号可能只在会话行上，payload 缺键它就回 `None`
+    （issue #219）。按 id 取一条走 `lookup()`，批量读走 `wg_event_ref.row_conversation()`。
+    """
+    return wg_event_ref.group_of_payload(payload)
 
 
 def lookup(event_id):
     """任意事件的 (group_id, onebot_message_id)，闲聊也找得到。
 
     reply.py 以前只查 wg_events.jsonl，而追问唤醒要回的消息是被 mention_only
-    滤掉的闲聊，压根不在那里面。chat_inbox 两条信息都有，拿它兜底，引用才挂得上去。
+    滤掉的闲聊，压根不在那里面。chat_inbox 有这些行，拿它兜底，引用才挂得上去。
     id 是 AUTOINCREMENT 的全局 rowid，跨会话唯一，不用再按会话过滤。
+
+    issue #216：解析统一走 `wg_event_ref.resolve()`——payload 缺字段时它回查
+    `chat_sessions.conversation_id` 与 `chat_inbox.message_id` 列。改前这里只认
+    payload 里的两个键，少一个就静默 `None`，而同一行 `--show` 读得出来。
+
+    issue #219：批量读（`since()` / `wg_context.recent_chatter()`）走的是同一个
+    `wg_event_ref.row_conversation()`，别再各写一份「payload.get('conversation_id')」。
     """
-    try:
-        db = wg_text.connect_ro(DB, timeout=5)
-    except sqlite3.Error:
-        return None
-    try:
-        row = db.execute("SELECT payload FROM chat_inbox WHERE id=?",
-                         (int(event_id),)).fetchone()
-    except sqlite3.Error:
-        return None
-    finally:
-        db.close()
-    if not row:
-        return None
-    try:
-        return _group_of(json.loads(row[0]))
-    except ValueError:
-        return None
+    ref = wg_event_ref.resolve(event_id)
+    return ref.target if ref else None
 
 
 def latest_group_id():
@@ -474,7 +478,7 @@ def latest_group_id():
         return ""
     try:
         row = db.execute(
-            "SELECT payload FROM chat_inbox WHERE session_id=? ORDER BY id DESC LIMIT 1",
+            "SELECT id FROM chat_inbox WHERE session_id=? ORDER BY id DESC LIMIT 1",
             (sid,)).fetchone()
     except sqlite3.Error:
         return ""
@@ -482,11 +486,8 @@ def latest_group_id():
         db.close()
     if not row:
         return ""
-    try:
-        found = _group_of(json.loads(row[0]))
-    except ValueError:
-        return ""
-    return found[0] if found else ""
+    ref = wg_event_ref.resolve(row[0])
+    return ref.group_id if ref else ""
 
 
 def show():

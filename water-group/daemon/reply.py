@@ -61,6 +61,7 @@ import wg_gap  # noqa: E402  (停机窗口缺口账本，issue #114)
 import winconsole  # noqa: E402
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #128)
+import wg_event_ref  # noqa: E402  (事件 id 的唯一解析入口，issue #216)
 import wg_images  # noqa: E402
 import wg_isolation  # noqa: E402  (群身份与跨群护栏，issue #164)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
@@ -265,19 +266,36 @@ def self_account():
 AT_TOKEN = re.compile(r"@\{([^{}\n\\]{1,24})\}")
 
 
-def event_target(event_id):
-    """(group_id, onebot_message_id) for an event the collector already stored."""
-    for row in read_events():
-        if row.get("id") != event_id:
-            continue
-        parts = str(row.get("conversation_id") or "").split(":")
-        if len(parts) == 3 and parts[1] == "group" and row.get("onebot_message_id"):
-            return parts[2], str(row["onebot_message_id"])
+def event_ref(event_id):
+    """一条事件的 `Ref`（来源 + 群 + 编号），一次解析到位。
+
+    issue #216：解析归 `wg_event_ref` 一处——来源顺序 `wg_events` → `chat_inbox`，
+    字段名兼容与「回查库列」都在那里。改前这里先自己扫一遍事件流、再交给追问插件
+    解析 payload 里的 `onebot_message_id`：payload 少一个键就回 `None`，而同一行
+    `--show` / `--context` 读得出来，于是「读得到、回不了」。
+
+    解析器两个来源都没有，才问插件那一路：`event_lookup` 是扩展点（私有插件可以
+    自己接），默认实现 `followup.lookup` 就是同一个解析器——所以这条只在「id 真的
+    不在库里」时多走一次，不会盖掉上面的结论。
+    """
+    ref = wg_event_ref.resolve(event_id)
+    if ref is not None:
+        return ref
+    target = plugins.emit("event_lookup", {"event_id": event_id})
+    if not target:
         return None
-    # 追问唤醒要回的是被 mention_only 滤掉的闲聊，wg_events.jsonl 里没有它，
-    # 只能回库拿编号——不然引用挂不上，群号也只能靠猜。DB 兜底归追问插件，
-    # 不过它的三态开关：关了窗口也要能回 --context 里看到的闲聊（PD2a）。
-    return plugins.emit("event_lookup", {"event_id": event_id})
+    return wg_event_ref.Ref(event_id=int(event_id), source=wg_event_ref.SRC_PLUGIN,
+                            group_id=str(target[0]), message_id=str(target[1] or ""))
+
+
+def event_target(event_id):
+    """(group_id, onebot_message_id) for an event the collector already stored.
+
+    群号拿得到、编号拿不到时回 `(群号, "")`：这条能回，只是挂不上引用。改前这种行
+    与「id 根本不存在」一样回 `None`，钉死群下直接抛 `CrossGroup`「查不到所属群」。
+    """
+    ref = event_ref(event_id)
+    return ref.target if ref else None
 
 
 _ROSTER = {}
@@ -628,9 +646,10 @@ def _plugin_settings():
 def open_followup(event_id, group_id="", wanted=True, not_before=None):
     """发送成功后开追问窗口，让话题继续；wanted=False 或插件停了就不开。
 
-    not_before 是发送开始的墙上时间：窗口只收这之后的发言，避免把 Agent 思考
-    期间堆下的历史闲聊算成接话（issue #29）。group_id 带进去，三态门控按群判
-    （issue #4 PD2a）——这个群关了追问窗口，别的群照开。
+    not_before 是发送开始的墙上时间，只作**预算标记**：处理期间堆下的历史闲聊照常
+    唤醒但不扣额度（issue #29 / #117），只有发送开始之后开口的接话才占额度——「开口」
+    按消息自己的时间判，不是本地收到时刻（issue #218）。group_id 带进去，三态门控
+    按群判（issue #4 PD2a）——这个群关了追问窗口，别的群照开。
     """
     if not wanted:
         return None
@@ -821,7 +840,8 @@ def main():
             return 1
         print(f"  note: id={target} 已过待回时效（{age_min:.0f} 分钟前），--force 放行")
 
-    found = event_target(target)
+    ref = event_ref(target)
+    found = ref.target if ref else None
     # issue #164 PB（P0 护栏）：目标事件必须属于本会话的群，否则不进 plan()、
     # 不发送、不记账。改前这里是 `found[0] if found else (args.group or
     # latest_group_id())`——目标事件自己的群直接拿来发，一句归属校验都没有：
@@ -857,7 +877,8 @@ def main():
                   f"（{wg_isolation.describe()}）——把它们记成「已回」会让另一个"
                   f"会话永远不再回这些消息")
             return 1
-    print(f"target={target} group={group_id} session={sid}")
+    print(f"target={target} group={group_id} session={sid}"
+          + (f" {ref.describe()}" if ref else ""))
     # 图片先校验再动手（issue #128）：坏路径在这里就退，一张都不发，也不打印后面
     # 那行「还有 N 条没回」——那会让 Agent 以为图已经发出去了。`limit` 一起传进去：
     # 图也是气泡，正文 + 图超过上限就在发之前拒（间隔 1.2s 会吃掉发送预算，#131）。
@@ -881,9 +902,10 @@ def main():
         print(f"  NOTE 还有 {len(missing)} 条没回：{ids}")
         print("       一条答得完就加 --also，答不完就先回这条再接着回")
 
-    # 追问窗口的时间下界：只把「发送开始之后」的发言算成接话。Agent 拿到唤醒后
-    # 可能隔十几分钟才发出回复，这期间群里堆的闲聊 id 都大于被回复的那条，按 id
-    # 扫会把它们全算进预算，窗口开出来就被自己关掉（issue #29）。
+    # 追问窗口的时间下界：只把「发送开始之后**开口**」的发言算成接话（开口按消息
+    # 自己的时间判，不是本地收到时刻，issue #218）。Agent 拿到唤醒后可能隔十几分钟
+    # 才发出回复，这期间群里堆的闲聊 id 都大于被回复的那条，按 id 扫会把它们全算进
+    # 预算，窗口开出来就被自己关掉（issue #29）。
     send_started = time.time()
 
     # Quote through OneBot first: it is the only path that can point at a message

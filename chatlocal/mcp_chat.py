@@ -76,7 +76,6 @@ class MCPChat(ChatWaitMixin):
         self.lock = threading.RLock()
         self.waiters = set()
         self.events = {}
-        self.dialogue_windows = {}
         self.available = True
         with access.connect() as db:
             db.executescript('''
@@ -97,7 +96,11 @@ class MCPChat(ChatWaitMixin):
                                      ('gap_count', 'INTEGER NOT NULL DEFAULT 0'),
                                      ('persona_preset', "TEXT NOT NULL DEFAULT ''"),
                                      ('persona_name', "TEXT NOT NULL DEFAULT ''"),
-                                     ('dropped_through', 'INTEGER NOT NULL DEFAULT 0')]:
+                                     ('dropped_through', 'INTEGER NOT NULL DEFAULT 0'),
+                                     # issue #217：mention_only 的对话窗口落库，跨 wait
+                                     # 调用与进程重启存活；until 是墙钟（monotonic 不可比）。
+                                     ('dialogue_until', 'REAL NOT NULL DEFAULT 0'),
+                                     ('dialogue_turns', 'INTEGER NOT NULL DEFAULT 0')]:
                 if name not in columns:
                     db.execute(f'ALTER TABLE chat_sessions ADD COLUMN {name} {definition}')
             # Native message IDs and event sequence numbers cannot be mixed.

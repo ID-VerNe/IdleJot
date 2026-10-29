@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -148,6 +149,49 @@ def run_cases(cases, *, setup=None, prefix=True, catch=True):
             bad += 1
     print(tail_ok if not bad else f"{bad} 项失败" if prefix else f"{bad} case(s) failed")
     return 1 if bad else 0
+
+
+# `run_python` owns the text-decoding arguments, so a caller passing one is a
+# mistake: silently honouring it would put the locale back in charge (issue #240).
+_DECODING_KWARGS = ('text', 'universal_newlines', 'encoding', 'errors')
+
+
+def run_python(args, *, cwd=None, env=None, timeout=90, **kwargs):
+    """Run a Python child here and read its output as UTF-8 text (issue #240).
+
+    Every daemon entry point calls ``winconsole.ensure_utf8_stdio()`` and so
+    writes UTF-8 bytes no matter what the host locale is (AGENTS.md §2.5). A
+    bare ``subprocess.run(..., text=True)`` decodes with
+    ``locale.getpreferredencoding()`` -- cp936 on a Chinese Windows box -- and on
+    the first non-ASCII byte the reader thread raises and ``stdout`` comes back
+    as ``None``. The child had succeeded; the assertion then died on
+    ``"..." in None``.
+
+    That is a gate that is green on CI (UTF-8 locale) and red on the developer's
+    machine, and the red says nothing about what the gate is checking: three
+    check scripts had this shape (#240). Pinning the encoding here is what makes
+    "本地绿" mean the same thing as "CI 绿". ``errors="replace"`` is deliberate:
+    one stray byte should not throw away the whole output a failure report needs.
+
+    ``args`` are the child's argv *after* the interpreter; the interpreter is
+    prepended. Returns the ``CompletedProcess``.
+    """
+    for taken in _DECODING_KWARGS:
+        if taken in kwargs:
+            raise TypeError(
+                f'run_python owns {taken!r} (fixed to UTF-8); '
+                'pass it to subprocess.run instead of routing it through here')
+    return subprocess.run(
+        [sys.executable, *args],
+        cwd=str(cwd) if cwd is not None else None,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding='utf-8',
+        errors='replace',
+        timeout=timeout,
+        **kwargs,
+    )
 
 
 @contextmanager

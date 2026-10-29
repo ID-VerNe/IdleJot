@@ -863,6 +863,59 @@ def 直发失败不带引用也不回退():
             and "未退回计划通道：带 @ 的消息只能走 OneBot" in out)
 
 
+# ---------- issue #208: --at 全部未解析时不许出现「未退回计划通道」 ----------
+
+
+@case
+def at全部未解析_提前拦下零请求():
+    """issue #208 的核心现场：`--at <花名册里没有的名字>` 一个都没解析出来。
+
+    改前 build_segments 把未解析的名字按文字发出，has_at=False，OneBot 直发失败
+    时 `no_fallback_line(has_at=False)` 打「未退回计划通道：带引用…」——
+    与「没 @ 成」自相矛盾。issue 期望：要么发送前明确报错并停手，要么如实说明
+    本次没有 @ 段。这里钉前者：`AT_UNRESOLVED: <名字>` + 退出码 1 + 夹具
+    `send_group_msg` 零请求 + 输出里**不许**同时出现「未退回计划通道」与
+    `falling back`（issue 原话）。
+    """
+    now = time.time()
+    _reset(now, shut_up=0)
+    code, out = _run(["1", TEXT, "--at", "查无此人", "--no-wait"])
+    sends = len(FIX["sends"])
+    ok = (code == 1
+          and "AT_UNRESOLVED: 查无此人" in out
+          and sends == 0
+          and "未退回计划通道" not in out
+          and "falling back to the plan path" not in out
+          and "SEND_FAILED" not in out)
+    if not ok:
+        print(f"    输出={out.strip()!r} sends={sends}")
+    return ok
+
+
+@case
+def at部分解析_照发且不打未退回误判():
+    """对照组：`--at 群友A --at 查无此人` 部分解析成功——照发，at 段确实带了
+    能解析的人，未解析名字留在 build_segments 的 `at:` 前缀行里。
+
+    断言 has_at 路径成立（OneBot 直发），失败时按 has_at=True 走「带 @ 不回退」
+    的既有语义——不能因为「本次没全解析」就降级或自相矛盾。
+    """
+    now = time.time()
+    _reset(now, shut_up=0)
+    FIX["replies"].append({"status": "failed", "retcode": 1400,
+                           "message": PARAM_MESSAGE, "wording": "参数错误",
+                           "data": None})
+    code, out = _run(["1", TEXT, "--at", "群友A", "--at", "查无此人",
+                      "--no-quote", "--no-wait"])
+    sends = len(FIX["sends"])
+    return (code == 1
+            and sends == 1                       # 真发了一条
+            and "at: 查无此人 未解析" in out       # 未解析的名字仍被说明
+            and "SEND_FAILED: OneBot retcode=1400" in out
+            and "未退回计划通道：带 @ 的消息只能走 OneBot" in out
+            and "AT_UNRESOLVED" not in out)       # 部分解析不拦
+
+
 _BASE = [""]
 
 

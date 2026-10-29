@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 
 import wg_config
+import wg_event_ref
 from wg_paths import state_dir
 
 # 与 `wg_paths` / `wg_config` 同一族：新名在前，旧名兜底。
@@ -185,6 +186,10 @@ def target_group(event_id, found, group=None):
     查不到 ``found`` 的事件（追问窗口里被 mention_only 滤掉的闲聊）只能靠库兜底，
     兜底也没给出群号时**不**放行到「按最近一条猜」那条路——猜出来的群正是跨群误发
     的来源，所以这里要求调用方自己拿 ``--group`` 明示。
+
+    issue #216：拒绝信息把两种「查不到」分开说——``id 不在任何来源`` 与
+    ``id 在某来源里但取不到群号``（``wg_event_ref.explain()`` 给那半句）。改前
+    两者都是「查不到所属群」，读者会以为这条消息真的不属于本群。
     """
     gid = group if group is not None else group_id()
     if not gid:
@@ -194,6 +199,6 @@ def target_group(event_id, found, group=None):
             raise CrossGroup(f"id={event_id} 属于群 {found[0]}，本会话只管群 {gid}"
                              f"——跨群回复会把那条记成「已回」，另一个会话就不会再回它")
         return found
-    raise CrossGroup(f"id={event_id} 查不到所属群，本会话钉死群 {gid}，"
+    raise CrossGroup(f"id={event_id} {wg_event_ref.explain(event_id)}，本会话钉死群 {gid}，"
                      f"不能确认这条属于本群——请用 --group {gid} 明确指定，"
                      f"或确认这条事件来自本群")

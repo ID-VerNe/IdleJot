@@ -24,22 +24,14 @@ issue #32 的翻车形态：唤醒行 `(content or '')[:80]` 硬切 80 字，而
 `python water-group/daemon/xxx.py` 直接跑，`sys.path[0]` 是 daemon 目录自身，
 仓库根不在路径上——与 `dossier.py:event_ceiling()` 同一范式（issue #90）。
 """
-import json
-import os
 import re
-import sqlite3
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 
-from wg_paths import data_dir, state_dir
-
-STATE = state_dir()
-EVENTS = STATE / "wg_events.jsonl"
-DB = Path(os.environ.get("IDLEJOT_WG_DB")
-          or os.environ.get("TULPA_WG_DB", data_dir() / "mcp-access.sqlite3"))
+import wg_event_ref  # noqa: E402  (按 id 取行与来源顺序的唯一入口，issue #216)
 
 # 四个调用点的显示额度。曾经是 80 / 50 / 120 / 40 四个散落字面量；收口到这里
 # 之后改一处即四处一致，且每个数字的名字说明了它服务哪一行。
@@ -199,48 +191,6 @@ def bounded_handler(fn, *, limit, need_ck=True):
     return wrapped
 
 
-def _read_events():
-    rows = []
-    try:
-        for line in EVENTS.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line:
-                try:
-                    rows.append(json.loads(line))
-                except ValueError:
-                    continue
-    except OSError:
-        pass
-    return rows
-
-
-def _inbox_row(event_id):
-    """chat_inbox 里按全局 rowid 取一行；拿不到或库不可读都返回 None。
-
-    只读连接走 `wg_text.connect_ro`（issue #169 PC：`?mode=ro` 的唯一归属在
-    `chatlocal.sqlite_util.connect_ro`，本模块延迟导入），与 followup.lookup /
-    reply.recent_chatter 同一套姿势——这条路径永远不改库。
-    """
-    try:
-        db = connect_ro(DB, timeout=5)
-    except sqlite3.Error:
-        return None
-    try:
-        row = db.execute("SELECT payload FROM chat_inbox WHERE id=?",
-                         (int(event_id),)).fetchone()
-    except sqlite3.Error:
-        return None
-    finally:
-        db.close()
-    if not row:
-        return None
-    try:
-        payload = json.loads(row[0])
-    except ValueError:
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
 def _print_event(event_id, payload, source):
     """一条消息的全文。引用/转发展开字段在就原样附在后面，不截断。"""
     import wg_clock
@@ -294,14 +244,14 @@ def show_event(event_id):
     wg_events.jsonl 只收 @ 和关键词（mention_only），追问要读的闲聊不在里面，
     所以第二条路必须有；chat_inbox 每会话只留最近 1000 条
     （`chatlocal/mcp_chat.py` 的 cutoff），滚出去了就说滚出去了，不编。
-    """
-    for row in _read_events():
-        if row.get("id") == event_id:
-            return _print_event(event_id, row, "wg_events")
 
-    payload = _inbox_row(event_id)
-    if payload is not None:
-        return _print_event(event_id, payload, "chat_inbox")
+    issue #216：来源顺序与「按 id 取行」都归 `wg_event_ref.resolve()`——这里以前
+    自己写了一份「先扫事件流、再查库」的扫描，与 `reply.event_target` 各认一套
+    字段名，于是同一个 id 两个入口给出两种结论（这里读得到、那边回不了）。
+    """
+    ref = wg_event_ref.resolve(event_id)
+    if ref is not None:
+        return _print_event(event_id, ref.payload, ref.source)
 
     print(f"本地没有 id={event_id} 的全文。")
     print("可能的原因：它超过 1000 条被 chat_inbox 挤掉（每会话只留最近 1000 条）、")

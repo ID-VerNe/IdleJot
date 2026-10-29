@@ -16,13 +16,13 @@ The suite checks three layers:
 """
 import ast
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import check_fixture_support as fs  # noqa: E402
 from check_fixture_support import scratch_dir  # noqa: E402
 
 # 子进程探针会 import water_group.memory_engine，而 WG_HOME / DEFAULT_DB_PATH 都是
@@ -136,23 +136,31 @@ def test_no_string_import():
     assert not hits, "禁止用字符串导入 water-group 模块:\n  " + "\n  ".join(hits)
 
 
+def _run_probe(source):
+    """Run one probe script in a clean interpreter and return the CompletedProcess.
+
+    探针自己 print 的是中文与 ✓；解码钉在 run_python 里（issue #240）。
+    """
+    return fs.run_python(["-c", source], env=PROBE_ENV, timeout=120)
+
+
 def test_bridge_lazy():
     """Importing the bridge must not eagerly load optional dependencies."""
-    done = subprocess.run([sys.executable, "-c", LAZY_PROBE], cwd=ROOT, capture_output=True, text=True, env=PROBE_ENV)
+    done = _run_probe(LAZY_PROBE)
     assert done.returncode == 0, done.stderr
     assert "LAZY_OK" in done.stdout
 
 
 def test_single_module_identity():
     """In a clean interpreter both paths must be the same module object."""
-    done = subprocess.run([sys.executable, "-c", RUNTIME_PROBE], cwd=ROOT, capture_output=True, text=True, env=PROBE_ENV)
+    done = _run_probe(RUNTIME_PROBE)
     assert done.returncode == 0, done.stderr
     assert "PROBE_OK" in done.stdout
 
 
 def test_star_import_stays_clean():
     """Star import must expose the submodules and nothing from the bridge."""
-    done = subprocess.run([sys.executable, "-c", STAR_PROBE], cwd=ROOT, capture_output=True, text=True, env=PROBE_ENV)
+    done = _run_probe(STAR_PROBE)
     assert done.returncode == 0, done.stderr
     assert "STAR_OK" in done.stdout
 

@@ -737,6 +737,90 @@ def 补发成功后不再重复禁言尾巴():
             and "实测解禁" not in out)
 
 
+# ---------- issue #207：OneBot 直发失败不许回退计划通道 ----------
+
+
+def _append_wake(event_id, *, at_self=True):
+    """向事件流追加一条本群唤醒（`@ 机器人`），供「还有 N 条没回」用例用。"""
+    state = _SCRATCH / "state"
+    segments = [{"type": "at", "qq": SELF}] if at_self else []
+    row = {"id": event_id, "conversation_id": f"1:group:{GROUP}",
+           "onebot_message_id": f"msg-{event_id}", "sender": "群友A",
+           "content": "在吗", "segments": segments,
+           "timestamp": int(time.time() * 1000)}
+    path = state / "wg_events.jsonl"
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+@case
+def 直发失败带引用也不回退():
+    """issue #207 的核心现场：带引用（事件有 onebot_message_id）、不带 `--at`、
+    不带图，首条 OneBot 发送失败。
+
+    改前 `reply.py:931` 的 `if sent or has_at: return 1` 在 `sent=0` 且 `has_at=False`
+    时穿过去，落到 `:937` 的 `falling back to the plan path`——把带 `reply` 段的
+    消息交给计划通道，而 `send()` 的气泡写死 `kind=text`，引用段整个丢掉。断言：
+    不回退、失败真实原因在、未记账、计划通道零输出、报账行照旧（不删）。
+    """
+    now = time.time()
+    _reset(now, shut_up=0)
+    FIX["replies"].append({"status": "failed", "retcode": 1400,
+                           "message": PARAM_MESSAGE, "wording": "参数错误",
+                           "data": None})
+    code, out = _run(["1", TEXT, "--no-wait"])
+    replied = _SCRATCH / "state" / "wg_replied.jsonl"
+    ok = (code == 1
+          and "falling back to the plan path" not in out
+          and "没有可用批次" not in out
+          and "PLAN_FAILED" not in out
+          and "no OneBot id on record" not in out
+          and "SEND_FAILED: OneBot retcode=1400" in out
+          and "未退回计划通道" in out
+          and "NOTE 还有" not in out
+          and "cost:" in out                     # 报账行照旧（#88/#136，不因失败删）
+          and not replied.exists())              # 未记账
+    if not ok:
+        print(f"    输出={out.strip()!r} 记账文件存在={replied.exists()}")
+    return ok
+
+
+@case
+def 直发成功后才报还有N条():
+    """对照组：`NOTE 还有 N 条没回` 是「这条答完了、还有 N 条」，必须排在 `SENT` 之后。
+
+    只断言「NOTE 出现」的实现在失败路径也会把它打出来（issue #207 的症状），所以
+    这里同时断言：发送成功才说、且说在 `SENT` 之后。
+    """
+    now = time.time()
+    _reset(now, shut_up=0)
+    _append_wake(2)                              # 第二条 @ 本机的唤醒，仍待回
+    code, out = _run(["1", TEXT, "--no-wait"])
+    return (code == 0
+            and "SENT" in out
+            and "NOTE 还有 1 条没回：2" in out
+            and out.index("SENT") < out.index("NOTE 还有 1 条没回"))
+
+
+@case
+def 直发失败不带引用也不回退():
+    """`--no-quote` + 事件无引用：带 `--at` 的既有语义不许被回退破坏（#132 的
+    对照组）。断言「不回退 + 失败原因」与 `直发失败带引用也不回退` 同构，覆盖
+    `has_at=True` 那一路（`handle()` 里那句「未退回计划通道」）。
+    """
+    now = time.time()
+    _reset(now, shut_up=0)
+    FIX["replies"].append({"status": "failed", "retcode": 1400,
+                           "message": PARAM_MESSAGE, "wording": "参数错误",
+                           "data": None})
+    code, out = _run(["1", TEXT, "--no-quote", "--at", "群友A", "--no-wait"])
+    return (code == 1
+            and "falling back to the plan path" not in out
+            and "没有可用批次" not in out
+            and "SEND_FAILED: OneBot retcode=1400" in out
+            and "未退回计划通道：带 @ 的消息只能走 OneBot" in out)
+
+
 _BASE = [""]
 
 

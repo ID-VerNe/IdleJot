@@ -519,6 +519,25 @@ def send(group_id, bubble_segments, message_id, *, deliver, has_at, unmute=False
                   bubbles=len(bubble_segments), has_at=has_at, unmute=unmute)
 
 
+def no_fallback_line(*, has_at, has_image):
+    """OneBot 直发失败后，为什么不换计划通道（issue #207 的一句话）。
+
+    改前「带 @ 只能走 OneBot」写在 `handle()` 里（只在 `has_at` 时打），「带图只能
+    走 OneBot」写在 `reply.py` 的图片分支里——同一条纪律的两个副本，第二个副本
+    漏掉了带引用的文字消息（它照样在 `falling back to the plan path` 后把引用段
+    丢掉）。收敛到这里：`reply.py` 直发失败一律打这一句，`has_at` 与 `has_image`
+    按真值选措辞，两者都没有（带引用的文字）给通顺的实话。
+
+    返回**一句话**（带前导空格与句号），由调用方打印；`handle()` 与 `reply.py`
+    共用同一措辞，不各自复述。
+    """
+    if has_image:
+        return " 未退回计划通道：带图的消息只能走 OneBot，计划通道会把图片整个丢掉"
+    if has_at:
+        return " 未退回计划通道：带 @ 的消息只能走 OneBot（计划通道会降级成纯文本）"
+    return " 未退回计划通道：带引用的消息只能走 OneBot，计划通道会把引用降级成纯文本"
+
+
 def handle(sent, attempt, failure, *, group_id, bubbles, has_at, unmute=False):
     """失败处置的唯一入口：说清原因、诊断禁言、可选解禁补发；返回最终已发条数。
 
@@ -537,7 +556,7 @@ def handle(sent, attempt, failure, *, group_id, bubbles, has_at, unmute=False):
     for line in lines:
         print(line)
     if has_at:
-        print("  未退回计划通道：带 @ 的消息只能走 OneBot（计划通道会降级成纯文本）")
+        print(no_fallback_line(has_at=has_at, has_image=False))
     # 解禁时刻只算一次（绝对时刻），睡完再记账也不会漂。
     mute_until = (started + int(mute)) if mute else None
     # `scope` 一起落盘：全员禁言没有解禁时刻，只有 `group_shut=True` 能让账本

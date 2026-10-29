@@ -70,6 +70,7 @@
     {"name": "check_qr_login.py", "shard": "storage", "why": "每用户扫码登录：passport 双流、DPAPI、限流、隐私（#6）"},
     {"name": "check_upgrade.py", "shard": "storage", "why": "升级用真实 SQLite/WAL 夹具"},
     {"name": "check_hot_reload.py", "shard": "storage", "why": "全栈热重载：闭包覆盖、target 映射、debounce、quarantine、不 spawn（#58）"},
+    {"name": "check_sync_groups_participation.py", "shard": "storage", "why": "sync_groups 不得用派生缺省改写会话参与度：未配 participation 的群三轮同步后库值不动且无改写日志、显式配置按配置对齐且打「配置同步」而非「热重载」、非法值告警不写库、人格变更仍报热重载、status.json 仍派生 trigger_mode（#234）"},
     {"name": "check_anti_habituation.py", "shard": "reply", "why": "反语癖固化与多样性提示词注入"},
     {"name": "check_plan_recovery.py", "shard": "reply", "why": "stale 拒绝后的重规划（plan_id 为 None 也不崩）"},
     {"name": "check_wake_ledger.py", "shard": "reply", "why": "已回判定：一条回复不得把后续 @ 洗成已回"},

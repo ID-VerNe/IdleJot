@@ -646,6 +646,47 @@ def main():
                         assert out['state']=='SUCCEEDED' and len(out['bubbles'])==2,out
                         results.append('mixed text and reaction share a single checked queue')
 
+                        # issue #221：三个「等待秒数」上限（plan_chat_reply.wait_seconds
+                        # 的 schema maximum、recovery 夹 needs_wait/reply_cooldown 指导值
+                        # 的 min(N,…)、wait_chat_messages.minimum_wait_seconds 的 schema
+                        # maximum）过去各写一个 30，而 reply_cooldown 抛出的 wait_seconds
+                        # 按 reply_cooldown_seconds-(now-prev) 算、最大可达 RANGES 上限 60。
+                        # 冷却配成 45 时指导值被静默压成 30、schema 也只接 30，变成「等 30、
+                        # 被拒、再等」两步空转。本节钉两件可观察事实，都用既有符号（不引新
+                        # 常量），未打补丁的 base 上红在 issue 症状本身，不是 import 裸奔：
+                        #   ① 结构：两个 schema maximum == 冷却上限（base 上是 30≠60）；
+                        #   ② 行为：冷却>30 时 recovery.retry_after_seconds ==
+                        #      next_call.minimum_wait_seconds == 真实 wait_seconds（base 上
+                        #      被 min(30,…) 压成 30，≠ 真实 43.x）。
+                        cool_ceiling=turns.RANGES['reply_cooldown_seconds'][1]
+                        wait_schema=next(s['parameters'] for s in tools.schemas(grant) if s['name']=='wait_chat_messages')
+                        plan_schema=next(s['parameters'] for s in tools.schemas(grant) if s['name']=='plan_chat_reply')
+                        assert plan_schema['properties']['wait_seconds']['maximum']==cool_ceiling,(plan_schema['properties']['wait_seconds'],cool_ceiling)
+                        assert wait_schema['properties']['minimum_wait_seconds']['maximum']==cool_ceiling,(wait_schema['properties']['minimum_wait_seconds'],cool_ceiling)
+                        clear_budget()
+                        # 冷却配成 45（>30）：把此前用例的发送回执（queue!='[]'）老化到冷却
+                        # 窗外，否则一设 cooldown=45，紧接着的 plan(reply) 自己就被前面的
+                        # reaction/mixed 发送挡成 reply_cooldown，拿不到一个 READY 来占 prev。
+                        cool_policy=policy.read_text('utf-8')
+                        policy.write_text(json.dumps(dict(quiet_seconds=.15,reply_cooldown_seconds=45,bubble_min_seconds=.25,bubble_max_seconds=.35)),'utf-8')
+                        with access.connect() as db:
+                            db.execute("UPDATE chat_turn_plans SET updated=updated-1000 WHERE session_id=? AND queue!='[]'",(sid,))
+                        cool_target=add('冷却上限的目标');time.sleep(.18);p=plan(cool_target);assert p['state']=='READY',p
+                        cool_prior=len(ReactionBot.sent)
+                        sent_ok=send(p,[dict(kind='text',text='先发一条占住 prev')]);assert sent_ok['state']=='SUCCEEDED',sent_ok
+                        assert len(ReactionBot.sent)==cool_prior+1,sent_ok
+                        # 用新目标再 plan(reply)：上一轮刚发完，仍在 45s 冷却内。
+                        hot=add('还在冷却里');time.sleep(.18);p=plan(hot)
+                        assert p.get('error_code')=='reply_cooldown',p
+                        ws=p['wait_seconds'];rec=p['recovery']
+                        assert ws>30,(ws,p)  # 真实剩余冷却 >30，不是被压过的 30
+                        assert rec['retry_after_seconds']==ws,(rec,ws)  # 不被 min(30,…) 静默压小
+                        assert rec['next_call']['arguments']['minimum_wait_seconds']==ws,(rec,ws)
+                        assert ws<=cool_ceiling,(ws,cool_ceiling)  # 指导值天然夹进上限，不需要二次压
+                        assert len(ReactionBot.sent)==cool_prior+1,p  # 冷却拒绝没有再发任何消息
+                        policy.write_text(cool_policy,'utf-8')
+                        results.append('issue #221: wait ceilings track cooldown ceiling; cooldown>30 keeps full wait_seconds, not clamped to 30')
+
                         # Seen-pixel and existing scope rules remain in force in queue.
                         media=tools.chat.media;aid=media.upsert(sid,'fixture:blue',dict(url='https://gchat.qpic.cn/fixture.png'))
                         buf=io.BytesIO();Image.new('RGB',(20,20),'blue').save(buf,'PNG')

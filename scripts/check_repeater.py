@@ -97,11 +97,20 @@ class Clock:
         return self.now
 
 
+# `self_names` 是「本机名字」闸门的参数，闸门要真有一个具体名字才测得到；但夹具里
+# **不许出现像真实昵称的字面值**（issue #254）：`check_publication.py` 从私有
+# `self_names` / 人设卡 / 群友档案派生 token 后全量扫库，一个测试夹具常量撞上它就会把
+# 「误报」报成「个人标识泄露」，挡下任何人在这台机器上的正常推送。第一个元素是公开
+# 人设模板名（`#112` 时已登记进私有 allow），第二个元素只占位、不承担任何判据，
+# 用只可能出现在夹具里的合成串。
+SELF_NAMES = ["小鲸鱼", "self-b"]
+
+
 def settings(**over):
     """一份开着 repeater、概率恒 1 的设置（概率另有用例单独钉）。"""
     cfg = {
         "self_account": SELF,
-        "self_names": ["小鲸鱼", "鱼包"],
+        "self_names": list(SELF_NAMES),
         "groups": {GROUP: {"enabled": True}},
         "slash_commands": {"enabled": True},
         "plugins": {"repeater": {
@@ -328,6 +337,18 @@ def test_gates():
     check("含本机名字不跟（等于替人召唤自己）",
           feed([("小鲸鱼呢", "1"), ("小鲸鱼呢", "2"), ("小鲸鱼呢", "3")],
                None, None) is None)
+    fresh()
+    # issue #254 的两条对照：「本机名字」闸门读的是**配置里的值**，不是夹具的某个字面值。
+    # 上线机器换成别的名字（哪怕与夹具毫无关系）照样要挡；名字表空了才放行。
+    other = settings(self_names=["别的名字"])
+    check("换一个与夹具无关的名字照样挡（闸门读配置，不是读死字面值）",
+          feed([("别的名字呢", "1"), ("别的名字呢", "2"), ("别的名字呢", "3")],
+               PLUGIN_OPTIONS(other), None, conf=other) is None)
+    fresh()
+    nameless = settings(self_names=[])
+    check("名字表为空时同一串照跟（对照组：上一条的绿不是恒绿）",
+          feed([("别的名字呢", "1"), ("别的名字呢", "2"), ("别的名字呢", "3")],
+               PLUGIN_OPTIONS(nameless), None, conf=nameless) == "别的名字呢")
     fresh()
     check("含外链不跟",
           feed([("https://x.test", "1"), ("https://x.test", "2"),

@@ -43,10 +43,11 @@ DATA_DIRS = r'(?:data|diagnostics|logs|state)'
 DERIVE_RE = re.compile(
     rf'{ROOT_EXPR}\s*/\s*[\'"]({DATA_DIRS})(?:[/\\\\][^\'"]*)?[\'"]')
 
-# 会话库的读侧入口（#163 拆分后 `--context` 在 wg_context、`--show` 在 wg_text、
-# 缺口账本在 wg_gap、keeper 在 db_keeper）。名单漏一个，那条读路径就没人在盯。
+# 会话库的读侧入口（#163 拆分后 `--context` 在 wg_context、缺口账本在 wg_gap、
+# keeper 在 db_keeper；#216 起按 id 取行收口到 wg_event_ref，wg_text 只剩
+# connect_ro 门面、不再自己推导库路径，退出名单）。名单漏一个，那条读路径就没人在盯。
 DAEMONS = ('reply.py', 'followup.py', 'dossier.py', 'mint_grant.py',
-           'wg_context.py', 'wg_text.py', 'wg_gap.py', 'db_keeper.py')
+           'wg_context.py', 'wg_event_ref.py', 'wg_gap.py', 'db_keeper.py')
 # 「必须 import data_dir」只在文件真的碰库时才成立：拆分之后 reply.py 一个
 # sqlite 都不连，要求它 import 一个用不上的东西等于养一句注释（issue #163）。
 # 判据因此改成「提到库 / 库的路径变量就必须走 data_dir」；下面那条逐行匹配

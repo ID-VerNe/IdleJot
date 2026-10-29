@@ -33,6 +33,7 @@ if str(HERE) not in sys.path:
 import wg_aliases  # noqa: E402  (群号 → 别名视图，issue #30)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_dossiers  # noqa: E402  (群友画像，issue #163)
+import wg_event_ref  # noqa: E402  (来源标记的唯一格式，issue #216)
 import wg_images  # noqa: E402  (图片标记渲染，issue #27)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
@@ -167,5 +168,7 @@ def show_context(limit, around=None):
         tail = f"  <- {'、'.join(marks)}" if marks else ""
         quote = ("  " + row["quote"]) if row.get("quote") else ""
         alias_tail = "".join("  " + h for h in hits)
-        print(f"{row['id']} {stamp} {who}{tag}: {text}{quote}{('  ' + row['images']) if row.get('images') else ''}{alias_tail}{cards}{tail}")
+        # 行首编号后面紧跟来源（issue #216 / #204 的同形契约）：这些 id 只活在
+        # chat_inbox，`reply.py <id>` 与 `look.py --event <id>` 都按这个来源解析。
+        print(f"{row['id']} src={wg_event_ref.SRC_INBOX} {stamp} {who}{tag}: {text}{quote}{('  ' + row['images']) if row.get('images') else ''}{alias_tail}{cards}{tail}")
     return 0

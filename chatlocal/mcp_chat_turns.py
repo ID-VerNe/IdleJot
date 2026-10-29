@@ -56,13 +56,14 @@ def schema(tool):
     key=idempotency_key(TURN_KEY_DESCRIPTION)
     event=event_id('来自所选 input_batch 的事件 id，不能使用旧批次或 QQ 消息编号。')
     return [tool('plan_chat_reply',
-        'Planner 阶段：根据 get/wait 返回的 input_batch.id 决定。target_event_id/topic_event_ids 都来自所选批次；reply 选非空 expressions，wait/silence 不带表达。'
+        'Planner 阶段：根据 get/wait 返回的 input_batch.id 决定。target_event_id/topic_event_ids 都来自所选批次；reply 选非空 expressions，ask/wait/silence 不带表达。'
+        '四种决定的区别：reply=接话；ask=刚开口问了一句、等对方回，对方下一句即使不 @ 也会作为必须续上的输入；wait=暂缓决定但仍不关对话窗口；silence=本轮收场、关掉对话窗口。'
         '程序核对相关消息静默与新鲜度；READY 返回候选，下一次直接 send_chat_reply 同时提交 expression_ids 和 bubbles，选择与表达合为一次决策。只写简短沟通意图，不发进群。',
         dict(session_id=sid,idempotency_key=key,batch_id=sid,
-             action=dict(type='string',enum=['wait','silence','reply']),
+             action=dict(type='string',enum=['wait','silence','reply','ask']),
              target_event_id=event, topic_event_ids=dict(type='array',maxItems=5,uniqueItems=True,items=event),
              topic_terms=dict(type='array',maxItems=6,uniqueItems=True,items=dict(type='string',minLength=2,maxLength=24)),
-             expressions=dict(type='array',maxItems=3,uniqueItems=True,description='action=reply 时非空；wait/silence 省略或传 []。',items=dict(type='string',enum=['text','sticker','reaction','voice','video','file','ai_voice','qq_action'])),
+             expressions=dict(type='array',maxItems=3,uniqueItems=True,description='action=reply 时非空；ask/wait/silence 省略或传 []。',items=dict(type='string',enum=['text','sticker','reaction','voice','video','file','ai_voice','qq_action'])),
              intent=dict(type='string',minLength=1,maxLength=200),
              wait_seconds=dict(type='number',minimum=0,maximum=30)),
         ['session_id','batch_id','action','intent']),
@@ -304,6 +305,7 @@ class ChatTurns:
                     decision={k:data[k] for k in ('action','target_event_id','expressions','intent','batch_id','watermark','wait_seconds')},
                     bubbles=json.loads(p['queue']),reason=p['reason'],turn_complete=p['state'] in ('SUCCEEDED','SILENT'),
                     next='同一 Agent 组织表达后调用 send_chat_reply' if p['state']=='READY' else '继续 wait_chat_messages；旧队列尾部不会恢复')
+        if data.get('awaiting'):result['decision']['awaiting']=True
         if p['state']=='READY':
             result['quote_guidance']=self.quote_guidance(p,data)
             result['next_call']=dict(tool='send_chat_reply',arguments=dict(session_id=p['session_id'],plan_id=p['id']),requires=['bubbles'])
@@ -314,7 +316,8 @@ class ChatTurns:
                 if patch.get('next'):result['next']=patch['next']
                 if patch.get('next_call'):result['next_call']=patch['next_call']
         elif p['state']=='WAITING':
-            result['next']='暂缓决定，尚未处理完本批；沿 next_call 等待，到期或新输入后重新规划。'
+            result['next']=('已选择 ask：在等对方接话，对方不带 @ 的下一句也作为必须处理的输入；沿 next_call 等待。' if data.get('awaiting')
+                            else '暂缓决定，尚未处理完本批；沿 next_call 等待，到期或新输入后重新规划。')
             result['next_call']=self.chat.continuation(p['session_id'])
         elif p['state'] in ('SILENT','SUCCEEDED'):
             result['next_call']=self.chat.continuation(p['session_id'],through=data['watermark'])
@@ -393,13 +396,13 @@ class ChatTurns:
             target=args.get('target_event_id');focus_ids=list(dict.fromkeys(([target] if target else [])+args.get('topic_event_ids',[])))
             correction=dict(correction_call=dict(tool='plan_chat_reply',arguments=dict(session_id=sid,batch_id=batch['id']),
                 requires=['action','intent']),valid_event_ids=json.loads(batch['ids']),
-                parameter_rule='target_event_id 和 topic_event_ids 仅从 valid_event_ids 选；reply 必须选 expressions，wait/silence 省略或 []；自行修正后提交。')
+                parameter_rule='target_event_id 和 topic_event_ids 仅从 valid_event_ids 选；reply 必须选 expressions，ask/wait/silence 省略或 []；自行修正后提交。')
             if any(eid not in json.loads(batch['ids']) for eid in focus_ids):
                 raise TurnRejected('target_not_in_batch','目标或话题消息不在本批，按返回编号修正；无需先读会话。',**correction)
             rows=self.data(sid);index={m['id']:m for m in rows};focus_rows=[index[eid] for eid in focus_ids if eid in index]
             if len(focus_rows)!=len(focus_ids):raise TurnRejected('target_expired','目标已淘汰，请补读。')
             expressions=args.get('expressions',[])
-            if (args['action']=='reply')!=bool(expressions):raise TurnRejected('expression_mismatch','reply 选择表达；wait/silence 不提交表达。保留原决定，自行修正参数。',**correction)
+            if (args['action']=='reply')!=bool(expressions):raise TurnRejected('expression_mismatch','reply 选择表达；ask/wait/silence 不提交表达。保留原决定，自行修正参数。',**correction)
             with self.access.connect() as db:
                 waiting=db.execute("SELECT payload FROM chat_turn_plans WHERE session_id=? AND state='WAITING' ORDER BY created DESC LIMIT 1",(sid,)).fetchone()
             if waiting and args['action']=='reply':
@@ -424,13 +427,20 @@ class ChatTurns:
                 expressions=expressions,intent=args['intent'],batch_id=batch['id'],watermark=batch['watermark'],
                 read_at=batch['created'],epoch=self.epoch,gap=batch['gap'],grant_id=grant['id'],
                 wait_seconds=args.get('wait_seconds',0),not_before=now+args.get('wait_seconds',0))
+            if args['action']=='ask':
+                # Marks "I just opened my mouth and am waiting for a peer to
+                # continue" apart from wait ("not deciding yet"). Both live in
+                # the WAITING state so the read/wait/recovery flow is unchanged;
+                # mcp_chat_wait.py reads this flag to keep the dialogue window
+                # open so the peer's non-@ answer is still visible.
+                data['awaiting']=True
             if args['action']!='reply':
                 data['expression_selection']=dict(state='not_applicable',reason='no_reply',delivery='none',
                     candidate_ids=[],selected_ids=[],host_injection='unverified',model_use='unverified')
             candidate=dict(id=pid,session_id=sid,payload=dump(data),created=now)
             if cancel.is_set():raise TurnRejected('cancelled','本次规划已取消。')
             if args['action']=='reply':self.check(candidate,cancel,cooldown=True)
-            state={'reply':'READY','wait':'WAITING','silence':'SILENT'}[args['action']]
+            state={'reply':'READY','wait':'WAITING','ask':'WAITING','silence':'SILENT'}[args['action']]
             with self.access.connect() as db:
                 db.execute("UPDATE chat_turn_plans SET state='CANCELLED',reason='replanned' WHERE session_id=? AND state IN ('READY','WAITING')",(sid,))
                 db.execute('INSERT INTO chat_turn_plans(id,session_id,request_key,signature,payload,state,created,updated) VALUES(?,?,?,?,?,?,?,?)',

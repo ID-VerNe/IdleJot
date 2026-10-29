@@ -451,6 +451,41 @@ def test_frequency():
                               PLUGIN_OPTIONS(half), SELF_IDS, clock=clock, rng=rng)
     check("骰子没中后同一波不重掷（第二次必中也不跟）", again is None, repr(again))
 
+    # issue #213：上面那条用默认冷却（600s）钉——冷却够长，波记忆本来就不会被
+    # 清掉，旧代码（按冷却清理）也照样绿。真正的复发在 `cooldown_seconds=0`：
+    # 旧代码 `_prune_waves` 的 `cutoff = now - max(0, 1.0)` 让波记忆 1 秒就过期，
+    # 同一波每过一秒重掷一次直到中。这里把冷却设 0、窗口留默认 120s，1.2 秒后
+    # 再喂同一波、第二次骰子必中——只有「波记忆按窗口寿命清理」在，才会拦住。
+    fresh()
+    clock = Clock()
+    nocooldown = settings(plugins={"repeater": {
+        "enabled": True,
+        "options": {"probability": 0.5, "min_repeats": 3, "cooldown_seconds": 0}}})
+    rolls = iter([0.9, 0.0])
+
+    def rng2():
+        return next(rolls, 0.9)
+
+    missed = feed([("草", "1"), ("草", "2"), ("草", "3")],
+                  PLUGIN_OPTIONS(nocooldown), clock, rng=rng2, conf=nocooldown)
+    check("cooldown=0：第一次掷骰没中（0.9 ≥ 0.5）不跟", missed is None, repr(missed))
+    clock.tick(1.2)  # 窗口内（120s），同一波还活着
+    again = repeater.consider(text_event("草", uid="4", mid=99), nocooldown,
+                              PLUGIN_OPTIONS(nocooldown), SELF_IDS, clock=clock,
+                              rng=rng2)
+    check("cooldown=0：窗口内同一波不重掷（第二次必中也不跟，#213）",
+          again is None, repr(again))
+
+    # 波记忆按窗口寿命过期：超过 window_seconds 后，三个新人复读同一句是新一波，
+    # 该允许再试一次（不能把「一波只试一次」做成「这句永远不再跟」）。
+    clock.tick(float(PLUGIN_OPTIONS(nocooldown)["window_seconds"]) + 1)
+    fresh_window = [repeater.consider(text_event("草", uid=str(i), mid=200 + i),
+                                      nocooldown, PLUGIN_OPTIONS(nocooldown),
+                                      SELF_IDS, clock=clock, rng=lambda: 0.0)
+                    for i in range(4, 7)]
+    check("cooldown=0：窗口过后新一波可跟（波记忆按窗口过期，不永久封印）",
+          any(fresh_window), repr(fresh_window))
+
     fresh()
     half = settings(plugins={"repeater": {
         "enabled": True, "options": {"probability": 0.5, "min_repeats": 3}}})

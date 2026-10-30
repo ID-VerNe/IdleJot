@@ -492,7 +492,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 65 | `reply` | `check_wake_ledger.py` | 已回判定：一条回复不得把后续 @ 洗成已回 |
 | 66 | `reply` | `check_forward_wake.py` | 合并转发里的 @ 与关键词参与唤醒（#9） |
 | 67 | `reply` | `check_wake_words.py` | self-name/wake-word 合并规则单一出处（#279）：顶层 + per-group self_names/wake_words + persona + account；per-group wake_words 配了顶层没配的群 daemon 改前漏认、改后认（翻转用例）；or 短路口径与 mcp_chat_wait 同源 |
-| 68 | `reply` | `check_followup.py` | 追问窗口：回复之后还能听见群里说什么 |
+| 68 | `reply` | `check_followup` | 追问窗口：回复之后还能听见群里说什么 |
 | 69 | `reply` | `check_repeater` | 复读/接龙：三人不同 QQ 才跟、接龙四种格式跟下一号、指令/敏感词/本机名字/外链/超长/带 @ 带图一律不跟、一波只尝试一次且冷却跨重启（#155）；「本机名字」闸门读配置而非夹具字面值（换名照样挡、空表照跟两条对照），夹具里不留像真实昵称的常量（#254）。#285：单文件 906 行 advisory 拆成 `scripts/check_repeater/` 包（_fixture），入口名不变、对 gates.json 与 CI 透明 |
 | 70 | `reply` | `check_pending_reply.py` | 待回时效：超时唤醒不再算待回 |
 | 71 | `reply` | `check_reply_context.py` | reply.py --context 回之前看得到群聊上下文 |

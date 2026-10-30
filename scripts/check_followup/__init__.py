@@ -31,8 +31,35 @@ issue #218：额度判据取消息自己的时间（``ts``，毫秒）而不是�
 秒）——多气泡回复在途那几秒里「发送前发出、发送中收到」的话不再白嫖
 ``max_messages``；``ts`` 缺失时才退回 ``at``。
 
-    .venv/Scripts/python.exe scripts/check_followup.py
+#284：本文件曾是单文件 `scripts/check_followup.py`（980 行，advisory 带）。按
+#169 PF-2（`scripts/check_listener_rehang/`）与 #247（`scripts/check_dossier_cadence/`）
+的先例拆成包：`_fixture`（临时库 / 临时状态目录 / `WATCH` 路径 / `MESSAGES` /
+`FOREIGN` / `GROUP` / `ONEBOT` / `append` / `build` / `run_watch`），本 `__init__.py`
+保留 docstring 与 24 条用例 + `main()`，`__main__.py` 供 `python -m`。入口名不变
+（`check_followup`），对 `gates.json` / `run_gates.py` / CI 透明。用例调用序、
+断言、正文逐字搬运，零重排。
+
+runner 形态不在 R4（issue #280）的 `check()` / `FAILED` / `全部通过` 族里——
+check_followup 是更早的裸 `assert` + 每条用例末尾 `print("  ok  <desc>")` +
+`main()` 末尾 `print("PASS")` 形态（grep 证实原文件 0 处 `check(` / `FAILED` /
+`全部通过` / `assert_runner`）。故 `_fixture` 不委派 `assert_runner`——委派会把
+输出从 `  ok  <desc>` / `PASS` 改成 `ok  <name>` / `全部通过`（ok+3 空格 vs
+2 空格+ok+2 空格，尾行 PASS vs 全部通过），破 byte-identity。拆包只搬夹具层，
+runner 形态原样留在本主模块。issue #284 正文「runner 是 R4 形态」一句是误述。
+
+    .venv/Scripts/python.exe -m scripts.check_followup
 """
+# 导入序是 load-bearing（issue #284）：`_fixture` 必须最先——它把 `scripts/` +
+# daemon 插进 `sys.path`、钉住临时库与临时状态目录（`check_fixture_support` import
+# 期会把它钉成夹具目录）、进口 followup/up/wg_text/wg_up_wake，并定义 `MESSAGES` /
+# `FOREIGN` / `GROUP` / `ONEBOT` / `append` / `build` / `run_watch`。本主模块的
+# 24 条用例依赖这些名字先就位。顺序即旧文件的用例调用序——24 条契约的运行顺序
+# 靠 `main()` 里那张调用表逐字保持。禁止改成一行 `from . import _fixture`：
+# 显式分行防后人误重排。
+from ._fixture import (  # noqa: F401
+    DB, FOREIGN, GROUP, MESSAGES, ONEBOT, ROOT, SID, TMP, WATCH, append, build,
+    followup, run_watch, up, wg_text, wg_up_wake,
+)
 import json
 import os
 import sqlite3
@@ -40,79 +67,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
-from check_fixture_support import scratch_dir  # noqa: E402
-fs.bootstrap_paths(scripts=False, root=False)
-
-TMP = scratch_dir(prefix="wg_followup_")
-DB = TMP / "fixture.sqlite3"
-SID = "session-fixture"
-WATCH = ROOT / "water-group" / "daemon" / "watch.py"
-
-# 两个旧名都要钉：state_dir()/DB 先读 IDLEJOT_*，只设 TULPA_* 时外面若已有
-# IDLEJOT_* 就会落回实机状态——本文件会 close() 窗口，等于删掉真实窗口文件。
-os.environ["TULPA_WG_DB"] = str(DB)
-os.environ["IDLEJOT_WG_DB"] = str(DB)
-os.environ["TULPA_WG_STATE"] = str(TMP)
-os.environ["IDLEJOT_WG_STATE"] = str(TMP)
-
-sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
-
-import followup  # noqa: E402
-import up  # noqa: E402  (`#` 指令闸门与 wake_reason 同源，issue #70)
-import wg_text  # noqa: E402  (追问行正文渲染，issue #138)
-import wg_up_wake  # noqa: E402  (issue #37 PC: config 的真实调用点；up.config 只是门面引用)
-
-# 5 是被回复的那条；6/9 是群友接话；7 是机器人自己；8 是系统提示；
-# 10 属于另一个会话；11 是稍后机器人自己补的一句。第三个字段是入库时刻 at。
-MESSAGES = [
-    (5, {"sender": "甲", "content": "@机器人 在吗", "timestamp": 1792500000000}, 1792500000.0),
-    (6, {"sender": "乙", "content": "在的在的", "timestamp": 1792500001000}, 1792500001.0),
-    (7, {"sender": "小鲸鱼", "content": "在呢", "timestamp": 1792500002000,
-         "is_self": True}, 1792500002.0),
-    (8, {"sender": "系统", "content": "提示", "timestamp": 1792500003000,
-         "synthetic": True}, 1792500003.0),
-    (9, {"sender": "丙", "content": "问作业吗", "timestamp": 1792500004000}, 1792500004.0),
-    (11, {"sender": "小鲸鱼", "content": "刚那句当我没说", "timestamp": 1792500006000,
-          "is_self": True}, 1792500006.0),
-]
-FOREIGN = (10, {"sender": "外人", "content": "别的会话", "timestamp": 1792500005000},
-           1792500005.0)
-GROUP = "123"
-ONEBOT = {5: "775", 6: "776", 7: "777", 8: "778", 9: "779", 10: "7710", 11: "7711"}
-
-
-def append(rows):
-    """往临时库里追加消息：(id, payload, at)，at 是入库时刻。"""
-    db = sqlite3.connect(DB)
-    for event_id, payload, at in rows:
-        data = dict(payload)
-        data["conversation_id"] = f"111:group:{GROUP}"
-        data["onebot_message_id"] = ONEBOT.get(event_id, str(7000 + event_id))
-        db.execute("INSERT INTO chat_inbox(id,session_id,payload,at,media) VALUES (?, ?, ?, ?, '[]')",
-                   (event_id, SID, json.dumps(data, ensure_ascii=False), at))
-    db.commit()
-    db.close()
-
-
-def build():
-    db = sqlite3.connect(DB)
-    db.execute("CREATE TABLE chat_sessions (id TEXT, conversation_id TEXT, active INTEGER)")
-    db.execute("CREATE TABLE chat_inbox "
-               "(id INTEGER PRIMARY KEY, session_id TEXT, payload TEXT, at REAL NOT NULL,"
-               " media TEXT NOT NULL DEFAULT '[]')")
-    db.execute("INSERT INTO chat_sessions VALUES (?, ?, 1)", (SID, f"111:group:{GROUP}"))
-    db.execute("INSERT INTO chat_sessions VALUES ('dead-session', '100:group:999', 0)")
-    foreign = dict(FOREIGN[1])
-    foreign["conversation_id"] = "100:group:999"
-    foreign["onebot_message_id"] = ONEBOT[FOREIGN[0]]
-    db.execute("INSERT INTO chat_inbox(id,session_id,payload,at,media) VALUES (?, ?, ?, ?, '[]')",
-               (FOREIGN[0], "dead-session", json.dumps(foreign, ensure_ascii=False), FOREIGN[2]))
-    db.commit()
-    db.close()
-    append(MESSAGES)
 
 
 def check_open():

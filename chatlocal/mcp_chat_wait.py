@@ -24,10 +24,23 @@ shared, and this one never gates what ``--context`` can see.
 import json
 import threading
 import time
+from typing import NamedTuple
 
 from . import reply_timing as timing
 from . import mcp_chat_prompts as prompts
 from .mcp_chat_limits import WAIT_TIMEOUT_SECONDS
+
+
+class MentionState(NamedTuple):
+    """issue #278：``wait()`` 内 mention_only 检测块的返回值（逐字搬运自原 128-200）。"""
+
+    has_mention: bool
+    is_in_dialogue: bool
+    allow_learning: bool
+    window_anchor: int
+    dialogue_turns: int
+    dialogue_until: float
+    trimmed: bool
 
 
 class ChatWaitMixin:
@@ -41,6 +54,100 @@ class ChatWaitMixin:
         with self.access.connect() as db:
             db.execute('UPDATE chat_sessions SET dialogue_until=?,dialogue_turns=? WHERE id=? AND active=1',
                        (float(until),int(turns),sid))
+
+    def _detect_mention_and_dialogue(self, sid, row, pending, account,
+                                     mention_only, followup_turns, followup_seconds,
+                                     now, end,
+                                     window_anchor, dialogue_turns, dialogue_until):
+        """issue #278：从 ``wait()`` 抽出的 mention_only self-name/对话窗口检测块。
+
+        逐字搬运自原 ``wait()`` 128-200，行为字节级一致（#169 PF-3 逐字搬运）。
+        只读 ``self.access``/``self.set_dialogue_window``，写 5 个返回字段
+        （has_mention/is_in_dialogue/allow_learning/window_anchor/
+        dialogue_turns/dialogue_until）+ 一次 ``self.set_dialogue_window``。
+
+        ``trimmed=True`` 表示块内的 trim-through 短路命中，调用方应 ``continue``
+        外层 ``while True``（块内原本直接 ``continue``，helper 不能跨帧跳循环，
+        改由返回标志驱动，行为不变）。
+        """
+        from .mcp_chat import load_water_group_config
+        has_mention=False
+        is_in_dialogue=False
+        allow_learning=True
+        trimmed=False
+        if mention_only:
+            allow_learning=False
+            own_sent=False
+            if pending:
+                with self.access.connect() as db:
+                    own_rows=db.execute("SELECT message_id FROM chat_inbox WHERE session_id=? AND coalesce(json_extract(payload,'$.is_self'),0)=1 ORDER BY id DESC LIMIT 50",(sid,)).fetchall()
+                    own_ids={str(r[0]) for r in own_rows}
+                cfg = load_water_group_config()
+                gid_str = row['conversation_id'].split(':')[-1]
+                group_cfg = cfg.get('groups', {}).get(gid_str, {})
+                names = []
+                cfg_names = cfg.get('self_names')
+                if isinstance(cfg_names, list):
+                    names.extend(str(n) for n in cfg_names if n)
+                grp_names = group_cfg.get('self_names') or group_cfg.get('wake_words')
+                if isinstance(grp_names, list):
+                    names.extend(str(n) for n in grp_names if n)
+                p_name = row.get('persona_name')
+                if p_name and p_name != '自定义人格':
+                    names.append(p_name)
+                    for part in p_name.split():
+                        if part:
+                            names.append(part)
+                keywords = {k.casefold() for k in names if k}
+                if account:
+                    keywords.add(account.casefold())
+                cfg_account = str(cfg.get('self_account') or '')
+                if cfg_account and not cfg_account.startswith('YOUR_'):
+                    keywords.add(cfg_account.casefold())
+                kw_list = [k for k in keywords if k]
+                for r in pending:
+                    payload = json.loads(r['payload'])
+                    if payload.get('is_self'):
+                        # 本机发出的回复：窗口要按「回复之后」重算起算点
+                        # （issue #217）。reply.py 直发的回执没有
+                        # send_request.operation_id，consume_sent_echoes
+                        # 不认，只能在这里认。
+                        if not payload.get('recalled'):
+                            own_sent = True
+                        continue
+                    segs = payload.get('segments', [])
+                    if any(s.get('type') == 'at' and str(s.get('qq', '')) in (account, cfg_account, 'all') for s in segs):
+                        has_mention = True
+                        break
+                    if any(s.get('type') == 'reply' and str(s.get('onebot_message_id', '')) in own_ids for s in segs):
+                        has_mention = True
+                        break
+                    txt = (payload.get('content', '') or payload.get('text', '')) + " " + " ".join(s.get('text', '') for s in segs if s.get('type') == 'text')
+                    txt_lower = txt.casefold()
+                    if any(kw in txt_lower for kw in kw_list):
+                        has_mention = True
+                        break
+
+            # 开窗 / 续期只在「出现新的 @ 或本机新发出的话」时做一次，别在
+            # 0.4 秒一轮的轮询里反复写库；anchor 用批尾 id 认这一批。
+            anchor=pending[-1]['id'] if pending else 0
+            if (has_mention or own_sent) and anchor!=window_anchor:
+                window_anchor=anchor
+                dialogue_turns=followup_turns
+                dialogue_until=time.time()+followup_seconds
+                self.set_dialogue_window(sid,dialogue_until,dialogue_turns)
+
+            is_in_dialogue=bool(dialogue_turns>0 and time.time()<dialogue_until)
+
+            if not has_mention and not is_in_dialogue and now < end:
+                if len(pending) > 15:
+                    trim_through = pending[-10]['id']
+                    with self.access.connect() as db:
+                        db.execute('UPDATE chat_sessions SET cursor=? WHERE id=? AND active=1', (trim_through, sid))
+                    trimmed=True
+
+        return MentionState(has_mention, is_in_dialogue, allow_learning,
+                            window_anchor, dialogue_turns, dialogue_until, trimmed)
 
     def wait(self, grant, args, cancel, *, allow_learning=True):
         from .mcp_chat import ChatStopped, load_water_group_config
@@ -123,80 +230,27 @@ class ChatWaitMixin:
                 wake_kind,notices=self.apps.wake(row)
                 newest=(newest,notices[-1]['notice_id'] if notices else 0)
                 if newest!=last_max:last_max=newest;changed_at=time.monotonic()
-                now=time.monotonic()
+                now = time.monotonic()
 
-                has_mention=False
-                is_in_dialogue=False
-                if mention_only:
-                    allow_learning=False
-                    own_sent=False
-                    if pending:
-                        with self.access.connect() as db:
-                            own_rows=db.execute("SELECT message_id FROM chat_inbox WHERE session_id=? AND coalesce(json_extract(payload,'$.is_self'),0)=1 ORDER BY id DESC LIMIT 50",(sid,)).fetchall()
-                            own_ids={str(r[0]) for r in own_rows}
-                        cfg = load_water_group_config()
-                        gid_str = row['conversation_id'].split(':')[-1]
-                        group_cfg = cfg.get('groups', {}).get(gid_str, {})
-                        names = []
-                        cfg_names = cfg.get('self_names')
-                        if isinstance(cfg_names, list):
-                            names.extend(str(n) for n in cfg_names if n)
-                        grp_names = group_cfg.get('self_names') or group_cfg.get('wake_words')
-                        if isinstance(grp_names, list):
-                            names.extend(str(n) for n in grp_names if n)
-                        p_name = row.get('persona_name')
-                        if p_name and p_name != '自定义人格':
-                            names.append(p_name)
-                            for part in p_name.split():
-                                if part:
-                                    names.append(part)
-                        keywords = {k.casefold() for k in names if k}
-                        if account:
-                            keywords.add(account.casefold())
-                        cfg_account = str(cfg.get('self_account') or '')
-                        if cfg_account and not cfg_account.startswith('YOUR_'):
-                            keywords.add(cfg_account.casefold())
-                        kw_list = [k for k in keywords if k]
-                        for r in pending:
-                            payload = json.loads(r['payload'])
-                            if payload.get('is_self'):
-                                # 本机发出的回复：窗口要按「回复之后」重算起算点
-                                # （issue #217）。reply.py 直发的回执没有
-                                # send_request.operation_id，consume_sent_echoes
-                                # 不认，只能在这里认。
-                                if not payload.get('recalled'):
-                                    own_sent = True
-                                continue
-                            segs = payload.get('segments', [])
-                            if any(s.get('type') == 'at' and str(s.get('qq', '')) in (account, cfg_account, 'all') for s in segs):
-                                has_mention = True
-                                break
-                            if any(s.get('type') == 'reply' and str(s.get('onebot_message_id', '')) in own_ids for s in segs):
-                                has_mention = True
-                                break
-                            txt = (payload.get('content', '') or payload.get('text', '')) + " " + " ".join(s.get('text', '') for s in segs if s.get('type') == 'text')
-                            txt_lower = txt.casefold()
-                            if any(kw in txt_lower for kw in kw_list):
-                                has_mention = True
-                                break
-
-                    # 开窗 / 续期只在「出现新的 @ 或本机新发出的话」时做一次，别在
-                    # 0.4 秒一轮的轮询里反复写库；anchor 用批尾 id 认这一批。
-                    anchor=pending[-1]['id'] if pending else 0
-                    if (has_mention or own_sent) and anchor!=window_anchor:
-                        window_anchor=anchor
-                        dialogue_turns=followup_turns
-                        dialogue_until=time.time()+followup_seconds
-                        self.set_dialogue_window(sid,dialogue_until,dialogue_turns)
-
-                    is_in_dialogue=bool(dialogue_turns>0 and time.time()<dialogue_until)
-
-                    if not has_mention and not is_in_dialogue and now < end:
-                        if len(pending) > 15:
-                            trim_through = pending[-10]['id']
-                            with self.access.connect() as db:
-                                db.execute('UPDATE chat_sessions SET cursor=? WHERE id=? AND active=1', (trim_through, sid))
-                            continue
+                # issue #278：mention_only 的 self-name/对话窗口检测抽到
+                # _detect_mention_and_dialogue（逐字搬运原 128-200，#169 PF-3）。
+                # trimmed=True 时块内 trim-through 短路命中，照旧 continue 外层
+                # while——块内原本直接 continue，helper 跨不了帧，改由返回标志驱动。
+                _ms = self._detect_mention_and_dialogue(
+                    sid, row, pending, account,
+                    mention_only, followup_turns, followup_seconds,
+                    now, end,
+                    window_anchor=window_anchor,
+                    dialogue_turns=dialogue_turns,
+                    dialogue_until=dialogue_until)
+                has_mention=_ms.has_mention
+                is_in_dialogue=_ms.is_in_dialogue
+                allow_learning=_ms.allow_learning
+                window_anchor=_ms.window_anchor
+                dialogue_turns=_ms.dialogue_turns
+                dialogue_until=_ms.dialogue_until
+                if _ms.trimmed:
+                    continue
 
                 collection = self.turns.collection(row, pending, quiet, collecting_since)
                 waiting = self.turns.waiting(sid)

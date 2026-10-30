@@ -12,20 +12,21 @@ reset + raises + 模块级状态），本 `__init__.py` 保留 docstring 与 28 
 `main()`，`__main__.py` 供 `python -m`。入口名不变（`check_qr_login`），对
 `gates.json` / `run_gates.py` / CI 透明。用例调用序、断言、正文逐字搬运，零重排。
 
-`check()` / `FAILED` / `全部通过` runner 仍是本门禁本地的 `(name, ok, detail)`
-即时断言形态，未委派 R4（issue #280）的 `assert_runner`——R4 合并时把它的 8 文件
-清单（含本包 `__init__.py`）统一委派即可，本拆包与 runner 委派正交。
+R4（issue #280）已合流：`check()` / `FAILED` / `全部通过` runner 委派 `_fixture`
+里的 `assert_runner(markers="ok")`（与 #169 PE-1 的 `run_cases()` 形态不同、互不替）。
+`main()` 用 `_runner.summary()` 出尾行。
 """
 # 导入序是 load-bearing（issue #282）：`_fixture` 必须最先——它把 `scripts/` +
 # daemon 插进 `sys.path`、钉住数据根（`check_fixture_support` import 期会把它钉成
 # 夹具目录）、并定义 `FakePassport` / 7 route / `wire_routes` / `settings_for` /
-# `reset` / `raises` / 模块级状态。本主模块的 28 条用例依赖这些名字先就位。顺序
-# 即旧文件的用例调用序——28 条契约的运行顺序靠 `main()` 里那张 `fn` 元组逐字
-# 保持。禁止改成一行 `from . import _fixture`：显式分行防后人误重排。
+# `reset` / `raises` / 模块级状态（含 R4 的 `_runner` / `check` / `FAILED`）。本主模块
+# 的 28 条用例依赖这些名字先就位。顺序即旧文件的用例调用序——28 条契约的运行顺序
+# 靠 `main()` 里那张 `fn` 元组逐字保持。禁止改成一行 `from . import _fixture`：
+# 显式分行防后人误重排。
 from ._fixture import (  # noqa: F401
     APP_CREATE, APP_QUERY, COOKIE_FIELDS, COOKIE_INFO, FAILED, FakePassport,
     LTOKEN, RECORD, RESPONSES, ROLES, WEB_CREATE, WEB_QUERY, QUERY_STATE,
-    check, fixture_server, miyoushe, network_guard, qr_login, raises, reset,
+    _runner, check, fixture_server, miyoushe, network_guard, qr_login, raises, reset,
     settings_for, temp_dir, user_store, wire_routes,
 )
 import base64
@@ -780,8 +781,5 @@ def main():
                 user_store.users_dir = real_users_dir
                 qr_login.LOG = real_log
                 qr_login.DAILY_FILE = real_daily
-    print()
-    if FAILED:
-        print(f"{len(FAILED)} 项失败: {', '.join(FAILED)}")
+    if _runner.summary():
         sys.exit(1)
-    print("全部通过")

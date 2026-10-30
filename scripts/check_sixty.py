@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
-from check_fixture_support import network_guard, scratch_dir, temp_dir  # noqa: E402
+from check_fixture_support import assert_runner, network_guard, scratch_dir, temp_dir  # noqa: E402
 from fixture_server import FixtureHandler, fixture_server  # noqa: E402
 
 # 记忆库与日志必须在 import commands/sixty **之前**钉到临时目录：wg_paths 与
@@ -36,16 +36,10 @@ os.environ["IDLEJOT_WG_MEMORY_DB"] = str(_SCRATCH / "mem.sqlite3")
 import commands  # noqa: E402
 import sixty  # noqa: E402
 
-FAILED = []
+# 即时断言 runner（issue #280 合流）：tick 标记 + 两格缩进复刻原 `  ✓ ` / `  ✗ `。
+_runner = assert_runner(markers="tick", indent="  ")
+check = _runner.check
 GUARD_PORTS = set()
-
-
-def check(name, ok, detail=""):
-    if ok:
-        print(f"  ✓ {name}")
-    else:
-        print(f"  ✗ {name}" + (f" — {detail}" if detail else ""))
-        FAILED.append(name)
 
 
 # ---------------------------------------------------------------- fixture
@@ -810,11 +804,8 @@ def main():
             finally:
                 commands.LOG = real_cmd_log
                 sixty.LOG = real_sixty_log
-    print()
-    if FAILED:
-        print(f"{len(FAILED)} 项失败: {', '.join(FAILED)}")
+    if _runner.summary():
         sys.exit(1)
-    print("全部通过")
 
 
 if __name__ == "__main__":

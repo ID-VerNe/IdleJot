@@ -151,6 +151,83 @@ def run_cases(cases, *, setup=None, prefix=True, catch=True):
     return 1 if bad else 0
 
 
+class AssertRunner:
+    """即时断言 runner：每条 ``check`` 打印一行 + 累积 FAILED，``summary`` 出尾行。
+
+    与 :func:`run_cases` 的区别：run_cases 跑 ``(name, fn)`` 列表族（issue #169
+    PE-1）；本族是 ``(name, ok, detail)`` 即时断言，调用点直接打印 + 累积 FAILED，
+    不收集 case 列表。8 个 ``check_*.py`` 把同一份 ``def check(name, ok, detail="")``
+    + ``FAILED = []`` + ``if FAILED: print(f"{n} 项失败: ...")`` / ``全部通过`` 尾
+    样板逐字重复（issue #280），本类是单一出处。
+
+    参数化两处差异，保证委派后字节一致：
+
+    * ``markers``：``"ok"``（缺省）打印 ``ok  <name>`` / ``FAIL <name> — <detail>``
+      （6 个 gate）；``"tick"`` 打印 ``<indent>✓ <name>`` / ``<indent>✗ <name>``。
+    * ``indent``：tick 行的前缀，``"  "`` 复刻 ``check_sixty``，``""`` 复刻
+      ``check_log_encoding``（那两个的 ✓/✗ 缩进不同，刻意的）。
+
+    ``check_call`` 是 ``check_log_encoding`` 那种 ``(name, fn)`` 异常捕获形态的归属
+    点（issue #240）：fn 抛错即失败，打印 ``<indent>✗ <name>: Type: msg``。
+    """
+
+    def __init__(self, *, markers="ok", indent=""):
+        if markers == "ok":
+            # ``ok`` 后留两格对齐 ``FAIL`` 的宽度；分隔空格由 ``check`` 的格式串补。
+            self._pass, self._fail = "ok  ", "FAIL"
+        elif markers == "tick":
+            self._pass, self._fail = f"{indent}✓", f"{indent}✗"
+        else:
+            raise ValueError(f"unknown markers {markers!r}; want 'ok' or 'tick'")
+        self._indent = indent
+        self.failed = []
+
+    def check(self, name, ok, detail=""):
+        """打印一行 + 累积。``ok`` 为真打印 pass marker，否则打印 fail marker 并入表。"""
+        if ok:
+            print(f"{self._pass} {name}")
+            return
+        line = f"{self._fail} {name}"
+        if detail:
+            line += f" — {detail}"
+        print(line)
+        self.failed.append(name)
+
+    def check_call(self, name, fn):
+        """跑 ``fn``：抛错即失败并打印异常，否则打印 pass marker（issue #240）。"""
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001  门禁自己坏了也算红
+            self.failed.append(name)
+            print(f"{self._fail} {name}: {type(exc).__name__}: {exc}")
+        else:
+            print(f"{self._pass} {name}")
+
+    def summary(self, *, names=True, ok_tail="全部通过", blank=True):
+        """出尾行，返回退出码（1=有失败，0=全过）。
+
+        * ``names``：失败时列名（``f"{n} 项失败: {', '.join(failed)}"``）还是只计数
+          （``f"{n} 项失败"``）—— ``check_log_encoding`` 的尾只计数。
+        * ``ok_tail``：全过时打印的文案 —— ``check_slash_commands`` 带去重窗口数。
+        * ``blank``：尾前是否打一空行 —— 8 个 gate 都在尾 runner 前打 ``print()``。
+        """
+        if blank:
+            print()
+        if self.failed:
+            if names:
+                print(f"{len(self.failed)} 项失败: {', '.join(self.failed)}")
+            else:
+                print(f"{len(self.failed)} 项失败")
+            return 1
+        print(ok_tail)
+        return 0
+
+
+def assert_runner(*, markers="ok", indent=""):
+    """构造一个 :class:`AssertRunner`（issue #280 即时断言 runner 单一出处）。"""
+    return AssertRunner(markers=markers, indent=indent)
+
+
 # `run_python` owns the text-decoding arguments, so a caller passing one is a
 # mistake: silently honouring it would put the locale back in charge (issue #240).
 _DECODING_KWARGS = ('text', 'universal_newlines', 'encoding', 'errors')

@@ -3,8 +3,12 @@
 从旧 `scripts/check_qr_login.py` 整体搬运，按 #169 PF-2（`scripts/check_listener_rehang/`）
 与 #247（`scripts/check_dossier_cadence/`）的先例拆出。本模块只放 passport 替身、
 7 条 route、`wire_routes` / `settings_for` / `reset` / `raises` helper 与模块级
-状态（`RESPONSES` / `RECORD` / `QUERY_STATE` / `FAILED` / 7 个 URL 常量 /
+状态（`RESPONSES` / `RECORD` / `QUERY_STATE` / `_runner` / `FAILED` / 7 个 URL 常量 /
 `COOKIE_FIELDS`）。28 条 `test_*` 用例与 `main()` 留主模块 `__init__.py`。
+
+R4（issue #280）合流：本模块的 `check()` / `FAILED` runner 委派 `assert_runner`
+（`markers="ok"`），与 #169 PE-1 的 `run_cases()`（`(name, fn)` case 列表族）形态
+不同、互不替。`__init__.py` 的 `main()` 用 `_runner.summary()` 出尾行。
 
 与 `check_listener_rehang/_common.py` 同口径：包式门禁经
 `python -m scripts.check_qr_login` 调起，此时 `sys.path[0]` 是仓库根（cwd）而非
@@ -29,14 +33,17 @@ if str(_scripts) not in sys.path:
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
 from fixture_server import FixtureHandler, fixture_server  # noqa: E402
-from check_fixture_support import network_guard, temp_dir  # noqa: E402
+from check_fixture_support import assert_runner, network_guard, temp_dir  # noqa: E402
 
 import commands  # noqa: E402
 import miyoushe  # noqa: E402  (域异常由插件声明，commands 不再转出类对象)
 import qr_login  # noqa: E402
 import user_store  # noqa: E402
 
-FAILED = []
+# 即时断言 runner（issue #280 合流）：check() 打印 + 累积，summary() 出尾行。
+_runner = assert_runner(markers="ok")
+check = _runner.check
+FAILED = _runner.failed
 RECORD = []
 RESPONSES = {}
 
@@ -89,12 +96,6 @@ class FakePassport(FixtureHandler):
 
     def do_GET(self):
         self._respond({})
-
-
-def check(name, ok, detail=""):
-    print(f"{'ok  ' if ok else 'FAIL'} {name}" + (f" — {detail}" if detail and not ok else ""))
-    if not ok:
-        FAILED.append(name)
 
 
 def reset():

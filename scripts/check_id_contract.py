@@ -50,19 +50,19 @@ ROOT = Path(__file__).resolve().parents[1]
 DAEMON = ROOT / "water-group" / "daemon"
 
 import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False, root=False)
 
 TMP = scratch_dir(prefix="wg_id_contract_")
 DB = TMP / "fixture.sqlite3"
 STATE = TMP / "state"
 STATE.mkdir(parents=True, exist_ok=True)
-# 两套变量都钉死：优先级是 IDLEJOT_* > TULPA_*，只钉一套时，机器上残留的另一套
+# 两套 DB 变量都钉死：优先级是 IDLEJOT_* > TULPA_*，只钉一套时，机器上残留的另一套
 # 会把解析指回实机库——夹具是空的，撞号用例会红在「查不到」而不是契约上。
 for _name in ("IDLEJOT_WG_DB", "TULPA_WG_DB"):
     os.environ[_name] = str(DB)
-for _name in ("IDLEJOT_WG_STATE", "TULPA_WG_STATE"):
-    os.environ[_name] = str(STATE)
+# state 两腿钉死同走 pin_state_env（#281：IDLEJOT 先于 TULPA，两腿都钉堵穿透）。
+pin_state_env(STATE)
 # 钉死群：`--context` / 隔离路径要一个确定的本会话（与 check_event_ref 同一口径）。
 os.environ["IDLEJOT_WG_CONVERSATION"] = "10001:group:123"
 

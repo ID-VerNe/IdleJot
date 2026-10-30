@@ -33,17 +33,17 @@ if str(_scripts) not in sys.path:
     sys.path.insert(0, str(_scripts))
 
 import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-from check_fixture_support import scratch_dir, temp_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir, temp_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False)
 
 # issue #145：本门禁有两处 `reply.list_wakes()`，它现在会顺手复查发送失败账本
 # （`wg_send_failure.LEDGER` 是 import 期求值的 `state_dir() / ...`）。不钉
 # `IDLEJOT_WG_STATE`，外部环境带着它跑时会**写实机账本**（`rechecked_at`/
 # `recheck_result`），还吃掉 60 秒复查窗口让真正的 `reply.py --list` 跳过复查。
-# `state_dir()` 优先级 IDLEJOT 先于 TULPA，只靠 `check_fixture_support` 的
-# `WATER_GROUP_HOME` 钉不住它。
+# state 两腿钉合走 pin_state_env（#281）：`state_dir()` 优先级 IDLEJOT 先于
+# TULPA，两腿都钉堵穿透；只靠 `check_fixture_support` 的 `WATER_GROUP_HOME` 钉不住它。
 _GAP_STATE = scratch_dir(prefix="wg_gap_state_")
-os.environ["IDLEJOT_WG_STATE"] = str(_GAP_STATE / "state")
+pin_state_env(_GAP_STATE / "state")
 
 import up  # noqa: E402
 import wg_clock  # noqa: E402
@@ -96,12 +96,14 @@ def gap_at(home):
         wg_config.CONFIG = original_config
         if original_wgs is None:
             os.environ.pop("IDLEJOT_WG_STATE", None)
+            os.environ.pop("TULPA_WG_STATE", None)
         else:
             os.environ["IDLEJOT_WG_STATE"] = original_wgs
+            os.environ["TULPA_WG_STATE"] = original_wgs
     wg_gap.STATE = home / "state" / "wg_gap.json"
     wg_gap.DB = home / "data" / "mcp-access.sqlite3"
     wg_config.CONFIG = home / "config.json"
-    os.environ["IDLEJOT_WG_STATE"] = str(home / "state")
+    pin_state_env(home / "state")  # 两腿都钉（#281），与模块顶层同口径
     return restore
 
 

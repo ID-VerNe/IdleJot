@@ -41,7 +41,7 @@ if str(_scripts) not in sys.path:
     sys.path.insert(0, str(_scripts))
 
 import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False, root=False)
 
 TMP = scratch_dir(prefix="wg_followup_")
@@ -49,12 +49,13 @@ DB = TMP / "fixture.sqlite3"
 SID = "session-fixture"
 WATCH = ROOT / "water-group" / "daemon" / "watch.py"
 
-# 两个旧名都要钉：state_dir()/DB 先读 IDLEJOT_*，只设 TULPA_* 时外面若已有
+# 两个 DB 旧名都要钉：DB 先读 IDLEJOT_*，只设 TULPA_* 时外面若已有
 # IDLEJOT_* 就会落回实机状态——本文件会 close() 窗口，等于删掉真实窗口文件。
 os.environ["TULPA_WG_DB"] = str(DB)
 os.environ["IDLEJOT_WG_DB"] = str(DB)
-os.environ["TULPA_WG_STATE"] = str(TMP)
-os.environ["IDLEJOT_WG_STATE"] = str(TMP)
+# state 两腿钉合走 pin_state_env（#281）：IDLEJOT 先于 TULPA，两腿都钉堵穿透，
+# 外部残留的 IDLEJOT_WG_STATE 不会再落回实机状态、删掉真实窗口文件。
+pin_state_env(TMP)
 
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
@@ -129,8 +130,7 @@ def run_watch():
     for name in ("WATER_GROUP_HOME", "IDLEJOT_WG_STATE", "TULPA_WG_STATE",
                  "IDLEJOT_WG_DB", "TULPA_WG_DB"):
         env.pop(name, None)
-    env["IDLEJOT_WG_STATE"] = str(TMP)
-    env["TULPA_WG_STATE"] = str(TMP)
+    pin_state_env(TMP, env=env)  # state 两腿都钉给 watch 子进程（#281）
     env["IDLEJOT_WG_DB"] = str(DB)
     env["TULPA_WG_DB"] = str(DB)
     env["IDLEJOT_WG_CONFIG"] = str(fixture)

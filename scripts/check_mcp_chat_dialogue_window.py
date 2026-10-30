@@ -34,12 +34,12 @@ import time
 from pathlib import Path
 
 import check_fixture_support as fs  # noqa: F401,E402  (issue #169 PE: path 注入收口)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False)
 
 SCRATCH = scratch_dir(prefix="tulpa-dialogue-window-")
 os.environ["WATER_GROUP_HOME"] = str(SCRATCH / "home")
-os.environ["IDLEJOT_WG_STATE"] = str(SCRATCH / "state")
+pin_state_env(SCRATCH / "state")  # state 两腿都钉（#281）
 os.environ["IDLEJOT_WG_DB"] = str(SCRATCH / "mcp-access.sqlite3")
 (SCRATCH / "home").mkdir(parents=True, exist_ok=True)
 (SCRATCH / "state").mkdir(parents=True, exist_ok=True)

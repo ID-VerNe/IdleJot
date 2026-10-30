@@ -28,7 +28,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False)
 
 TMP = scratch_dir(prefix="wg_image_")
@@ -39,7 +39,7 @@ SID = "session-fixture"
 SELF = "10001"
 
 os.environ["TULPA_WG_DB"] = str(DB)
-os.environ["TULPA_WG_STATE"] = str(STATE)
+pin_state_env(STATE)  # state 两腿都钉（#281：IDLEJOT 先于 TULPA，单钉一条会被外部穿透）
 
 import followup  # noqa: E402
 import up  # noqa: E402
@@ -242,8 +242,7 @@ def _concurrency_env():
     """子进程用独立 state 跑 upsert，与本脚本的夹具索引隔离。"""
     CONCURRENCY_IMAGES.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
-    env["TULPA_WG_STATE"] = str(CONCURRENCY_STATE)
-    env["IDLEJOT_WG_STATE"] = str(CONCURRENCY_STATE)
+    pin_state_env(CONCURRENCY_STATE, env=env)  # state 两腿都钉给子进程（#281）
     env["PYTHONPATH"] = os.pathsep.join([str(STATE.parent), str(ROOT),
                                          str(ROOT / "water-group" / "daemon")])
     return env

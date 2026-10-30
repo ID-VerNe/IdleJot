@@ -41,7 +41,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False, root=False)
 
 TMP = scratch_dir(prefix="wg_event_ref_")
@@ -49,7 +49,7 @@ DB = TMP / "fixture.sqlite3"
 STATE = TMP / "state"
 STATE.mkdir(parents=True, exist_ok=True)
 os.environ["TULPA_WG_DB"] = str(DB)
-os.environ["TULPA_WG_STATE"] = str(STATE)
+pin_state_env(STATE)  # state 两腿都钉（#281：IDLEJOT 先于 TULPA，单钉一条会被外部穿透）
 # 钉死群：本会话只管 123，跨群/查不到群号的拒绝路径才走得到（issue #164）。
 os.environ["IDLEJOT_WG_CONVERSATION"] = "10001:group:123"
 

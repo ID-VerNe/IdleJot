@@ -20,10 +20,13 @@ Paths that intentionally live in the repo are listed in `INTENTIONAL` below.
     .venv/Scripts/python.exe scripts/check_path_hygiene.py
 """
 import re
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+DAEMON = ROOT / 'water-group' / 'daemon'
 
 # Deliberately anchored in the repo -- these are not runtime data:
 #   .cache    RapidOCR / voice model cache (check_publication allows it)
@@ -191,6 +194,54 @@ def scan_isolated_env():
     return []
 
 
+def scan_state_env_pin():
+    """``pin_state_env`` must pin **both** ``IDLEJOT_WG_STATE`` and ``TULPA_WG_STATE``.
+
+    ``wg_paths.state_dir()`` reads them ``IDLEJOT or TULPA``
+    (``water-group/daemon/wg_paths.py:34``). The rule that both legs are needed
+    -- so a stray external ``IDLEJOT_WG_STATE`` cannot bleed through a
+    ``TULPA_WG_STATE``-only pin -- lived only in comments at
+    ``check_reply_send_failure/_fixture.py:45`` / ``check_unmute_probe.py:57``
+    / ``check_gap_disclosure/_fixture.py:39`` (issue #281). This scan lifts it
+    into a static assertion on the single source.
+    """
+    path = ROOT / 'scripts' / 'check_fixture_support.py'
+    if not path.exists():
+        return ['scripts/check_fixture_support.py 缺失']
+    text = path.read_text(encoding='utf-8')
+    if 'def pin_state_env(' not in text:
+        return ['scripts/check_fixture_support.py 缺 pin_state_env（issue #281：'
+                ' state-dir 两腿钉合应进 helper，不只留在注释）']
+    body = _extract_func(text, 'pin_state_env')
+    if 'IDLEJOT_WG_STATE' not in body or 'TULPA_WG_STATE' not in body:
+        return ['scripts/check_fixture_support.py 的 pin_state_env 没同时钉 '
+                'IDLEJOT_WG_STATE 与 TULPA_WG_STATE —— 只钉一条会被外部残留穿透'
+                '（wg_paths.state_dir() 读 IDLEJOT or TULPA，issue #281）']
+    return []
+
+
+def _extract_func(text, name):
+    """Return the source of the ``def <name>(...)`` block (header through the
+    next un-indented line). A cheap heuristic for the static scans above; it
+    does not parse Python, only braces of indentation."""
+    lines = text.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith(f'def {name}('):
+            start = i
+            break
+    if start is None:
+        return ''
+    out = [lines[start]]
+    for line in lines[start + 1:]:
+        if line.strip() == '' or line.startswith(' ') or line.startswith('\t'):
+            out.append(line)
+        else:
+            break
+    return '\n'.join(out)
+
+
+
 # --- manual separator handling (issue #13) -----------------------------------
 #
 # `pathlib` is the repo's established style (205/282 files). What is left is not
@@ -287,7 +338,62 @@ def self_test():
             raise AssertionError(f'检测器误报了这个写法: {sample}')
     _self_test_separators()
     _self_test_repo_db_paths()
+    _self_test_state_pin()
     return True
+
+
+def _self_test_state_pin():
+    """A/B fixtures proving the priority rule ``IDLEJOT_WG_STATE or TULPA_WG_STATE``
+    and that ``pin_state_env`` blocks the bleed-through (issue #281, #169 PA).
+
+    A (must fail): only ``TULPA_WG_STATE`` pinned, plus a poisoned
+    ``IDLEJOT_WG_STATE`` -> ``wg_paths.state_dir()`` reads the poison (the
+    bleed-through that wrote fixtures into the live ledger). B (must pass):
+    ``pin_state_env`` pins both -> ``state_dir()`` reads the fixture. The pair
+    proves the rule is real and that the helper enforces it, so delegating 29
+    call sites onto it is safe.
+    """
+    saved = {k: os.environ.get(k) for k in ('IDLEJOT_WG_STATE', 'TULPA_WG_STATE')}
+    poison = str(Path(tempfile.gettempdir()) / 'tulpa-state-pin-poison-XXXX')
+    fixture = str(Path(tempfile.gettempdir()) / 'tulpa-state-pin-fixture-XXXX')
+    try:
+        # lazy import: state_dir() reads os.environ at call time, which is what
+        # we exercise. check_path_hygiene does not put scripts/ or daemon/ on
+        # sys.path by default, so do it here for the probe only.
+        import importlib
+        import check_fixture_support as cfs  # noqa: E402  (shares sys.path[0])
+        for p in (str(ROOT / 'scripts'), str(DAEMON)):
+            if p not in sys.path:
+                sys.path.insert(0, p)
+        wg_paths = importlib.import_module('wg_paths')
+
+        # A: only TULPA leg + poisoned IDLEJOT -> bleed-through (the bug).
+        os.environ.pop('IDLEJOT_WG_STATE', None)
+        os.environ['TULPA_WG_STATE'] = fixture
+        os.environ['IDLEJOT_WG_STATE'] = poison
+        leaked = str(wg_paths.state_dir())
+        if leaked != poison:
+            raise AssertionError(
+                f'A 夹具失效：只钉 TULPA_WG_STATE 时 state_dir() 应被外部 IDLEJOT_WG_STATE '
+                f'穿透到投毒路径，实际 {leaked!r}（规则前提不成立，断言无意义）')
+
+        # B: pin_state_env pins both -> no bleed-through.
+        os.environ.pop('TULPA_WG_STATE', None)
+        os.environ['IDLEJOT_WG_STATE'] = poison  # external residue still present
+        cfs.pin_state_env(fixture)
+        safe = str(wg_paths.state_dir())
+        if safe != fixture:
+            raise AssertionError(
+                f'B 夹具失效：pin_state_env 钉两腿后 state_dir() 应指向夹具，实际 {safe!r}'
+                f'（IDLEJOT_WG_STATE 投毒={poison!r} 仍穿透——helper 没钉住 IDLEJOT 腿）')
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    return True
+
 
 
 def _self_test_repo_db_paths():
@@ -370,6 +476,7 @@ def main():
 
     failures.extend(scan_reply_timing())
     failures.extend(scan_isolated_env())
+    failures.extend(scan_state_env_pin())
 
     sep_hits = scan_manual_separators()
     if sep_hits:
@@ -400,6 +507,7 @@ def main():
     print('✓ 没有一行同时出现「会话库 + 仓库根推导」')
     print('✓ reply_timing 走 chatlocal.config.DATA')
     print('✓ isolated_env() 钉住 WATER_GROUP_HOME')
+    print('✓ pin_state_env() 同时钉 IDLEJOT_WG_STATE 与 TULPA_WG_STATE（#281：优先级规则进代码）')
     print('✓ 没有残留的手工分隔符处理（replace/os.sep/os.path.join）')
     print('\nPASS: 路径卫生门禁通过。')
     return 0

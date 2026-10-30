@@ -75,6 +75,41 @@ def isolated_env(home=None):
     return env
 
 
+def pin_state_env(state, home=None, *, env=None):
+    """Pin the daemon state dir to ``state`` so fixtures never touch the live tree.
+
+    ``wg_paths.state_dir()`` reads ``IDLEJOT_WG_STATE or TULPA_WG_STATE``
+    (``water-group/daemon/wg_paths.py:34``). **Both** legs must be pinned: only
+    setting ``TULPA_WG_STATE`` leaves a stray external ``IDLEJOT_WG_STATE`` to
+    bleed through -- exactly how fixtures used to write the real send-failure
+    ledger and probe the live OneBot (issue #145, #189; the rule lived only in
+    comments at ``check_reply_send_failure/_fixture.py:45`` / ``check_unmute_probe.py:57``
+    / ``check_gap_disclosure/_fixture.py:39``). Pinning both is the rule in code,
+    not a comment.
+
+    ``isolated_env`` is the ``WATER_GROUP_HOME`` half of this pair; this is the
+    state-dir half. ``home`` additionally pins ``WATER_GROUP_HOME`` when a suite
+    keeps the data root and state dir apart (most do -- they live under
+    different subdirs of the scratch tree, and unifying them would move the
+    data root). Omit ``home`` when the data root is pinned elsewhere or not
+    pinned at all.
+
+    ``env=None`` (default) pins into ``os.environ`` for module-top use before
+    any daemon import -- the constants are evaluated at import time, so a later
+    ``patch.dict`` is too late (issue #89). Pass an ``env`` dict to fill a
+    subprocess environment instead (the child reads its own ``os.environ``).
+    Returns the pinned mapping.
+    """
+    target = {**({'WATER_GROUP_HOME': str(home)} if home is not None else {}),
+              'IDLEJOT_WG_STATE': str(state),
+              'TULPA_WG_STATE': str(state)}
+    if env is None:
+        os.environ.update(target)
+        return target
+    env.update(target)
+    return target
+
+
 def _scratch_home():
     """Lazily created data root for suites that do not already have a temp dir."""
     global _SCRATCH_HOME

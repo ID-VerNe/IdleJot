@@ -58,7 +58,7 @@ runner 形态原样留在本主模块。issue #284 正文「runner 是 R4 形态
 # 显式分行防后人误重排。
 from ._fixture import (  # noqa: F401
     DB, FOREIGN, GROUP, MESSAGES, ONEBOT, ROOT, SID, TMP, WATCH, append, build,
-    followup, run_watch, up, wg_text, wg_up_wake,
+    followup, pin_state_env, run_watch, up, wg_text, wg_up_wake,
 )
 import json
 import os
@@ -195,8 +195,7 @@ def check_multigroup_session_pinned():
     saved_state = os.environ.get("IDLEJOT_WG_STATE")
     os.environ["IDLEJOT_WG_DB"] = str(db2)
     os.environ["TULPA_WG_DB"] = str(db2)
-    os.environ["IDLEJOT_WG_STATE"] = str(tmp2)
-    os.environ["TULPA_WG_STATE"] = str(tmp2)
+    pin_state_env(tmp2)  # state 两腿都钉（#281），还原仍按 saved_state 复原
     os.environ["IDLEJOT_WG_CONVERSATION"] = "111:group:111"
     try:
         conn = sqlite3.connect(db2)
@@ -471,8 +470,7 @@ def run_watch():
     for name in ("WATER_GROUP_HOME", "IDLEJOT_WG_STATE", "TULPA_WG_STATE",
                  "IDLEJOT_WG_DB", "TULPA_WG_DB"):
         env.pop(name, None)
-    env["IDLEJOT_WG_STATE"] = str(TMP)
-    env["TULPA_WG_STATE"] = str(TMP)
+    pin_state_env(TMP, env=env)  # state 两腿都钉给 watch 子进程（#281）
     env["IDLEJOT_WG_DB"] = str(DB)
     env["TULPA_WG_DB"] = str(DB)
     env["IDLEJOT_WG_CONFIG"] = str(fixture)

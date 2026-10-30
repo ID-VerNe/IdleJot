@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 import check_fixture_support as fs  # noqa: E402  (先钉数据根，见 issue #79/#89)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
 ROOT = fs.bootstrap_paths()
 
 # 记忆库必须在 import 任何 daemon 模块之前钉走：memory_store 的路径是 import
@@ -37,7 +37,7 @@ os.environ["IDLEJOT_WG_MEMORY_DB"] = str(_SCRATCH / "mem.sqlite3")
 DB = _SCRATCH / "mem.sqlite3"
 STATE = _SCRATCH / "state"
 STATE.mkdir(parents=True, exist_ok=True)
-os.environ["TULPA_WG_STATE"] = str(STATE)
+pin_state_env(STATE)  # state 两腿都钉（#281：IDLEJOT 先于 TULPA，单钉一条会被外部穿透）
 os.environ["TULPA_WG_DB"] = str(_SCRATCH / "chats.sqlite3")
 
 import reply  # noqa: E402

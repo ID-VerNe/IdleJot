@@ -24,16 +24,17 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
-from check_fixture_support import isolated_env, scratch_dir  # noqa: E402
+from check_fixture_support import isolated_env, pin_state_env, scratch_dir  # noqa: E402
 
 # Pin the data root before importing anything that resolves it at import time:
 # chatlocal/config.py mkdirs DATA/TMP on import, and the daemons resolve
 # STATE_DIR/DB at import. Without this the suite would touch the real
 # ~/.water-group (the issue #14 failure mode all over again).
+# state 两腿钉合走 pin_state_env（#281）：IDLEJOT 先于 TULPA，单钉一条会被外部穿透。
 _SCRATCH = scratch_dir(prefix="tulpa-issue16-")
 os.environ.clear()
 os.environ.update(isolated_env(_SCRATCH))
-os.environ["IDLEJOT_WG_STATE"] = str(_SCRATCH / "state")
+pin_state_env(_SCRATCH / "state")
 
 import httpx  # noqa: E402
 

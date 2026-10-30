@@ -26,7 +26,7 @@ issue #276 把第四轮 DRY/SRP 清理拆成 R1–R5（5 条 P2）+ A1–A6（6 
 | R2 | `mcp_chat_wait.wait()` 278 行抽 self-name 检测块 | SRP 抽函数 | #289 | 合并 |
 | R3 | self-name/wake-word 解析三处重复且判定不一致 | DRY 合流 | #297 | 合并 |
 | R4 | `check()/FAILED/全部通过` runner 样板 8 文件合流 `assert_runner` | DRY 合流 | #296 | 合并 |
-| R5 | `IDLEJOT/TULPA_WG_STATE` env 钉合 31 文件手写，优先级规则进代码 | DRY 合流 | #303 | 合并 |
+| R5 | `IDLEJOT/TULPA_WG_STATE` env 钉合 24 委派文件/31 调用点，优先级规则进代码 | DRY 合流 | #303 | 合并 |
 | A1 | `check_qr_login.py` 904 行拆包 | advisory 拆 | #290 | 合并 |
 | A2 | `check_gap_disclosure.py` 972 行拆包 | advisory 拆 | #291 | 合并 |
 | A3 | `check_followup.py` 867 行拆包 | advisory 拆 | #300 | 合并 |
@@ -75,11 +75,11 @@ issue #276 把第四轮 DRY/SRP 清理拆成 R1–R5（5 条 P2）+ A1–A6（6 
 
 `scripts/check_fixture_support.py:189` `class AssertRunner` / `:231` `check_call` / `:261` `def assert_runner(*, markers="ok", indent="")`。8 文件改委派 `_runner = assert_runner(markers="ok")`，本地 `def check` 删（grep `^def check(name` = 0）。A1 拆包后的 `check_qr_login/__init__.py` 也委派（A1 留的 local runner 被 R4 收口）。byte-identity：8 文件输出逐字不变。
 
-### R5 `pin_state_env` 收口 31 文件（#303）
+### R5 `pin_state_env` 收口 24 委派文件（#303）
 
-31 个 `scripts/check_*.py` 手写 `os.environ["TULPA_WG_STATE"]=...; os.environ["IDLEJOT_WG_STATE"]=...`；优先级 `IDLEJOT_WG_STATE or TULPA_WG_STATE`（`wg_paths.state_dir()`）只在 `check_reply_send_failure/_fixture.py:45`/`check_followup/_fixture.py:54`/`check_unmute_probe.py:57`/`check_gap_disclosure/_fixture.py:39` 注释里。#169 PE-3 收的是 `temp_dir()`/`scratch_dir()` 目录管理，**没收** env 钉合。
+改前 24 个委派文件手写 `os.environ["TULPA_WG_STATE"]=...; os.environ["IDLEJOT_WG_STATE"]=...`（共 31 个调用点）；优先级 `IDLEJOT_WG_STATE or TULPA_WG_STATE`（`wg_paths.state_dir()`）只在 `check_reply_send_failure/_fixture.py:45`/`check_followup/_fixture.py:54`/`check_unmute_probe.py:57`/`check_gap_disclosure/_fixture.py:39` 注释里。#169 PE-3 收的是 `temp_dir()`/`scratch_dir()` 目录管理，**没收** env 钉合。
 
-`scripts/check_fixture_support.py:78` `def pin_state_env(state, home=None, *, env=None)`：两腿都钉（`IDLEJOT_WG_STATE` + `TULPA_WG_STATE`），`env=None` 钉 `os.environ`（import-top 用，常量 import 期求值，`patch.dict` 太晚——issue #89），传 `env` dict 钉子进程。优先级规则从注释进代码。31 文件改委派 + 4 个 `_fixture.py`（check_followup/check_reply_send_failure/check_repeater/check_sixty）。
+`scripts/check_fixture_support.py:78` `def pin_state_env(state, home=None, *, env=None)`：两腿都钉（`IDLEJOT_WG_STATE` + `TULPA_WG_STATE`），`env=None` 钉 `os.environ`（import-top 用，常量 import 期求值，`patch.dict` 太晚——issue #89），传 `env` dict 钉子进程。优先级规则从注释进代码。24 个委派文件 = 19 单文件 `check_*.py` + 4 个包 `_fixture.py`（check_followup/check_gap_disclosure/check_repeater/check_reply_send_failure）+ 1 个包 `__init__.py`（check_followup/__init__.py，唯一在用例体里也钉 state 的包）；31 个调用点逐个委派。各保留原 scratch 子路径（`/state` vs `/home` 三档用 `home` 参数化，不统一数据根——统一会移数据根、破 byte-identity）。注：check_sixty 的 `_fixture.py` 只钉 `WATER_GROUP_HOME`+`IDLEJOT_WG_MEMORY_DB`、不钉 `WG_STATE`，不在 R5 范围。
 
 **新增静态断言**（不新增门禁 → 不动 gates.json/AGENTS.md/ci.yml）：`scripts/check_path_hygiene.py:197` `scan_state_env_pin()` 断言 `pin_state_env` 存在且同时钉两腿；`:346` A/B self-test 验优先级规则 + 钉合堵穿透（A 只钉 `TULPA_WG_STATE` + 投毒 `IDLEJOT_WG_STATE` → `state_dir()` 读毒；B 两腿都钉 → 读夹具）。
 

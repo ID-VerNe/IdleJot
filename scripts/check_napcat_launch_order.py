@@ -101,14 +101,20 @@ def stubbed(**overrides):
         time=NoSleep(),
     )
     names.update(overrides)
-    # base 上没有 issue #50 新增的 login_info 等属性：用哨兵区分「原来是 None」
-    # 和「本来不存在」——还原时把桩掉的属性删掉，别把名字留在模块上。少了这一步，
-    # 基线验证会红在 AttributeError 裸奔上，而不是红在行为签名上。
+    # issue #277 R1：ensure_napcat 与 wait_napcat_ports / kill_stale_instances /
+    # resolve_qq_exe / qq_extra_args / launch_napcat_direct / NAPCAT_DIR / login_info /
+    # time 移到 water_group.bootstrap_napcat，那边的 ensure_napcat 读的是
+    # bootstrap_napcat 自己的命名空间，桩必须打在 bootstrap_napcat 上。is_port_open /
+    # ensure_config / configured_account / start_process_detached 留在 bootstrap
+    # （bootstrap_napcat 经 _shared() 反向取），桩同时打 bootstrap 让 `_shared()` 读到桩。
+    from water_group import bootstrap_napcat
     missing = object()
     saved = {name: getattr(bootstrap, name, missing) for name in names}
+    saved_napcat = {name: getattr(bootstrap_napcat, name, missing) for name in names}
     try:
         for name, value in names.items():
             setattr(bootstrap, name, value)
+            setattr(bootstrap_napcat, name, value)
         yield
     finally:
         for name, value in saved.items():
@@ -117,6 +123,12 @@ def stubbed(**overrides):
                     delattr(bootstrap, name)
             else:
                 setattr(bootstrap, name, value)
+        for name, value in saved_napcat.items():
+            if value is missing:
+                if hasattr(bootstrap_napcat, name):
+                    delattr(bootstrap_napcat, name)
+            else:
+                setattr(bootstrap_napcat, name, value)
 
 
 def run_case(qq_exe, boot_ok=True, bat_exists=True, launcher=None,

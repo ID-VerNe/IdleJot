@@ -98,24 +98,34 @@ class Harness:
 
     def __enter__(self):
         b = self.bootstrap
+        # issue #277 R1 拆分后，_qq_processes / winconsole / time / LAUNCH_FILE /
+        # LAST_LAUNCH 移到 water_group.bootstrap_napcat，那边的函数读的是
+        # bootstrap_napcat 自己的命名空间，所以桩要打在 bootstrap_napcat 上；
+        # configured_account 留在 bootstrap（bootstrap_napcat 经 _shared() 反向取），
+        # ensure_napcat 也桩在 bootstrap（watchdog.relaunch 调 bootstrap.ensure_napcat）。
+        from water_group import bootstrap_napcat
+        self.napcat = bootstrap_napcat
         self.saved = {name: getattr(b, name) for name in (
-            "_qq_processes", "winconsole", "time", "configured_account",
-            "LAUNCH_FILE", "LAST_LAUNCH", "ensure_napcat")}
-        b._qq_processes = self.world.processes
-        b.winconsole = self.console
-        b.time = SimpleNamespace(
+            "configured_account", "ensure_napcat")}
+        self.saved_napcat = {name: getattr(bootstrap_napcat, name) for name in (
+            "_qq_processes", "winconsole", "time", "LAUNCH_FILE", "LAST_LAUNCH")}
+        bootstrap_napcat._qq_processes = self.world.processes
+        bootstrap_napcat.winconsole = self.console
+        bootstrap_napcat.time = SimpleNamespace(
             sleep=lambda seconds: None,
             time=time.time, strftime=time.strftime,
             mktime=time.mktime, strptime=time.strptime,
         )
         b.configured_account = lambda: ACCOUNT
-        b.LAUNCH_FILE = self.launch_file
-        b.LAST_LAUNCH = None
+        bootstrap_napcat.LAUNCH_FILE = self.launch_file
+        bootstrap_napcat.LAST_LAUNCH = None
         return self
 
     def __exit__(self, *exc):
         for name, value in self.saved.items():
             setattr(self.bootstrap, name, value)
+        for name, value in self.saved_napcat.items():
+            setattr(self.napcat, name, value)
         return False
 
     def stop(self, watchdog):
@@ -236,10 +246,15 @@ def main():
                 log_file.unlink()
             with Harness(bootstrap, World(now), FakeConsole(), launch_file):
                 bootstrap.ensure_napcat = lambda: (False, "注入超时")
-                bootstrap.LAST_LAUNCH = {"launcher_pid": 61232,
+                # LAST_LAUNCH 移到 water_group.bootstrap_napcat（issue #277 R1）：
+                # bootstrap_napcat.last_launch 读的是 bootstrap_napcat.LAST_LAUNCH，
+                # 桩必须打在那边，bootstrap.LAST_LAUNCH 这条 re-export 只是 import
+                # 时刻的快照，改它不会回写。
+                from water_group import bootstrap_napcat
+                bootstrap_napcat.LAST_LAUNCH = {"launcher_pid": 61232,
                                          "started_at": "2026-10-24 20:33:56"}
                 watchdog.relaunch()
-                bootstrap.LAST_LAUNCH = None
+                bootstrap_napcat.LAST_LAUNCH = None
                 watchdog.relaunch()
             text = log_file.read_text(encoding="utf-8", errors="ignore")
             expect("C7 本次 launcher pid 进日志",

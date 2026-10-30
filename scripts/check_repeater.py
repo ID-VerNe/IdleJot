@@ -40,7 +40,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import assert_runner, scratch_dir  # noqa: E402
 
 # 数据根在 import 任何守护模块之前钉住：`repeater` 的账本路径在调用期读
 # `state_dir()`，而 `commands` 在 import 期就把 `STATE_DIR` 求值完了。
@@ -55,17 +55,13 @@ import repeater  # noqa: E402
 from plugins.base import Hooks, Plugin, PluginError  # noqa: E402
 from plugins.registry import Registry  # noqa: E402
 
-FAILED = []
+# 即时断言 runner（issue #280 合流）：check() 打印 + 累积，summary() 出尾行。
+_runner = assert_runner(markers="ok")
+check = _runner.check
 SELF = "100000000"
 SELF_IDS = {SELF}
 GROUP = "123456789"
 OTHER = "987654321"
-
-
-def check(name, ok, detail=""):
-    print(f"{'ok  ' if ok else 'FAIL'} {name}" + (f" — {detail}" if detail and not ok else ""))
-    if not ok:
-        FAILED.append(name)
 
 
 # ---- 夹具 ---------------------------------------------------------------------
@@ -903,12 +899,7 @@ def main():
             fn()
         except Exception as exc:  # noqa: BLE001
             check(f"{fn.__name__} 跑完不炸", False, f"{type(exc).__name__}: {exc}")
-    print()
-    if FAILED:
-        print(f"{len(FAILED)} 项失败: {', '.join(FAILED)}")
-        return 1
-    print("全部通过")
-    return 0
+    return _runner.summary()
 
 
 if __name__ == "__main__":

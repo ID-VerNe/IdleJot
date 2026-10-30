@@ -21,12 +21,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import commands  # noqa: E402
 import up  # noqa: E402  (唤醒侧的 `#` 闸门，issue #70)
 import wg_up_wake  # noqa: E402  (issue #37 PC: config 的真实调用点；up.config 只是门面引用)
-from check_fixture_support import temp_dir  # noqa: E402
+from check_fixture_support import assert_runner, temp_dir  # noqa: E402
 
 # 守护的 log() 写死运维日志；检查进程不该往里混行，整体改道临时目录。
 commands.LOG = Path(tempfile.gettempdir()) / "wg_commands_check.log"
 
-FAILED = []
+# 即时断言 runner（issue #280 合流）：check() 打印 + 累积，summary() 出尾行。
+_runner = assert_runner(markers="ok")
+check = _runner.check
 SELF = "100000000"
 SELF_IDS = {SELF}
 CFG = {
@@ -45,12 +47,6 @@ CFG = {
     },
 }
 S = commands.settings_from(CFG)
-
-
-def check(name, ok, detail=""):
-    print(f"{'ok  ' if ok else 'FAIL'} {name}" + (f" — {detail}" if detail and not ok else ""))
-    if not ok:
-        FAILED.append(name)
 
 
 def event(**over):
@@ -318,8 +314,5 @@ check("pid_alive: 本进程判活", commands.pid_alive(os.getpid()))
 check("pid_alive: 不存在的 pid 判死", not commands.pid_alive(999999))
 check("pid_alive: 非法 pid 判死", not commands.pid_alive(0))
 
-print()
-if FAILED:
-    print(f"{len(FAILED)} 项失败: {', '.join(FAILED)}")
+if _runner.summary(ok_tail=f"全部通过（{commands.SEEN_MAX} 条去重窗口）"):
     sys.exit(1)
-print(f"全部通过（{commands.SEEN_MAX} 条去重窗口）")

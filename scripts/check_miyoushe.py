@@ -20,12 +20,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
 from fixture_server import FixtureHandler, fixture_server  # noqa: E402
-from check_fixture_support import network_guard, temp_dir  # noqa: E402
+from check_fixture_support import assert_runner, network_guard, temp_dir  # noqa: E402
 
 import miyoushe  # noqa: E402
 import commands  # noqa: E402
 
-FAILED = []
+# 即时断言 runner（issue #280 合流）：check() 打印 + 累积，summary() 出尾行。
+_runner = assert_runner(markers="ok")
+check = _runner.check
 CK_CTX = {"ck": ["ltuid=1; ltoken=2; cookie_token=3"], "uid": "100000000",
           "group_id": "1", "user_id": "2"}
 YEAR = time.strftime("%Y")
@@ -123,12 +125,6 @@ class FakeMihoyo(FixtureHandler):
             self.send_json({"retcode": 404, "message": "no route"}, status=404)
         else:
             self.send_json(payload)
-
-
-def check(name, ok, detail=""):
-    print(f"{'ok  ' if ok else 'FAIL'} {name}" + (f" — {detail}" if detail and not ok else ""))
-    if not ok:
-        FAILED.append(name)
 
 
 def reset(routes):
@@ -524,11 +520,8 @@ def main():
                 miyoushe.HOSTS = real
                 miyoushe.DEVICE_FILE = real_device_file
                 commands.LOG = real_cmd_log
-    print()
-    if FAILED:
-        print(f"{len(FAILED)} 项失败: {', '.join(FAILED)}")
+    if _runner.summary():
         sys.exit(1)
-    print("全部通过")
 
 
 if __name__ == "__main__":

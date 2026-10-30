@@ -31,7 +31,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import assert_runner, scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False, root=False)
 
 TMP = scratch_dir(prefix="wg_encoding_")
@@ -48,17 +48,10 @@ from water_group import bootstrap  # noqa: E402
 import wg_logs  # noqa: E402
 import winconsole  # noqa: E402
 
-FAILED = []
-
-
-def check(name, fn):
-    try:
-        fn()
-    except Exception as exc:  # noqa: BLE001
-        FAILED.append(name)
-        print(f"✗ {name}: {type(exc).__name__}: {exc}")
-    else:
-        print(f"✓ {name}")
+# 即时断言 runner（issue #280 合流）：check_call 跑 fn 抛错即失败（issue #240），
+# tick 标记无缩进复刻原 `✓ name` / `✗ name: Type: msg`。
+_runner = assert_runner(markers="tick", indent="")
+check = _runner.check_call
 
 
 def expect(got, want, note=""):
@@ -303,11 +296,8 @@ def main():
     check("run_python 拒绝调用方自带的解码参数（#240）", run_python_refuses_caller_decoding_kwargs)
 
     shutil.rmtree(TMP, ignore_errors=True)
-    if FAILED:
-        print(f"{len(FAILED)} 项失败")
-        return 1
-    print("全部通过")
-    return 0
+    # 尾只计数不列名，且尾前无空行（与本文件原 runner 一致，issue #280）。
+    return _runner.summary(names=False, blank=False)
 
 
 if __name__ == "__main__":

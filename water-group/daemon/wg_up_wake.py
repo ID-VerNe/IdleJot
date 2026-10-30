@@ -183,9 +183,41 @@ def self_account():
     return str(config().get("self_account") or "")
 
 
-def wake_words():
-    words = config().get("self_names") or []
-    return [str(w) for w in words if w]
+def wake_words(event=None):
+    """唤醒词合并后的有序 list——委派 ``wg_wake_words.wake_words``（issue #279）。
+
+    合并规则（顶层 ``self_names`` + per-group ``self_names``/``wake_words`` + 人格
+    名 + account）单一出处在 ``wg_wake_words``；改前这里只取顶层 ``self_names``，
+    per-group ``wake_words`` 配了但顶层没配的群 daemon 不认（issue #279 复现命令
+    指向的就是这条差异）。
+
+    ``event`` 给定时从中反解 ``conversation_id`` 的群号与账号，把 per-group 名单
+    纳入；缺省（如 ``check_trigger_mode.py`` 的退化桩）只读顶层——与改前同形状。
+    """
+    import wg_wake_words  # noqa: PLC0415  (同目录 flat import，与 wg_aliases 同范式)
+
+    group_id = ""
+    persona_name = ""
+    account = self_account()
+    cfg = None
+    if isinstance(event, dict):
+        cfg = config()
+        conv = str(event.get("conversation_id") or "")
+        parts = conv.split(":")
+        if len(parts) == 3 and parts[1] == "group":
+            group_id = parts[2]
+            if parts[0]:
+                account = parts[0]
+        # daemon 事件流不带 persona_name（chat_sessions 才有），preset id 走 config：
+        # per-group persona 回退 default_persona。preset id 是文件名、几乎不出现在
+        # 群友正文里，这一支形式对齐 chatlocal、运行上对 daemon 几乎无新增唤醒。
+        grp_cfg = (cfg.get("groups") or {}).get(group_id) if group_id else None
+        if isinstance(grp_cfg, dict) and grp_cfg.get("persona"):
+            persona_name = str(grp_cfg["persona"])
+        elif cfg.get("default_persona"):
+            persona_name = str(cfg["default_persona"])
+    return wg_wake_words.wake_words(cfg=cfg, group_id=group_id,
+                                    persona_name=persona_name, account=account)
 
 
 def trigger_mode(group_id=None):
@@ -327,10 +359,17 @@ def wake_reason(event):
     for detail in forwards:
         if _forward_at(detail.get("nodes"), account, budget):
             return "at"
-    for word in wake_words():
+    # issue #279：唤醒词走合并规则（顶层 + per-group + persona + account），
+    # 委派 wg_wake_words；传 event 让 per-group 名单按本条消息的群号生效。
+    # 退化兼容（check_pending_reply 等旧桩把 ``wake_words`` 打成 0 参 lambda）：
+    # 桩按 0 参调用回退，不传 event——测的是账本/时效，不是 per-group 合并。
+    try:
+        words = wake_words(event)
+    except TypeError:
+        words = wake_words()
+    for word in words:
         if word in text:
             return f"keyword:{word}"
-    words = wake_words()
     budget = {"nodes": FORWARD_WAKE_NODES, "chars": FORWARD_WAKE_CHARS}
     for detail in forwards:
         word = _forward_word(detail.get("nodes"), budget, words)

@@ -17,9 +17,9 @@ def list_wakes():
     看到群 222 的唤醒——两个会话都以为那些 @ 是给自己的。未钉死时不过滤（与改前
     一致），但会打一行 `note()` 说清隔离没生效。
     """
-    import wg_aliases
     import wg_clock
     import wg_dossiers
+    import wg_event_ref
     import wg_gap
     import wg_images
     import wg_isolation
@@ -63,7 +63,7 @@ def list_wakes():
         body, _, _ = wg_text.render_body(e.get("content"), wg_text.LIST_BODY_CHARS,
                                           e.get("id"))
         # 人名指向与画像与唤醒行同款（issue #30 / #163）。
-        gid = wg_aliases.group_of(e.get("conversation_id"))
+        gid = wg_event_ref.group_of(e.get("conversation_id"))
         tag, hits, cards = wg_dossiers.anchors(e.get("sender"), e.get("content"), gid)
         print(f"id={e.get('id')} {stamp} [{mark}] [{reason}] {e.get('sender')}{tag}: "
               f"{body}"
@@ -71,7 +71,7 @@ def list_wakes():
               f"{''.join('  ' + h for h in hits)}{cards}")
         shown += 1
     note = wg_dossiers.group_note_line(
-        wg_aliases.group_of(rows[-1].get("conversation_id")) if rows else "")
+        wg_event_ref.group_of(rows[-1].get("conversation_id")) if rows else "")
     if note:
         print(note)
     # 过滤把自己滤空要说出来（issue #164）：群号/self_account/状态目录配错时，

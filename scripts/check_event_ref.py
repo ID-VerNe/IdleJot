@@ -321,6 +321,55 @@ def 自检_只读_payload_的写法必须红():
         wg_event_ref.row_conversation = real
 
 
+@case
+def group_of_仓里唯一定义在_wg_event_ref():
+    """issue #255：`group_of` 三份副本（wg_aliases / wg_event_ref / wg_isolation）
+    收口成一份。静态断言钉死：仓里**只**剩 `wg_event_ref` 一处 `def group_of`。
+
+    改前计数：`rg -n 'def group_of' water-group/daemon` 命中三行（aliases/event_ref/isolation）。
+    改后必须只命中 `wg_event_ref` 一行——任何第二份副本回归就在这里红。
+    """
+    import ast
+
+    daemon = ROOT / "water-group" / "daemon"
+    defs = []
+    for path in daemon.glob("*.py"):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "group_of":
+                defs.append(path.name)
+    return (defs == ["wg_event_ref.py"]) or f"group_of 定义在 {defs}，期望只在 wg_event_ref.py"
+
+
+@case
+def group_of_外部调用点只走_wg_event_ref():
+    """issue #255：`wg_aliases.group_of` / `wg_isolation.group_of` 的外部调用点
+    全部改指 `wg_event_ref.group_of`。
+
+    `session.py:41` 用 `wg_isolation.group_of(conversation)` 反解会话号取群号——
+    与事件流读点同一口径，同样改指 `wg_event_ref.group_of`。静态断言：daemon 树里
+    不许再出现 `wg_aliases.group_of(` 或 `wg_isolation.group_of(` 的调用。
+    """
+    import ast
+
+    daemon = ROOT / "water-group" / "daemon"
+    bad = []
+    for path in daemon.glob("*.py"):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute) and node.attr == "group_of"
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id in ("wg_aliases", "wg_isolation")):
+                bad.append(f"{path.name}: wg_{node.value.id.removeprefix('wg_')}.group_of")
+    return (bad == []) or f"仍有外部副本调用：{bad}"
+
+
 def main():
     return fs.run_cases(CASES, setup=build)
 

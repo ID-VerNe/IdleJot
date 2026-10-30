@@ -57,7 +57,6 @@ sys.path.insert(0, str(HERE))
 
 import mcp_client  # noqa: E402
 import plugins  # noqa: E402  (事件型能力派发口：追问窗口，issue #4 PD2a)
-import wg_aliases  # noqa: E402  (别名指向渲染，issue #30)
 import wg_bubbles  # noqa: E402  (气泡上限与拆句的唯一出口，issue #131)
 import wg_budget  # noqa: E402  (等待预算的唯一出口，issue #79/#83)
 # --context 的读链（会话 id / 闲聊 / 上下文行）已拆到 wg_context（issue #163）：
@@ -474,9 +473,9 @@ def onebot_send_bubbles(group_id, bubble_segments, message_id=None, failure=None
 
 def latest_group_id():
     for row in reversed(read_events()):
-        parts = str(row.get("conversation_id") or "").split(":")
-        if len(parts) == 3 and parts[1] == "group":
-            return parts[2]
+        gid = wg_event_ref.group_of(row.get("conversation_id"))
+        if gid:
+            return gid
     # 一条唤醒都没有的时候（追问窗口里的闲聊不会进 wg_events），退回全量库问。
     # 同上：DB 兜底不过三态开关（issue #4 PD2a）。
     return plugins.emit("active_group") or ""

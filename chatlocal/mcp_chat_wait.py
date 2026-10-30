@@ -84,26 +84,22 @@ class ChatWaitMixin:
                     own_ids={str(r[0]) for r in own_rows}
                 cfg = load_water_group_config()
                 gid_str = row['conversation_id'].split(':')[-1]
-                group_cfg = cfg.get('groups', {}).get(gid_str, {})
-                names = []
-                cfg_names = cfg.get('self_names')
-                if isinstance(cfg_names, list):
-                    names.extend(str(n) for n in cfg_names if n)
-                grp_names = group_cfg.get('self_names') or group_cfg.get('wake_words')
-                if isinstance(grp_names, list):
-                    names.extend(str(n) for n in grp_names if n)
                 p_name = row.get('persona_name')
-                if p_name and p_name != '自定义人格':
-                    names.append(p_name)
-                    for part in p_name.split():
-                        if part:
-                            names.append(part)
-                keywords = {k.casefold() for k in names if k}
-                if account:
-                    keywords.add(account.casefold())
+                # issue #279：唤醒词合并（顶层 + per-group + persona + account）
+                # 单一出处在 wg_wake_words，与 daemon wg_up_wake.wake_words 同源——
+                # 改前两套口径，per-group wake_words 配了 daemon 不认。延迟 import
+                # 与 wg_text.connect_ro 门面同款：daemon 目录不保证在 chatlocal
+                # 运行时的 sys.path（server_wg.py 从 repo root 起），wait 这条
+                # 路径每轮现取、自己补 sys.path，不污染模块级。
+                import sys as _sys
+                from pathlib import Path as _Path
+                _daemon = str(_Path(__file__).resolve().parents[1] / 'water-group' / 'daemon')
+                if _daemon not in _sys.path:
+                    _sys.path.insert(0, _daemon)
+                import wg_wake_words
                 cfg_account = str(cfg.get('self_account') or '')
-                if cfg_account and not cfg_account.startswith('YOUR_'):
-                    keywords.add(cfg_account.casefold())
+                keywords = wg_wake_words.wake_keywords(
+                    cfg=cfg, group_id=gid_str, persona_name=p_name, account=account)
                 kw_list = [k for k in keywords if k]
                 for r in pending:
                     payload = json.loads(r['payload'])
@@ -236,6 +232,8 @@ class ChatWaitMixin:
                 # _detect_mention_and_dialogue（逐字搬运原 128-200，#169 PF-3）。
                 # trimmed=True 时块内 trim-through 短路命中，照旧 continue 外层
                 # while——块内原本直接 continue，helper 跨不了帧，改由返回标志驱动。
+                # issue #279：helper 内的唤醒词合并已改委派 wg_wake_words（顶层 +
+                # per-group + persona + account 的单一出处），与 daemon 同源。
                 _ms = self._detect_mention_and_dialogue(
                     sid, row, pending, account,
                     mention_only, followup_turns, followup_seconds,

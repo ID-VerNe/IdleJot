@@ -204,8 +204,13 @@ class Ref:
 def group_of(conversation_id) -> str:
     """``123456:group:789`` -> ``789``；不是群会话返回空串。
 
-    与 `wg_isolation.group_of` 同一口径；这里不 import 它，是为了让本模块能被
-    任何入口轻量导入（wg_isolation 反过来要用本模块的 `explain()`）。
+    仓里**唯一**的 `group_of` 定义（issue #255 收口）。事件流侧所有读点——
+    `wg_isolation` 的 `belongs` / `rows_of` / `same_group_ids` / `filter_report` /
+    `group_id`、`watch` / `wg_wakes` / `wg_context` 的渲染群号、`reply.latest_group_id`、
+    `wg_gap._local_state` 的认群——都走这里，不许再造第二份副本。
+
+    缺键或非群会话静默返回空串：`wg_dossiers.group_note_line()` 据此跳过群级术语、
+    `wg_isolation.rows_of` 据此把缺键行当成外群——这是 issue #255 的行为边界，保留。
     """
     parts = str(conversation_id or "").split(":")
     return parts[2] if len(parts) == 3 and parts[1] == "group" else ""

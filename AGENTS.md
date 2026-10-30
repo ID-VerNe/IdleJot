@@ -477,7 +477,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 56 | `storage` | `check_dossier_ingest.py` | dossier 写入动词：--ingest / --through / --apply / --dry-run（#6） |
 | 57 | `storage` | `check_dossier_cadence` | 画像沉淀时机：连续 N 轮无人指名即触发，quiet_since 只写首轮、WAKE 与 --mark 清零、--no-digest 与 --probe 不计数、NO 行字段逐项正确（#162）；积压不再冒充爆发、同一批 DUE 只叫一次、--digest --reap 兜底推进停滞游标（#183）；下限的读法与机器速度无关、夹具下限与用例 13 共用常量且调松即红（#196/#215）。#247：单文件顶到 1000 行红线后按 #169 PF-2 先例拆成 `scripts/check_dossier_cadence/` 包（_common/quiet_rounds/clock_fields/floor_reading/backlog_cursor），入口名不变、对 gates.json 与 CI 透明。 |
 | 58 | `storage` | `check_pollution_scrub.py` | 跨群主档污染审计、清理与还原（#34） |
-| 59 | `storage` | `check_qr_login.py` | 每用户扫码登录：passport 双流、DPAPI、限流、隐私（#6） |
+| 59 | `storage` | `check_qr_login` | 每用户扫码登录：passport 双流、DPAPI、限流、隐私（#6） |
 | 60 | `storage` | `check_upgrade.py` | 升级用真实 SQLite/WAL 夹具 |
 | 61 | `storage` | `check_hot_reload.py` | 全栈热重载：闭包覆盖、target 映射、debounce、quarantine、不 spawn（#58）；--wait 默认走 wg_budget.WAIT_BUDGET、reload.ps1 不补发字面量、over_budget(120) 反例（#230） |
 | 62 | `storage` | `check_sync_groups_participation.py` | sync_groups 不得用派生缺省改写会话参与度：未配 participation 的群三轮同步后库值不动且无改写日志、显式配置按配置对齐且打「配置同步」而非「热重载」、非法值告警不写库、人格变更仍报热重载、status.json 仍派生 trigger_mode（#234） |

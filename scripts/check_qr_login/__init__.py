@@ -3,155 +3,42 @@
 全部走 fixture_server + network_guard，不发真实请求；qr_login.HOSTS 整表指到
 127.0.0.1。users 目录与审计日志改道临时目录，不碰 ~/.water-group 真实数据。
 
-    .venv/Scripts/python.exe scripts/check_qr_login.py
+    .venv/Scripts/python.exe -m scripts.check_qr_login
+
+#282：本文件曾是单文件 `scripts/check_qr_login.py`（904 行，advisory 带）。按
+#169 PF-2（`scripts/check_listener_rehang/`）与 #247（`scripts/check_dossier_cadence/`）
+的先例拆成包：`_fixture`（FakePassport + 7 route + wire_routes + settings_for +
+reset + raises + 模块级状态），本 `__init__.py` 保留 docstring 与 28 条用例 +
+`main()`，`__main__.py` 供 `python -m`。入口名不变（`check_qr_login`），对
+`gates.json` / `run_gates.py` / CI 透明。用例调用序、断言、正文逐字搬运，零重排。
+
+`check()` / `FAILED` / `全部通过` runner 仍是本门禁本地的 `(name, ok, detail)`
+即时断言形态，未委派 R4（issue #280）的 `assert_runner`——R4 合并时把它的 8 文件
+清单（含本包 `__init__.py`）统一委派即可，本拆包与 runner 委派正交。
 """
+# 导入序是 load-bearing（issue #282）：`_fixture` 必须最先——它把 `scripts/` +
+# daemon 插进 `sys.path`、钉住数据根（`check_fixture_support` import 期会把它钉成
+# 夹具目录）、并定义 `FakePassport` / 7 route / `wire_routes` / `settings_for` /
+# `reset` / `raises` / 模块级状态。本主模块的 28 条用例依赖这些名字先就位。顺序
+# 即旧文件的用例调用序——28 条契约的运行顺序靠 `main()` 里那张 `fn` 元组逐字
+# 保持。禁止改成一行 `from . import _fixture`：显式分行防后人误重排。
+from ._fixture import (  # noqa: F401
+    APP_CREATE, APP_QUERY, COOKIE_FIELDS, COOKIE_INFO, FAILED, FakePassport,
+    LTOKEN, RECORD, RESPONSES, ROLES, WEB_CREATE, WEB_QUERY, QUERY_STATE,
+    check, fixture_server, miyoushe, network_guard, qr_login, raises, reset,
+    settings_for, temp_dir, user_store, wire_routes,
+)
 import base64
 import json
 import subprocess
 import sys
 import time
-import urllib.parse
 from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
-
-from fixture_server import FixtureHandler, fixture_server  # noqa: E402
-from check_fixture_support import network_guard, temp_dir  # noqa: E402
+from unittest.mock import patch  # noqa: E402
 
 import commands  # noqa: E402
-import miyoushe  # noqa: E402  (域异常由插件声明，commands 不再转出类对象)
-import qr_login  # noqa: E402
-import user_store  # noqa: E402
 
-FAILED = []
-RECORD = []
-RESPONSES = {}
-
-APP_CREATE = "/account/ma-cn-passport/app/createQRLogin"
-APP_QUERY = "/account/ma-cn-passport/app/queryQRLoginStatus"
-WEB_CREATE = "/account/ma-cn-passport/web/createQRLogin"
-WEB_QUERY = "/account/ma-cn-passport/web/queryQRLoginStatus"
-LTOKEN = "/account/auth/api/getLTokenBySToken"
-COOKIE_INFO = "/account/auth/api/getCookieAccountInfoBySToken"
-ROLES = "/binding/api/getUserGameRolesByCookie"
-
-# 每个 ticket 的查询响应；测试按需改写。
-QUERY_STATE = {}
-COOKIE_FIELDS = ("ltuid=12345; Path=/; Expires=Fri, 01 Jan 2027 00:00:00 GMT",
-                 "ltoken=WEB-LTOKEN; Path=/",
-                 "cookie_token=WEB-COOKIE; Path=/",
-                 "account_id=98765; Path=/",
-                 "account_mid_v2=mid-abc; Path=/")
-
-
-class FakePassport(FixtureHandler):
-    """passport / takumi 的替身。
-
-    换票与 roles 走 GET（#41 实机：POST 会 405），二维码那三个走 POST。
-    两条路共用 `_respond`，测试只需要维护 RESPONSES 表。
-    """
-
-    def _respond(self, body):
-        path = urllib.parse.urlparse(self.path).path
-        RECORD.append({"path": path, "method": self.command, "body": body,
-                       "headers": {k.lower(): v for k, v in self.headers.items()}})
-        spec = RESPONSES.get(path)
-        if spec is None:
-            self.send_json({"retcode": 404, "message": "no route"}, status=404)
-            return
-        if callable(spec):
-            spec = spec(body)
-        raw = json.dumps(spec.get("payload") or {}, ensure_ascii=False).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(raw)))
-        for cookie in spec.get("cookies") or []:
-            self.send_header("Set-Cookie", cookie)
-        self.end_headers()
-        self.wfile.write(raw)
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", "0") or 0)
-        self._respond(json.loads(self.rfile.read(length)) if length else {})
-
-    def do_GET(self):
-        self._respond({})
-
-
-def check(name, ok, detail=""):
-    print(f"{'ok  ' if ok else 'FAIL'} {name}" + (f" — {detail}" if detail and not ok else ""))
-    if not ok:
-        FAILED.append(name)
-
-
-def reset():
-    RESPONSES.clear()
-    RECORD.clear()
-    QUERY_STATE.clear()
-    qr_login.SESSIONS.clear()
-    qr_login._DAILY.clear()
-    wire_routes()
-
-
-def raises(fn, fragment):
-    try:
-        fn()
-    except qr_login.QrLoginError as exc:
-        return fragment in str(exc), str(exc)
-    return False, "没有抛 QrLoginError"
-
-
-def app_create(_body):
-    return {"payload": {"retcode": 0, "data": {"url": "https://qr.example/app", "ticket": "T-APP"}}}
-
-
-def web_create(_body):
-    return {"payload": {"retcode": 0, "data": {"url": "https://qr.example/web", "ticket": "T-WEB"}}}
-
-
-def app_query(body):
-    status, extra = QUERY_STATE.get(body.get("ticket"), ("Created", {}))
-    data = {"status": status}
-    data.update(extra)
-    return {"payload": {"retcode": 0, "data": data}}
-
-
-def web_query(body):
-    status, cookies = QUERY_STATE.get(body.get("ticket"), ("Created", []))
-    return {"payload": {"retcode": 0, "data": {"status": status}}, "cookies": cookies}
-
-
-def lt_exchange(_body):
-    return {"payload": {"retcode": 0, "data": {"ltoken": "LT-2", "ltuid": "12345"}}}
-
-
-def cookie_info(_body):
-    return {"payload": {"retcode": 0, "data": {"cookie_token": "COOKIE-2", "uid": "12345"}}}
-
-
-def roles(_body):
-    return {"payload": {"retcode": 0, "data": {"list": [
-        {"game_biz": "hk4e_cn", "game_uid": "100000001", "nickname": "旅行者"},
-        {"game_biz": "hkrpg_cn", "game_uid": "200000002"},
-        {"game_biz": "bh3_cn", "game_uid": "999999999"}]}}}
-
-
-def wire_routes():
-    RESPONSES.update({APP_CREATE: app_create, WEB_CREATE: web_create,
-                      APP_QUERY: app_query, WEB_QUERY: web_query,
-                      LTOKEN: lt_exchange, COOKIE_INFO: cookie_info, ROLES: roles})
-
-
-def settings_for(**mys):
-    base = {"ck": ["ltuid=GLOBAL; ltoken=GLOBAL"], "uid": "100000000"}
-    base.update(mys)
-    return commands.settings_from({
-        "self_account": "10001",
-        "groups": {"123456789": {"enabled": True}},
-        "slash_commands": {"enabled": True, "miyoushe": base},
-    })
+ROOT = Path(__file__).resolve().parents[2]
 
 
 # ---------------------------------------------------------------- user_store
@@ -898,7 +785,3 @@ def main():
         print(f"{len(FAILED)} 项失败: {', '.join(FAILED)}")
         sys.exit(1)
     print("全部通过")
-
-
-if __name__ == "__main__":
-    main()

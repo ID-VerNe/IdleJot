@@ -68,7 +68,7 @@ import up  # noqa: E402
 import wg_clock  # noqa: E402
 import wg_config  # noqa: E402  (config.json 的唯一读取口；CONFIG 在 import 期求值，需打桩)
 import wg_gap  # noqa: E402
-import wg_isolation  # noqa: E402  (group_of：认群口径的 oracle，issue #211)
+import wg_event_ref  # noqa: E402  (group_of：认群口径的 oracle，issue #211/#255)
 import wg_listener_state  # noqa: E402  (与 #112 账本同构，对照用)
 import reply  # noqa: E402  (list_wakes 用例需要；模块级 import 触发不进 daemon loop)
 
@@ -863,7 +863,7 @@ def 漏收at的时间戳带日期():
 # ---------- 认群口径：group_of 不按后缀（叠加 #219 之上，issue #211）----------
 
 def _oracle_local_state(home, gid):
-    """以 `wg_isolation.group_of()` 为 oracle 算期望的 `(ids, last_time)`：与
+    """以 `wg_event_ref.group_of()` 为 oracle 算期望的 `(ids, last_time)`：与
     `_local_state` 同一份 `chat_inbox`、同一份 `json.loads`，只换认群判定。钉的是
     「`_local_state` 真用了 group_of、没退回 `endswith`」，不是 group_of 本身对不对。
     """
@@ -879,7 +879,7 @@ def _oracle_local_state(home, gid):
                 continue
             if not isinstance(pl, dict):
                 continue
-            if wg_isolation.group_of(pl.get("conversation_id")) != gid:
+            if wg_event_ref.group_of(pl.get("conversation_id")) != gid:
                 continue
             if pl.get("onebot_message_id"):
                 ids.add(str(pl["onebot_message_id"]))

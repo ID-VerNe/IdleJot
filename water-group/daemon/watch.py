@@ -82,7 +82,6 @@ sys.path.insert(0, str(HERE))
 import plugins  # noqa: E402  (事件型能力派发口：追问窗口，issue #4 PD2a)
 import up  # noqa: E402  (wake_reason / events / replied_ids live there)
 import wg_budget  # noqa: E402  (等待预算，issue #83)
-import wg_aliases  # noqa: E402  (别名指向渲染，issue #30)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_dossiers  # noqa: E402  (群友画像 / 群级术语，issue #163)
 import wg_event_ref  # noqa: E402  (id / qid 两套命名空间，issue #203)
@@ -352,7 +351,7 @@ def main():
                                                   e.get("id"))
                 # 人名指向与画像：档案锚 + 正文命中的外号 + 命中者的画像卡
                 # （issue #30 / #163，口径唯一出处在 wg_dossiers.anchors）。
-                gid = wg_aliases.group_of(e.get("conversation_id"))
+                gid = wg_event_ref.group_of(e.get("conversation_id"))
                 tag, hits, cards = wg_dossiers.anchors(e.get("sender"),
                                                        e.get("content"), gid)
                 print(f"id={e.get('id')} {stamp} [{up.wake_reason(e)}] "
@@ -364,7 +363,7 @@ def main():
             # 群级术语每块只印一次（issue #31 的读侧）：它说的是「这个群这些词
             # 什么意思」，不是某条消息的属性，所以不随行重复。
             note = wg_dossiers.group_note_line(
-                wg_aliases.group_of(fresh[0].get("conversation_id")))
+                wg_event_ref.group_of(fresh[0].get("conversation_id")))
             if note:
                 print(note)
             print("WAKE")
@@ -403,7 +402,7 @@ def main():
                                                   r.get("id"), name=ref)
                 # 人名指向与画像同唤醒行同款（issue #30 / #163）；追问行没有
                 # conversation_id 字段时退回跨群主档别名。
-                gid = wg_aliases.group_of(r.get("conversation_id"))
+                gid = wg_event_ref.group_of(r.get("conversation_id"))
                 tag, hits, cards = wg_dossiers.anchors(r.get("sender"),
                                                        r.get("text"), gid)
                 print(f"id={ref} {stamp} [追问] {r.get('sender')}{tag}: "
@@ -412,7 +411,7 @@ def main():
                       f"{('  ' + r['images']) if r.get('images') else ''}"
                       f"{''.join('  ' + h for h in hits)}{cards}")
             note = wg_dossiers.group_note_line(
-                wg_aliases.group_of(woke[0].get("conversation_id")))
+                wg_event_ref.group_of(woke[0].get("conversation_id")))
             if note:
                 print(note)
             # 报告文案由 followup 决定：额度用完的那一批不说「还剩 0 条」

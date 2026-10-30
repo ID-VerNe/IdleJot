@@ -500,7 +500,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 73 | `reply` | `check_id_contract.py` | 输出记号 ↔ 解析写法的往返（#204）：行首记号原样抄回 parse() 必须认且归对套（id=7 → 事件流，id=q7 / qid=7 → 会话库），拒绝文案 HINT 列的写法逐个 parse 得过且 reply.py 复用同一份，撞号夹具下 id=7 与 id=q7 各回各的消息，watch 两种行 / --list / 追问状态行的行首形态与解析口径对得上；id=- / Q7 等仍拒，parse 退化成一律事件流时用例必须翻转 |
 | 74 | `reply` | `check_bubble_cap.py` | 单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131） |
 | 75 | `reply` | `check_reply_quote.py` | OneBot mention 与引用预检 |
-| 76 | `reply` | `check_reply_send_failure.py` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）；禁言到点必须复查，过期预测不许继续当此刻事实（#145） |
+| 76 | `reply` | `check_reply_send_failure` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）；禁言到点必须复查，过期预测不许继续当此刻事实（#145） |
 | 77 | `reply` | `check_unmute_probe.py` | 禁言解禁要叫醒值守的监听：解禁瞬时 WAKE、仍禁言/探测失败/全员禁言静默且不冒充解禁、节流两档、只读入口口径不变、listen 转述完整（#192）；禁言期间不扫追问窗口、窗口原封不动、解禁与无账本两组对照照常 [追问] 唤醒（#197） |
 | 78 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
 | 79 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |

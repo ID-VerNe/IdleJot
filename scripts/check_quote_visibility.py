@@ -28,7 +28,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False)
 
 TMP = scratch_dir(prefix="wg_quote_")
@@ -41,7 +41,7 @@ QUOTE_MID = "1680381396"
 PARENT_TEXT = "上一句原话"
 
 os.environ["TULPA_WG_DB"] = str(DB)
-os.environ["TULPA_WG_STATE"] = str(STATE)
+pin_state_env(STATE)  # state 两腿都钉（#281：IDLEJOT 先于 TULPA，单钉一条会被外部穿透）
 
 import reply  # noqa: E402
 import wg_quotes  # noqa: E402

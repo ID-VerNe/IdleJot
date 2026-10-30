@@ -44,11 +44,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-from check_fixture_support import run_cases, scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, run_cases, scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False)
 
 # 数据根 / 状态目录 / 会话库全部钉进临时目录，且在 import 任何 water_group 模块
 # **之前**完成：memory_store 的 WG_HOME / DEFAULT_DB_PATH 是 import 期求值。
+# state 两腿钉合走 pin_state_env（#281）。
 SCRATCH = scratch_dir(prefix="wg_sync_participation_")
 STATE = SCRATCH / "state"
 DATA = SCRATCH / "data"
@@ -57,8 +58,7 @@ DATA.mkdir(parents=True, exist_ok=True)
 CONFIG = SCRATCH / "config.json"
 DB = DATA / "mcp-access.sqlite3"
 os.environ["WATER_GROUP_HOME"] = str(SCRATCH)
-os.environ["IDLEJOT_WG_STATE"] = str(STATE)
-os.environ["TULPA_WG_STATE"] = str(STATE)
+pin_state_env(STATE)
 os.environ["IDLEJOT_WG_DB"] = str(DB)
 
 ACCOUNT = "10002"

@@ -37,19 +37,18 @@ if str(_scripts) not in sys.path:
     sys.path.insert(0, str(_scripts))
 
 import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False)
 
 # 数据根 / 配置 / 库全部钉进临时目录，import 任何 daemon 模块之前完成：
 # memory_store 与 wg_paths 的常量是 import 期求值的（与 check_alias_visibility 同款）。
-# `IDLEJOT_WG_STATE` 必须**显式覆盖**：`wg_paths.state_dir()` 的优先级是
-# `IDLEJOT_WG_STATE or TULPA_WG_STATE`，只钉后者会被外部环境穿透——那正是
-# 「测试写生产状态」的口子（#145 的账本复查上线后，穿透就意味着向实机 OneBot
-# 发查询、把结论写进实机账本）。
+# state 两腿钉合走 pin_state_env（#281）：`wg_paths.state_dir()` 的优先级是
+# `IDLEJOT_WG_STATE or TULPA_WG_STATE`，helper 两腿都钉堵住「只钉 TULPA 被外部
+# IDLEJOT 穿透」——那正是「测试写生产状态」的口子（#145 的账本复查上线后，
+# 穿透就意味着向实机 OneBot 发查询、把结论写进实机账本）。规则进代码不进注释。
 _SCRATCH = scratch_dir(prefix="wg_send_failure_")
 os.environ["WATER_GROUP_HOME"] = str(_SCRATCH / "home")
-os.environ["TULPA_WG_STATE"] = str(_SCRATCH / "state")
-os.environ["IDLEJOT_WG_STATE"] = str(_SCRATCH / "state")
+pin_state_env(_SCRATCH / "state")
 os.environ["IDLEJOT_WG_DB"] = str(_SCRATCH / "chats.sqlite3")
 os.environ["IDLEJOT_WG_CONFIG"] = str(_SCRATCH / "config.json")
 for path in ("home", "state"):

@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False, root=False)
 
 TMP = scratch_dir(prefix="wg_ctx_")
@@ -27,7 +27,7 @@ DB = TMP / "fixture.sqlite3"
 SID = "session-fixture"
 
 os.environ["TULPA_WG_DB"] = str(DB)
-os.environ["TULPA_WG_STATE"] = str(TMP)  # 空的，up.events() 读不到唤醒文件
+pin_state_env(TMP)  # 空的，up.events() 读不到唤醒文件；两腿都钉（#281）
 
 import reply  # noqa: E402
 

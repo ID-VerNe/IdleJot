@@ -47,21 +47,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False, root=False)
 
 DAEMON = ROOT / "water-group" / "daemon"
 
 # 数据根 / 状态目录 / 配置 / 库全部钉进临时目录，且在 import 任何 daemon 模块
 # **之前**完成：`wg_paths.state_dir()` / `wg_config.CONFIG` 都是 import 期求值。
+# state 两腿钉合走 pin_state_env（#281）。
 SCRATCH = scratch_dir(prefix="wg_multigroup_")
 STATE = SCRATCH / "state"
 STATE.mkdir(parents=True, exist_ok=True)
 CONFIG = SCRATCH / "config.json"
 DB = SCRATCH / "none.sqlite3"
 os.environ["WATER_GROUP_HOME"] = str(SCRATCH)
-os.environ["IDLEJOT_WG_STATE"] = str(STATE)
-os.environ["TULPA_WG_STATE"] = str(STATE)
+pin_state_env(STATE)
 os.environ["IDLEJOT_WG_CONFIG"] = str(CONFIG)
 os.environ["IDLEJOT_WG_DB"] = str(DB)
 os.environ.pop("IDLEJOT_WG_CONVERSATION", None)
@@ -120,9 +120,7 @@ def clear_state():
 def child_env(conversation=None):
     env = dict(os.environ)
     env["PYTHONUTF8"] = "1"
-    env["WATER_GROUP_HOME"] = str(SCRATCH)
-    env["IDLEJOT_WG_STATE"] = str(STATE)
-    env["TULPA_WG_STATE"] = str(STATE)
+    pin_state_env(STATE, home=SCRATCH, env=env)  # WATER_GROUP_HOME + state 两腿（#281）
     env["IDLEJOT_WG_CONFIG"] = str(CONFIG)
     env["IDLEJOT_WG_DB"] = str(DB)
     for name in ("IDLEJOT_WG_CONVERSATION", "TULPA_WG_CONVERSATION"):

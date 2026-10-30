@@ -30,14 +30,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
-from check_fixture_support import isolated_env, scratch_dir  # noqa: E402
+from check_fixture_support import isolated_env, pin_state_env, scratch_dir  # noqa: E402
 
 # 数据根在 import 前隔离：mint_grant 在模块级求值 STATE_DIR / DB。
+# state 两腿钉合走 pin_state_env（#281）：IDLEJOT 先于 TULPA，单钉一条会被外部穿透。
 _SCRATCH = scratch_dir(prefix="tulpa-mint-grant-")
 _HOME = _SCRATCH / "home"
 os.environ.clear()
 os.environ.update(isolated_env(_HOME))
-os.environ["IDLEJOT_WG_STATE"] = str(_SCRATCH / "state")
+pin_state_env(_SCRATCH / "state")
 
 fs.bootstrap_paths(scripts=False, root=False)
 

@@ -38,7 +38,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
 
 TMP = scratch_dir(prefix="wg_dossier_")
 HOME = TMP / "home"
@@ -46,11 +46,11 @@ STATE = HOME / "state"
 STATE.mkdir(parents=True, exist_ok=True)
 
 # 数据根全部钉到临时目录：记忆库、状态、会话库、config 都不碰本机真身。
+# state 两腿钉合走 pin_state_env（#281）。
 os.environ["WATER_GROUP_HOME"] = str(HOME)
 os.environ["IDLEJOT_WG_CONFIG"] = str(HOME / "config.json")
 os.environ["IDLEJOT_WG_MEMORY_DB"] = str(TMP / "mem.sqlite3")
-os.environ["TULPA_WG_STATE"] = str(STATE)
-os.environ["IDLEJOT_WG_STATE"] = str(STATE)
+pin_state_env(STATE)
 os.environ["TULPA_WG_DB"] = str(TMP / "chats.sqlite3")
 os.environ["IDLEJOT_WG_DB"] = str(TMP / "chats.sqlite3")
 

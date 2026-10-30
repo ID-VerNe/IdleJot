@@ -53,7 +53,7 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_fixture_support  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
 
 from fixture_server import FixtureHandler, fixture_server  # noqa: E402
 
@@ -114,9 +114,7 @@ def write_config(url):
 def child_env():
     env = dict(os.environ)
     env["PYTHONUTF8"] = "1"
-    env["WATER_GROUP_HOME"] = str(HOME)
-    env["IDLEJOT_WG_STATE"] = str(STATE)
-    env["TULPA_WG_STATE"] = str(STATE)
+    pin_state_env(STATE, home=HOME, env=env)  # WATER_GROUP_HOME + state 两腿（#281）
     env["IDLEJOT_WG_DB"] = str(HOME / "data" / "mcp-access.sqlite3")
     env["IDLEJOT_WG_CONFIG"] = str(CONFIG)
     # loopback 夹具不该走代理；开发机上设了 HTTPS_PROXY 时 requests 会绕出去。

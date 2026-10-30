@@ -31,14 +31,14 @@ if str(_scripts) not in sys.path:
     sys.path.insert(0, str(_scripts))
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
-from check_fixture_support import assert_runner, scratch_dir  # noqa: E402
+from check_fixture_support import assert_runner, pin_state_env, scratch_dir  # noqa: E402
 
 # 数据根在 import 任何守护模块之前钉住：`repeater` 的账本路径在调用期读
 # `state_dir()`，而 `commands` 在 import 期就把 `STATE_DIR` 求值完了。
+# state 两腿钉合走 pin_state_env（#281）。
 _SCRATCH = scratch_dir(prefix="wg_repeater_")
 os.environ["WATER_GROUP_HOME"] = str(_SCRATCH)
-os.environ["IDLEJOT_WG_STATE"] = str(_SCRATCH / "state")
-os.environ["TULPA_WG_STATE"] = str(_SCRATCH / "state")
+pin_state_env(_SCRATCH / "state")
 (_SCRATCH / "state").mkdir(parents=True, exist_ok=True)
 
 import commands  # noqa: E402

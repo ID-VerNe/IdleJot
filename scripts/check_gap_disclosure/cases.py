@@ -20,7 +20,7 @@ from ._fixture import (
     fixture_home, gap_at, ledger_at, write_launch, seed_inbox, onebot_msg, make_fetcher,
     status_lines,
     temp_dir,
-    up, wg_clock, wg_config, wg_gap, wg_isolation, wg_listener_state, reply,
+    up, wg_clock, wg_config, wg_gap, wg_event_ref, wg_listener_state, reply,
 )
 
 
@@ -664,7 +664,7 @@ def 漏收at的时间戳带日期():
 # ---------- 认群口径：group_of 不按后缀（叠加 #219 之上，issue #211）----------
 
 def _oracle_local_state(home, gid):
-    """以 `wg_isolation.group_of()` 为 oracle 算期望的 `(ids, last_time)`：与
+    """以 `wg_event_ref.group_of()` 为 oracle 算期望的 `(ids, last_time)`：与
     `_local_state` 同一份 `chat_inbox`、同一份 `json.loads`，只换认群判定。钉的是
     「`_local_state` 真用了 group_of、没退回 `endswith`」，不是 group_of 本身对不对。
     """
@@ -680,7 +680,7 @@ def _oracle_local_state(home, gid):
                 continue
             if not isinstance(pl, dict):
                 continue
-            if wg_isolation.group_of(pl.get("conversation_id")) != gid:
+            if wg_event_ref.group_of(pl.get("conversation_id")) != gid:
                 continue
             if pl.get("onebot_message_id"):
                 ids.add(str(pl["onebot_message_id"]))

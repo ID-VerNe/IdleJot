@@ -38,12 +38,6 @@ AT_MENTION_RE = re.compile(r"@\d{5,}")
 _CACHE = {}
 
 
-def group_of(conversation_id):
-    """``123456:group:789`` -> ``789``；不是群会话返回空串。"""
-    parts = str(conversation_id or "").split(":")
-    return parts[2] if len(parts) == 3 and parts[1] == "group" else ""
-
-
 def alias_map(group_id=None, exact=False):
     """``{名字: (QQ, 主名)}``；拿不到就空表（调用方按没有指向处理）。
 

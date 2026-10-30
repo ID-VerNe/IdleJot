@@ -30,7 +30,6 @@ if str(ROOT) not in sys.path:
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-import wg_aliases  # noqa: E402  (群号 → 别名视图，issue #30)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_dossiers  # noqa: E402  (群友画像，issue #163)
 import wg_event_ref  # noqa: E402  (id / qid 两套命名空间 + 来源标记，#203/#216)
@@ -185,7 +184,7 @@ def show_context(limit, around=None):
         tag, hits, cards = wg_dossiers.anchors(
             "" if row["self"] else row["sender"],
             "" if row["self"] else row["text"],
-            wg_aliases.group_of(row.get("conversation_id")),
+            wg_event_ref.group_of(row.get("conversation_id")),
             with_card=not row["self"] and row["id"] in hot)
         marks = []
         if row["recalled"]:

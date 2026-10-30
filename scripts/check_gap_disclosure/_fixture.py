@@ -49,7 +49,7 @@ import up  # noqa: E402
 import wg_clock  # noqa: E402
 import wg_config  # noqa: E402  (config.json 的唯一读取口；CONFIG 在 import 期求值，需打桩)
 import wg_gap  # noqa: E402
-import wg_isolation  # noqa: E402  (group_of：认群口径的 oracle，issue #211)
+import wg_event_ref  # noqa: E402  (group_of：认群口径的 oracle，issue #211/#255)
 import wg_listener_state  # noqa: E402  (与 #112 账本同构，对照用)
 import reply  # noqa: E402  (list_wakes 用例需要；模块级 import 触发不进 daemon loop)
 

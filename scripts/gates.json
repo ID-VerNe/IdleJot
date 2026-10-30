@@ -81,6 +81,7 @@
     {"name": "check_pending_reply.py", "shard": "reply", "why": "待回时效：超时唤醒不再算待回"},
     {"name": "check_reply_context.py", "shard": "reply", "why": "reply.py --context 回之前看得到群聊上下文"},
     {"name": "check_event_ref.py", "shard": "reply", "why": "事件 id 只有一个权威解析入口（#216）：字段名兼容（onebot_message_id/message_id）、列兜底（chat_sessions.conversation_id / chat_inbox.message_id）、来源顺序 wg_events 优先；两种「查不到」分开说；--context 的行能被 reply.py 解析到本群且自带 src=chat_inbox；批量读点（followup.since / wg_context.recent_chatter / wg_gap._local_state）与单条解析同一口径——payload 缺键时回查会话行、非对象 payload 不拖垮整批（#219）"},
+    {"name": "check_id_contract.py", "shard": "reply", "why": "输出记号 ↔ 解析写法的往返（#204）：行首记号原样抄回 parse() 必须认且归对套（id=7 → 事件流，id=q7 / qid=7 → 会话库），拒绝文案 HINT 列的写法逐个 parse 得过且 reply.py 复用同一份，撞号夹具下 id=7 与 id=q7 各回各的消息，watch 两种行 / --list / 追问状态行的行首形态与解析口径对得上；id=- / Q7 等仍拒，parse 退化成一律事件流时用例必须翻转"},
     {"name": "check_bubble_cap.py", "shard": "reply", "why": "单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131）"},
     {"name": "check_reply_quote.py", "shard": "reply", "why": "OneBot mention 与引用预检"},
     {"name": "check_reply_send_failure.py", "shard": "reply", "why": "发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）；禁言到点必须复查，过期预测不许继续当此刻事实（#145）"},

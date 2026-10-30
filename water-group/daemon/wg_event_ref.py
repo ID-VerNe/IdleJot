@@ -17,17 +17,28 @@ issue #203 的翻车形态：追问行与唤醒行打同一种 ``id=<数字>``�
 ===========  ==================================  ================================
 写法          含义                                查找范围
 ===========  ==================================  ================================
-``id:7``      事件流事件（唤醒行 / ``--list``）    只查 ``wg_events.jsonl``
-``qid:7``     会话库消息（追问行 / ``--context``） 只查 ``chat_inbox``
 ``7``         事件流事件（**与改前一致**）          ``wg_events``；未命中**且库中
                                                    唯一命中**时回库，并标明来源
+``id=7``     行首原样：唤醒行 / ``--list`` 打的      同 ``7``
+``id:7``      同上（冒号是 #203 起的内部写法）      同 ``7``
 ``q7``        会话库消息的简写                    只查 ``chat_inbox``
+``id=q7``     行首原样：追问行 / ``--show`` 首行打的 同 ``q7``
+``qid=7``     状态行 / 拒绝信息里打的写法          同 ``q7``
+``qid:7``     同上（冒号写法）                     同 ``q7``
 ===========  ==================================  ================================
 
 裸数字仍然是事件流 id，这是**故意**的：唤醒行在改前就是 ``id=<n>``，而 Agent 抄的
 绝大多数编号来自唤醒行；把它悄悄改成「两套里任意一套」就等于把 #164 的护栏从
 「挡住跨群」变成「挡错对象」（#203 的 P0 判级）。撞号时裸数字只认事件流，真要看
 库那条就写 ``q7``——记号上写得出区别，才谈得上不猜。
+
+**往返契约（issue #204）**：输出侧打进行首的记号，原样抄回 ``parse()`` 必须认，
+而且落进打它的那一套编号——``id=7`` 是事件流那条、``id=q7`` 是会话库那条、
+``qid=7`` 是会话库那条。#204 的缺口就在这一层：形态早就能分辨（#203），但
+``parse()`` 只认冒号写法，于是唤醒行的 ``id=7``、追问行的 ``id=q7``、状态行的
+``qid=7`` 抄回来全是 ``BadRef``，而报错文案自己宣传的正是 ``id=<n>`` / ``qid=<n>``
+这套等号写法——文案与解析器互相打架，读者只能靠手工剥前缀，剥错一次就拒。
+门禁 ``scripts/check_id_contract.py`` 钉住这条往返。
 
 ## 二、按事件 id 取一条消息也只有一个入口（issue #216）
 
@@ -61,6 +72,10 @@ issue #203 的翻车形态：追问行与唤醒行打同一种 ``id=<数字>``�
 两条路径都得「裸数字先认事件流，事件流没有才回库」，否则撞号时同一个 id 会在
 ``reply.py 7`` 与 ``followup.lookup(7)`` 之间给出两个答案——那正是 #203。
 
+``parse()`` 与渲染侧同样只许有一份口径（issue #204）：``format_ref()`` 打出去的、
+各渲染点拼上 ``id=`` 打出去的，都必须能原样回到 ``parse()``。写法表、拒绝文案
+（``HINT``）与门禁 ``check_id_contract.py`` 三者钉的是同一件事——**输出即输入**。
+
 三者分开，是因为渲染风格会变（哪天 ``qid=`` 要改名），而查找口径不该跟着变。
 
 本模块只做解析，不做发送、不做隔离判断、不渲染——`reply` / `followup` / `wg_text` /
@@ -85,11 +100,20 @@ EVENT = "event"
 INBOX = "inbox"
 NAMESPACES = (EVENT, INBOX)
 
-# 显式前缀写在前面，简写 ``q7`` 写在后面：``id:7`` / ``qid:7`` / ``7`` / ``q7``。
-# 只认小写——``Q7`` 是打错，不是另一种写法；报错比猜好。
-_EXPLICIT = re.compile(r"^(id|qid):(\d+)$")
+# 显式前缀的分隔符 ``:`` 与 ``=`` 都认：``id:7`` / ``id=7`` / ``qid:7`` / ``qid=7``。
+# ``=`` 是输出行首的形态（``watch.py`` / ``up.py --list`` / ``followup.py`` 状态行
+# 就是这么打的），``parse()`` 不认它，行首记号就抄不回来（issue #204）。
+_EXPLICIT = re.compile(r"^(id|qid)[=:](\d+)$")
+# 行首整段照抄的形态：追问行 / ``--show`` 首行打的是 ``id=`` + ``format_ref(INBOX, n)``
+# 即 ``id=q7``。``qid:`` / ``qid=`` 不许再挂 ``q``（``qid=q7`` 不是任何一行的输出）。
+_LINE_INBOX = re.compile(r"^id=q(\d+)$")
 _SHORT = re.compile(r"^q(\d+)$")
 _BARE = re.compile(r"^\d+$")
+
+# 拒绝信息里列的写法（issue #204）：文案与解析器必须逐字一致——列出来的每一种
+# 都得真的能 ``parse()``，否则报错本身就在教人写一个跑不通的记号。这条文案由
+# ``check_id_contract.py`` 拆开逐个解析验证，改文案等于同步改契约。
+HINT = "需要 <n>、q<n>、id=<n>、id=q<n> 或 qid=<n> 之一"
 
 
 class BadRef(ValueError):
@@ -99,12 +123,16 @@ class BadRef(ValueError):
 def parse(ref):
     """记号 -> ``(namespace, int)``。非法记号抛 :class:`BadRef`。
 
-    接受的写法见模块 docstring 的表。空白先剥：Agent 从行里抄编号时经常带个空格
-    或换行，那不是另一个记号。
+    接受的写法见模块 docstring 的表（含 ``=`` 与 ``:`` 两种分隔符，以及行首整段
+    ``id=q<n>``，issue #204 的往返契约）。空白先剥：Agent 从行里抄编号时经常带个
+    空格或换行，那不是另一个记号。
     """
     text = str(ref if ref is not None else "").strip()
     if not text:
-        raise BadRef("空记号：需要 id=<n>、qid=<n>、<n> 或 q<n> 之一")
+        raise BadRef(f"空记号：{HINT}")
+    matched = _LINE_INBOX.match(text)
+    if matched:
+        return INBOX, int(matched.group(1))
     matched = _EXPLICIT.match(text)
     if matched:
         return (EVENT if matched.group(1) == "id" else INBOX), int(matched.group(2))
@@ -113,7 +141,7 @@ def parse(ref):
         return INBOX, int(matched.group(1))
     if _BARE.match(text):
         return EVENT, int(text)
-    raise BadRef(f"看不懂的记号 {text!r}：需要 id=<n>、qid=<n>、<n> 或 q<n> 之一")
+    raise BadRef(f"看不懂的记号 {text!r}：{HINT}")
 
 
 def format_ref(namespace, number):

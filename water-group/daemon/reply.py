@@ -542,7 +542,7 @@ def _resolve_or_reject(parser, args, sid):
     # 挂的是哪套编号里的那条。
     resolved_ns, resolved_no, found = resolve_target(args.target)
     if resolved_ns is None:
-        print(f"拒绝：看不懂的记号 {args.target!r}（需要 id=<n>、qid=<n>、<n> 或 q<n>）")
+        print(f"拒绝：看不懂的记号 {args.target!r}（{wg_event_ref.HINT}）")
         return None
     if resolved_ns != ref_namespace and found is not None:
         print(f"  note: {args.target} 是事件流编号，事件流里没有它；按"
@@ -744,8 +744,9 @@ def _build_parser():
     """
     parser = argparse.ArgumentParser(description="回一条群消息并记账")
     parser.add_argument("target", nargs="?",
-                        help="要回复的消息 id：唤醒行/--list 的 id=<n> 抄成 <n>，追问行的 qid=<n> "
-                             "抄成 q<n>（必填，偷懒省略会直接报错；issue #203）")
+                        help="要回复的消息：行首记号原样抄即可（唤醒行/--list 的 id=<n>、"
+                             "追问行/上下文行的 id=q<n> 与 q<n>、状态行的 qid=<n> 都认；"
+                             "issue #204），只写 <n> 或 q<n> 也行（必填，偷懒省略会直接报错；issue #203）")
     parser.add_argument("text", nargs="?", help="回复正文；@ {花名} 会变成真正的 @；换行或字面量 \\n 拆成多条气泡"
                                                 f"（默认最多 {MAX_BUBBLES} 条，--max-bubbles 可调）；只发图时可省略")
     parser.add_argument("--image", action="append", default=[], metavar="路径",
@@ -760,7 +761,7 @@ def _build_parser():
                         help="在正文前面 @ 某人，可重复")
     parser.add_argument("--also", action="append", default=[], metavar="ID",
                         help="同一条回复顺带算作回了这些消息（连发的 @ 用一条答完）；"
-                             "写法同 target：<n> 是事件流，q<n> 是会话库")
+                             "写法同 target：<n>/id=<n> 是事件流，q<n>/id=q<n> 是会话库")
     parser.add_argument("--wait", type=int, default=DEFAULT_WAIT, metavar="秒",
                         help="发完就地等下一条唤醒，不用退出后另外重挂监听（默认 "
                              f"{DEFAULT_WAIT}s，0 等同于 --no-wait）")

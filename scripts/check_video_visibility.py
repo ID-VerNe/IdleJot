@@ -66,7 +66,9 @@ EID_INBOX = 9201     # 只在会话库里的视频（q<n> 那条）
 EID_CTX = 9202       # --context 行
 EID_FUP = 9203       # 追问行
 EID_BIN = 9204       # 下回来的字节不像视频
-EID_RENEW = 9205     # 重签按名字匹配
+EID_RENEW = 9205     # 重签：名字对不上
+EID_RENEW2 = 9206    # 重签：名字命中
+EID_RENEW3 = 9207    # 重签：OneBot 不答
 
 VIDEO_URL = "https://media.example.test/v.mp4"
 
@@ -287,74 +289,130 @@ def 追问行带视频命令且打q号():
 @case
 def video_认q号读会话库那条():
     """``video.py --event q<n>`` 必须真的读到会话库里那条——#216 删掉
-    ``wg_text._inbox_row`` 之后，改前的兜底是静默失效的。"""
-    event, token, source, problem = video.resolve_event(f"q{EID_INBOX}")
-    return (token == f"q{EID_INBOX}" and source == "chat_inbox" and problem == ""
-            and bool(wg_videos.labels(event)))
+    ``wg_text._inbox_row`` 之后，改前的兜底是静默失效的：这里改前报「本地没有这条
+    事件」，也就是群里随口发的视频全都补读不了。"""
+    real = video.wg_download.download
+    video.wg_download.download = lambda url, **kwargs: b"\x00\x00\x00\x18ftypmp42"
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            code = video.fetch(f"q{EID_INBOX}", 0, 40)
+    finally:
+        video.wg_download.download = real
+    text = buf.getvalue()
+    return code == 0 and "字节：" in text and "本地没有" not in text
 
 
 @case
 def 裸数字不猜会话库():
     """裸数字只认事件流；没命中就明说去看 ``q<n>``，不拿这个数字去猜库。"""
-    event, _, _, problem = video.resolve_event(str(EID_INBOX))
-    return not event and "事件流" in problem and f"q{EID_INBOX}" in problem
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = video.fetch(EID_INBOX, 0, 40)
+    text = buf.getvalue()
+    return code == 1 and f"q{EID_INBOX}" in text and "事件流" in text
 
 
 @case
 def 坏记号被拒绝():
-    event, _, _, problem = video.resolve_event("Q7")
-    return not event and bool(problem)
+    """``Q7`` 这类写错的记号要显式拒绝，不许猜成 7 去发。"""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = video.fetch("Q7", 0, 40)
+    text = buf.getvalue()
+    return code == 1 and ("拒绝" in text or "看不懂的记号" in text)
+
+
+def _renew_fixture(event_id, name="cat.mp4", quoted=True):
+    """造一条「存档地址已过期」的事件：下载只认重签回来的地址。"""
+    event = dict(event_of(event_id, []), onebot_message_id="7201")
+    segment = video_segment(url="", name=name)
+    segment["raw"] = json.dumps({"file": name, "file_size": "3418642",
+                                 "url": "https://media.example.test/stale.mp4"},
+                                ensure_ascii=False)
+    if quoted:
+        event["referenced_messages"] = [{"segments": [segment]}]
+    else:
+        event["segments"] = [segment]
+    append_event(event)
+
+
+def _stale_download(fresh_url):
+    """存档地址一律报过期（-5503 的形状），只有重签回来的地址给字节。"""
+    def download(url, **kwargs):
+        if url == fresh_url:
+            return b"\x00\x00\x00\x18ftypmp42"
+        raise wg_download.DownloadError("下载地址已过期或被拒（HTTP 400），需要重新取得链接")
+    return download
 
 
 @case
 def 重签按名字匹配不拿别的视频顶替():
     """事件里的视频来自引用原文、``get_msg`` 只回本条的另一个视频：名字对不上就
-    说对不上，不许把另一条的地址当成这条的。"""
+    说对不上。改前按下标取，会把**另一条视频**当成这条的存下来。"""
     import wg_up_wake
-    event = dict(id=EID_RENEW, onebot_message_id="7201", segments=[])
-    event["referenced_messages"] = [{"segments": [video_segment(name="cat.mp4")]}]
-    real = wg_up_wake._onebot_call
+    _renew_fixture(EID_RENEW)
+    real_call = wg_up_wake._onebot_call
+    real_dl = video.wg_download.download
     wg_up_wake._onebot_call = lambda action, payload: {
         "message": [{"type": "video", "data": {"file": "dog.mp4",
                                               "url": "https://media.example.test/dog.mp4"}}]}
+    video.wg_download.download = _stale_download("https://media.example.test/dog.mp4")
+    buf = io.StringIO()
     try:
-        url, why = video.fresh_url(event, 0, "cat.mp4")
+        with contextlib.redirect_stdout(buf):
+            code = video.fetch(EID_RENEW, 0, 40)
     finally:
-        wg_up_wake._onebot_call = real
-    return url == "" and "对不上" in why
+        wg_up_wake._onebot_call = real_call
+        video.wg_download.download = real_dl
+    text = buf.getvalue()
+    return code == 1 and "对不上" in text and "dog.mp4" not in text
 
 
 @case
 def 重签按名字命中同一条():
+    """名字对得上时重签要真的用上——这是「几小时前发的视频」唯一救得回来的路。"""
     import wg_up_wake
-    event = dict(id=EID_RENEW, onebot_message_id="7201", segments=[])
-    real = wg_up_wake._onebot_call
+    _renew_fixture(EID_RENEW2)
+    real_call = wg_up_wake._onebot_call
+    real_dl = video.wg_download.download
     wg_up_wake._onebot_call = lambda action, payload: {
         "message": [{"type": "video", "data": {"file": "cat.mp4",
                                               "url": "https://media.example.test/fresh.mp4"}}]}
+    video.wg_download.download = _stale_download("https://media.example.test/fresh.mp4")
+    buf = io.StringIO()
     try:
-        url, why = video.fresh_url(event, 0, "cat.mp4")
+        with contextlib.redirect_stdout(buf):
+            code = video.fetch(EID_RENEW2, 0, 40)
     finally:
-        wg_up_wake._onebot_call = real
-    return url.endswith("fresh.mp4") and why == ""
+        wg_up_wake._onebot_call = real_call
+        video.wg_download.download = real_dl
+    text = buf.getvalue()
+    return code == 0 and "重签地址" in text
 
 
 @case
 def 栈没起时不说成链接过期():
     """重签根本没试成（OneBot 不答）与「重签了也过期」是两件事。"""
     import wg_up_wake
-    event = dict(id=EID_RENEW, onebot_message_id="7201", segments=[])
+    _renew_fixture(EID_RENEW3)
+    real_call = wg_up_wake._onebot_call
+    real_dl = video.wg_download.download
 
     def boom(action, payload):
         raise OSError("connection refused")
 
-    real = wg_up_wake._onebot_call
     wg_up_wake._onebot_call = boom
+    video.wg_download.download = _stale_download("https://media.example.test/never.mp4")
+    buf = io.StringIO()
     try:
-        url, why = video.fresh_url(event, 0, "cat.mp4")
+        with contextlib.redirect_stdout(buf):
+            code = video.fetch(EID_RENEW3, 0, 40)
     finally:
-        wg_up_wake._onebot_call = real
-    return url == "" and "OneBot 不答" in why
+        wg_up_wake._onebot_call = real_call
+        video.wg_download.download = real_dl
+    text = buf.getvalue()
+    return code == 1 and "OneBot 不答" in text
 
 
 # ---- 缓存与落盘 ---------------------------------------------------------------
@@ -393,7 +451,7 @@ def 非视频字节落盘要说明():
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf):
-            code = video.fetch(str(EID_BIN), 0, 40)
+            code = video.fetch(EID_BIN, 0, 40)
     finally:
         video.wg_download.download = real
     text = buf.getvalue()

@@ -19,6 +19,7 @@ import httpx
 
 import mcp_client
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #4 PA0)
+import wg_event_ref  # noqa: E402  (group_of 的唯一定义，issue #255 收口)
 import wg_isolation  # noqa: E402  (群身份的唯一解析口，issue #164 PA)
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -38,7 +39,7 @@ def _persona(conversation):
     群号从 conversation id 反解（`<账号>:group:<群号>`），不是从「第一个 enabled」猜。
     """
     cfg = _config()
-    gid = wg_isolation.group_of(conversation)
+    gid = wg_event_ref.group_of(conversation)
     item = (cfg.get("groups") or {}).get(gid) if gid else None
     if isinstance(item, dict) and item.get("persona"):
         return str(item["persona"])

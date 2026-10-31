@@ -38,7 +38,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
 
 TMP = scratch_dir(prefix="wg_dossier_")
 HOME = TMP / "home"
@@ -46,11 +46,11 @@ STATE = HOME / "state"
 STATE.mkdir(parents=True, exist_ok=True)
 
 # 数据根全部钉到临时目录：记忆库、状态、会话库、config 都不碰本机真身。
+# state 两腿钉合走 pin_state_env（#281）。
 os.environ["WATER_GROUP_HOME"] = str(HOME)
 os.environ["IDLEJOT_WG_CONFIG"] = str(HOME / "config.json")
 os.environ["IDLEJOT_WG_MEMORY_DB"] = str(TMP / "mem.sqlite3")
-os.environ["TULPA_WG_STATE"] = str(STATE)
-os.environ["IDLEJOT_WG_STATE"] = str(STATE)
+pin_state_env(STATE)
 os.environ["TULPA_WG_DB"] = str(TMP / "chats.sqlite3")
 os.environ["IDLEJOT_WG_DB"] = str(TMP / "chats.sqlite3")
 
@@ -335,8 +335,9 @@ def context_只给唤醒行和_around_挂画像():
     with contextlib.redirect_stdout(buf):
         code = reply.show_context(10)
     text = buf.getvalue()
-    wakes = line_with(text, "1 ")
-    chatter = line_with(text, "3 ")
+    # 上下文行打 `q<n>`（chat_inbox rowid），唤醒行仍是裸 `id=<n>`（issue #203）。
+    wakes = line_with(text, "q1 ")
+    chatter = line_with(text, "q3 ")
     return (code == 0 and "画像 群友甲(10001)" in wakes
             and "画像" not in chatter)
 
@@ -349,7 +350,7 @@ def context_around_那一行也挂画像():
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         code = reply.show_context(10, around=2)
-    line = line_with(buf.getvalue(), "2 ")
+    line = line_with(buf.getvalue(), "q2 ")
     return code == 0 and "回这条" in line and "画像 群友甲(10001)" in line
 
 

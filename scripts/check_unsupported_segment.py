@@ -44,13 +44,13 @@ ROOT = Path(__file__).resolve().parents[1]
 # 先钉数据根（#79/#89 同类）：memory_engine 的 WG_HOME 与 DEFAULT_DB_PATH 是
 # import 期求值的，晚一步夹具档案就写进实机记忆库。
 import check_fixture_support as fs  # noqa: F401,E402  (issue #169 PE: path 注入收口)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False)
 
 _SCRATCH = scratch_dir(prefix="tulpa-unsupported-")
 os.environ["WATER_GROUP_HOME"] = str(_SCRATCH / "home")
 os.environ["IDLEJOT_WG_MEMORY_DB"] = str(_SCRATCH / "mem.sqlite3")
-os.environ["IDLEJOT_WG_STATE"] = str(_SCRATCH / "state")
+pin_state_env(_SCRATCH / "state")  # state 两腿都钉（#281）
 os.environ["IDLEJOT_WG_DB"] = str(_SCRATCH / "mcp-access.sqlite3")
 (_SCRATCH / "home").mkdir(parents=True, exist_ok=True)
 (_SCRATCH / "state").mkdir(parents=True, exist_ok=True)

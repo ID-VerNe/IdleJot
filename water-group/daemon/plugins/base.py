@@ -113,6 +113,12 @@ class Hooks:
     # 事件型能力入口（issue #4 PD2a）：宿主在通用流程点派发命名事件，
     # 返回 None = 不接，宿主继续走自己的默认分支。事件是否受三态门控由插件
     # 自决（窗口类门控、DB 兜底类不限）——语义属于插件，不属于协议。
+    #
+    # 耗时契约（issue #225）：``commands._emit_group_message`` 经 ``_EMIT_POOL``
+    # 跑 ``on_event``，``EMIT_TIMEOUT``（默认 1s）内拿不到结果就跳过本轮、记一行
+    # ``event plugin slow`` 日志——慢插件不挡紧随其后的 ``#`` 指令派发。所以
+    # ``on_event`` **不得做阻塞 I/O**：复读判定是本地纯计算（亚毫秒），要联网 /
+    # 等磁盘的副作用另起后台线程（同 ``qr_login`` 轮询线程的分工），别在事件回调里同步等。
     on_event: Callable[[str, Ctx], Any] | None = None
 
 

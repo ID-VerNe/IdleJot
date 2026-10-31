@@ -30,132 +30,40 @@ issue 要的是「群友自发复读时机器人跟一句」，而这类功能�
   门禁本身就成了偶发红。
 
     .venv/Scripts/python.exe scripts/check_repeater.py
+
+#285：本文件曾是单文件 `scripts/check_repeater.py`（906 行，advisory 带）。按
+#169 PF-2（`scripts/check_listener_rehang/`）与 #247（`scripts/check_dossier_cadence/`）、
+#282（`scripts/check_qr_login/`）的先例拆成包：`_fixture`（`Clock` fake +
+`text_event`/`settings`/`feed`/`feed_all`/`PLUGIN_OPTIONS`/`fresh` + 数据根钉住 +
+R4 的 `_runner`/`check`），本 `__init__.py` 保留 docstring 与 13 条用例 +
+`main()`，`__main__.py` 供 `python -m`。入口名不变（`check_repeater`），对
+`gates.json` / `run_gates.py` / CI 透明。用例调用序、断言、正文逐字搬运，零重排。
+
+R4（issue #280）已合流：`check()` / `全部通过` runner 委派 `_fixture` 里的
+`assert_runner(markers="ok")`（与 #169 PE-1 的 `run_cases()` 形态不同、互不替）。
+`main()` 用 `_runner.summary()` 出尾行。
 """
-import json
-import os
+# 导入序是 load-bearing（issue #285）：`_fixture` 必须最先——它把 `scripts/` +
+# daemon 插进 `sys.path`、钉住数据根（`check_fixture_support` import 期会把它钉成
+# 夹具目录）、并定义 `Clock` / `text_event` / `settings` / `feed` / `feed_all` /
+# `PLUGIN_OPTIONS` / `fresh` / `SELF_IDS` / `SELF` / `GROUP` / `OTHER`（含 R4 的
+# `_runner` / `check`）。本主模块的 13 条用例依赖这些名字先就位。顺序即旧文件的
+# 用例调用序——13 条契约的运行顺序靠 `main()` 里那张 `fn` 元组逐字保持。禁止改成
+# 一行 `from . import _fixture`：显式分行防后人误重排。
+from ._fixture import (  # noqa: F401
+    Clock, GROUP, OTHER, PLUGIN_OPTIONS, SELF, SELF_IDS, _runner, check, feed,
+    feed_all, fresh, settings, text_event,
+)
 import sys
+import time
 from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
-
-from check_fixture_support import scratch_dir  # noqa: E402
-
-# 数据根在 import 任何守护模块之前钉住：`repeater` 的账本路径在调用期读
-# `state_dir()`，而 `commands` 在 import 期就把 `STATE_DIR` 求值完了。
-_SCRATCH = scratch_dir(prefix="wg_repeater_")
-os.environ["WATER_GROUP_HOME"] = str(_SCRATCH)
-os.environ["IDLEJOT_WG_STATE"] = str(_SCRATCH / "state")
-os.environ["TULPA_WG_STATE"] = str(_SCRATCH / "state")
-(_SCRATCH / "state").mkdir(parents=True, exist_ok=True)
 
 import commands  # noqa: E402
 import repeater  # noqa: E402
-from plugins.base import Plugin, PluginError  # noqa: E402
+from plugins.base import Hooks, Plugin, PluginError  # noqa: E402
 from plugins.registry import Registry  # noqa: E402
 
-FAILED = []
-SELF = "100000000"
-SELF_IDS = {SELF}
-GROUP = "123456789"
-OTHER = "987654321"
-
-
-def check(name, ok, detail=""):
-    print(f"{'ok  ' if ok else 'FAIL'} {name}" + (f" — {detail}" if detail and not ok else ""))
-    if not ok:
-        FAILED.append(name)
-
-
-# ---- 夹具 ---------------------------------------------------------------------
-
-def text_event(text, uid="200000001", mid=1, group=GROUP, **extra):
-    """一条纯文本群消息。`text=None` 表示不带文本段（走 `extra["message"]`）。"""
-    event = {
-        "post_type": "message",
-        "message_type": "group",
-        "group_id": int(group),
-        "user_id": int(uid),
-        "message_id": mid,
-        "message": [{"type": "text", "data": {"text": text}}],
-    }
-    event.update(extra)
-    return event
-
-
-class Clock:
-    """可推进的假时钟：窗口 / 冷却都要能一秒一秒推，不睡真时间。"""
-
-    def __init__(self, start=1_800_000_000.0):
-        self.now = float(start)
-
-    def __call__(self):
-        return self.now
-
-    def tick(self, seconds=1.0):
-        self.now += float(seconds)
-        return self.now
-
-
-def settings(**over):
-    """一份开着 repeater、概率恒 1 的设置（概率另有用例单独钉）。"""
-    cfg = {
-        "self_account": SELF,
-        "self_names": ["小鲸鱼", "鱼包"],
-        "groups": {GROUP: {"enabled": True}},
-        "slash_commands": {"enabled": True},
-        "plugins": {"repeater": {
-            "enabled": True,
-            "options": {"probability": 1.0, "min_repeats": 3},
-        }},
-    }
-    cfg.update(over)
-    return commands.settings_from(cfg)
-
-
-def feed(rows, options, clock, rng=None, self_ids=SELF_IDS, conf=None):
-    """按序喂一串 `(文本, uid)`，返回**全程**发出的第一条（None = 一条都没发）。
-
-    不能「见到回复就停」：`该跟` 与 `不该跟` 往往只差最后一条消息（第四人改口），
-    提前返回就把后半段判据跳过了——那正是假绿的形状。整串跑完再看。
-    """
-    replies = feed_all(rows, options, clock, rng, self_ids, conf)
-    return replies[0] if replies else None
-
-
-def feed_all(rows, options, clock, rng=None, self_ids=SELF_IDS, conf=None):
-    """整串跑完，返回**每一次**发出的文本（按发生顺序）。
-
-    一个场景里可能「该跟一次、之后不该再跟」：只看第一条或只看最后一条都会漏掉
-    另一半判据，所以两个视角都留。
-    """
-    conf = conf or settings()
-    options = options or PLUGIN_OPTIONS(conf)
-    clock = clock or Clock()
-    replies = []
-    for index, row in enumerate(rows):
-        text, uid = row if isinstance(row, tuple) else (row, "20000000%d" % index)
-        event = text_event(text, uid=uid, mid=index + 1)
-        reply = repeater.consider(event, conf, options, self_ids, clock=clock,
-                                  rng=rng or (lambda: 0.0))
-        clock.tick(1.0)
-        if reply is not None:
-            replies.append(reply)
-    return replies
-
-
-def PLUGIN_OPTIONS(conf):
-    return commands.PLUGINS.get("repeater").options(conf)
-
-
-def fresh():
-    """每个用例一个干净窗口 + 空账本。"""
-    repeater.reset()
-    path = repeater._ledger_path()
-    try:
-        path.unlink()
-    except OSError:
-        pass
+ROOT = Path(__file__).resolve().parents[2]
 
 
 # ---- 1. 判定 -------------------------------------------------------------------
@@ -329,6 +237,18 @@ def test_gates():
           feed([("小鲸鱼呢", "1"), ("小鲸鱼呢", "2"), ("小鲸鱼呢", "3")],
                None, None) is None)
     fresh()
+    # issue #254 的两条对照：「本机名字」闸门读的是**配置里的值**，不是夹具的某个字面值。
+    # 上线机器换成别的名字（哪怕与夹具毫无关系）照样要挡；名字表空了才放行。
+    other = settings(self_names=["别的名字"])
+    check("换一个与夹具无关的名字照样挡（闸门读配置，不是读死字面值）",
+          feed([("别的名字呢", "1"), ("别的名字呢", "2"), ("别的名字呢", "3")],
+               PLUGIN_OPTIONS(other), None, conf=other) is None)
+    fresh()
+    nameless = settings(self_names=[])
+    check("名字表为空时同一串照跟（对照组：上一条的绿不是恒绿）",
+          feed([("别的名字呢", "1"), ("别的名字呢", "2"), ("别的名字呢", "3")],
+               PLUGIN_OPTIONS(nameless), None, conf=nameless) == "别的名字呢")
+    fresh()
     check("含外链不跟",
           feed([("https://x.test", "1"), ("https://x.test", "2"),
                 ("https://x.test", "3")], None, None) is None)
@@ -450,6 +370,41 @@ def test_frequency():
     again = repeater.consider(text_event("草", uid="4", mid=99), half,
                               PLUGIN_OPTIONS(half), SELF_IDS, clock=clock, rng=rng)
     check("骰子没中后同一波不重掷（第二次必中也不跟）", again is None, repr(again))
+
+    # issue #213：上面那条用默认冷却（600s）钉——冷却够长，波记忆本来就不会被
+    # 清掉，旧代码（按冷却清理）也照样绿。真正的复发在 `cooldown_seconds=0`：
+    # 旧代码 `_prune_waves` 的 `cutoff = now - max(0, 1.0)` 让波记忆 1 秒就过期，
+    # 同一波每过一秒重掷一次直到中。这里把冷却设 0、窗口留默认 120s，1.2 秒后
+    # 再喂同一波、第二次骰子必中——只有「波记忆按窗口寿命清理」在，才会拦住。
+    fresh()
+    clock = Clock()
+    nocooldown = settings(plugins={"repeater": {
+        "enabled": True,
+        "options": {"probability": 0.5, "min_repeats": 3, "cooldown_seconds": 0}}})
+    rolls = iter([0.9, 0.0])
+
+    def rng2():
+        return next(rolls, 0.9)
+
+    missed = feed([("草", "1"), ("草", "2"), ("草", "3")],
+                  PLUGIN_OPTIONS(nocooldown), clock, rng=rng2, conf=nocooldown)
+    check("cooldown=0：第一次掷骰没中（0.9 ≥ 0.5）不跟", missed is None, repr(missed))
+    clock.tick(1.2)  # 窗口内（120s），同一波还活着
+    again = repeater.consider(text_event("草", uid="4", mid=99), nocooldown,
+                              PLUGIN_OPTIONS(nocooldown), SELF_IDS, clock=clock,
+                              rng=rng2)
+    check("cooldown=0：窗口内同一波不重掷（第二次必中也不跟，#213）",
+          again is None, repr(again))
+
+    # 波记忆按窗口寿命过期：超过 window_seconds 后，三个新人复读同一句是新一波，
+    # 该允许再试一次（不能把「一波只试一次」做成「这句永远不再跟」）。
+    clock.tick(float(PLUGIN_OPTIONS(nocooldown)["window_seconds"]) + 1)
+    fresh_window = [repeater.consider(text_event("草", uid=str(i), mid=200 + i),
+                                      nocooldown, PLUGIN_OPTIONS(nocooldown),
+                                      SELF_IDS, clock=clock, rng=lambda: 0.0)
+                    for i in range(4, 7)]
+    check("cooldown=0：窗口过后新一波可跟（波记忆按窗口过期，不永久封印）",
+          any(fresh_window), repr(fresh_window))
 
     fresh()
     half = settings(plugins={"repeater": {
@@ -634,6 +589,112 @@ def test_host_dispatch():
           repr(result))
 
 
+def _log_lines():
+    """读本轮 ``commands.LOG`` 的全部行（门禁已把它改道临时文件）。"""
+    try:
+        return commands.LOG.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+
+
+def test_emit_budget():
+    """事件型派发有耗时预算（issue #225）：慢插件超时跳过、记慢日志，不挡 # 指令。
+
+    issue 复发钉子原文：注册一个 ``time.sleep`` 的夹具插件，断言 ``_emit_group_message``
+    在预算内返回、记了一行慢日志，且紧随其后的 ``dispatch()`` 仍能处理 ``#`` 指令。
+    """
+    print("[派发耗时预算（issue #225）]")
+    # 夹具：一个 on_event 里 sleep 的事件型插件。直接挂进注册表（不进 LOADERS——
+    # 它是测试探针，不是真插件），让 PLUGINS.emit 能派发到它。
+    def slow_event(_event, _ctx):
+        time.sleep(3)  # 远超 EMIT_TIMEOUT
+        return "should-never-arrive"
+
+    probe = Plugin(name="slow-probe-225", hooks=Hooks(on_event=slow_event))
+    conf = commands.settings_from({
+        "self_account": SELF,
+        "groups": {GROUP: {"enabled": True}},
+        "slash_commands": {"enabled": True, "commands": {"ping": {"reply": "pong"}}},
+    })
+    commands.SETTINGS_BOX["settings"] = conf
+
+    real_sender = commands.PLUGINS.host._sender
+    sent = []
+    commands.PLUGINS.host._sender = lambda s, gid, payload: sent.append((gid, payload))
+    # dispatch 走的是 send_group_msg（OneBot HTTP），不是 host._sender——桩掉它，
+    # 否则没真服务器时 #ping 的发送会失败、dispatch 返回 False，测不到「指令照常派发」。
+    real_send = commands.send_group_msg
+    sent_cmd = []
+    commands.send_group_msg = lambda s, gid, segs: sent_cmd.append((gid, segs)) or {"data": {"message_id": 999}}
+    registered = False
+    budget = commands.EMIT_TIMEOUT
+    try:
+        commands.PLUGINS.register(probe)
+        registered = True
+        fresh()
+        before = set(_log_lines())
+        t0 = time.monotonic()
+        result = commands._emit_group_message(text_event("草", uid="1", mid=1),
+                                              conf, SELF_IDS)
+        elapsed = time.monotonic() - t0
+        after = set(_log_lines())
+        slow_log = [ln for ln in after - before if "event plugin slow" in ln]
+        # 慢插件被预算挡住：返回 None、远不到 sleep 的 3s、记了一行慢日志、没发出去
+        check("慢插件超时返回 None", result is None, repr(result))
+        check("返回在预算内（不真等 sleep 的 3s）",
+              elapsed < budget + 1.0, f"elapsed={elapsed:.2f}s budget={budget}s")
+        check("记了一行 event plugin slow 日志", len(slow_log) == 1,
+              f"{len(slow_log)} 行: {slow_log}")
+        check("慢插件期间没发复读", not sent, repr(sent))
+
+        # issue 核心症状：慢插件挡不住紧随其后的 # 指令派发。
+        ping_event = text_event("#ping", uid="2", mid=2)
+        state = commands.new_state()
+        dispatched = commands.dispatch(ping_event, conf, SELF_IDS, state)
+        check("慢插件期间 #ping 仍派发成功", dispatched is True, repr(dispatched))
+        # dispatch 把 group_id 当 int 发（event 里就是 int），GROUP 是字符串——按值比。
+        check("#ping 回复已发出",
+              bool(sent_cmd) and str(sent_cmd[0][0]) == GROUP, repr(sent_cmd))
+    finally:
+        commands.PLUGINS.host._sender = real_sender
+        commands.send_group_msg = real_send
+        if registered:
+            # 探针从注册表摘掉，别污染同一进程里后续用例的 PLUGINS.plugins()
+            commands.PLUGINS._plugins.pop(probe.name, None)
+            for cmd in probe.commands:
+                commands.PLUGINS._owners.pop(cmd.name, None)
+                commands.PLUGINS._commands.pop(cmd.name, None)
+
+    # 变异自检：把预算调大，慢插件就该等到结果（不再是「怎么测都超时跳过」）。
+    # 参照 test_judgement_integrity 的 real/try/finally 还原模式。
+    real_budget = commands.EMIT_TIMEOUT
+    commands.EMIT_TIMEOUT = 10  # 远大于 sleep(0.2)，让快派发不被预算挡
+    try:
+        def quick_event(_event, _ctx):
+            return None  # 没人接的形状，亚毫秒返回
+
+        quick = Plugin(name="quick-probe-225", hooks=Hooks(on_event=quick_event))
+        commands.PLUGINS.register(quick)
+        try:
+            fresh()
+            t0 = time.monotonic()
+            commands._emit_group_message(text_event("草", uid="1", mid=1),
+                                         conf, SELF_IDS)
+            elapsed = time.monotonic() - t0
+            before = set(_log_lines())
+            commands._emit_group_message(text_event("草", uid="1", mid=1),
+                                         conf, SELF_IDS)
+            after = set(_log_lines())
+            slow_log = [ln for ln in after - before if "event plugin slow" in ln]
+            check("预算够大时快派发不记慢日志", not slow_log, repr(slow_log))
+            check("快派发不触发预算（远小于 budget）",
+                  elapsed < commands.EMIT_TIMEOUT, f"elapsed={elapsed:.2f}s")
+        finally:
+            commands.PLUGINS._plugins.pop(quick.name, None)
+    finally:
+        commands.EMIT_TIMEOUT = real_budget
+
+
 # ---- 5. 判据完整性自检 ---------------------------------------------------------
 
 def test_judgement_integrity():
@@ -734,18 +795,13 @@ def test_event_stream_only():
 def main():
     for fn in (test_normalize, test_repeat_basics, test_chain, test_chain_parse,
                test_gates, test_frequency, test_ledger_robustness,
-               test_plugin_wiring, test_host_dispatch, test_event_stream_only,
-               test_judgement_integrity):
+               test_plugin_wiring, test_host_dispatch, test_emit_budget,
+               test_event_stream_only, test_judgement_integrity):
         try:
             fn()
         except Exception as exc:  # noqa: BLE001
             check(f"{fn.__name__} 跑完不炸", False, f"{type(exc).__name__}: {exc}")
-    print()
-    if FAILED:
-        print(f"{len(FAILED)} 项失败: {', '.join(FAILED)}")
-        return 1
-    print("全部通过")
-    return 0
+    return _runner.summary()
 
 
 if __name__ == "__main__":

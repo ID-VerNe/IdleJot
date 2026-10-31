@@ -405,10 +405,61 @@ class MemoryObserveMixin:
         # Check explicit command first
         cmd = self.parse_explicit_command(text)
         if cmd.get("is_command"):
-            return self.handle_explicit_command(sender_id, sender_name, group_id, text)
+            # issue #220: "记在小本本上 摸鱼才是正经事" 是群里随口一句，前缀撞上
+            # ACTION_PREFIX 就被当指令。解析层只认语法（命中前缀即 True），意图门加
+            # 在这层：命中后还要"是不是在叫机器人"。判据（与 followup.mention_info、
+            # mcp_chat_prompts.social_state 同口径）——segments 里有 at 段 qq == 本机，
+            # 或文本里显式带 @机器人/@bot/@AI/@<account>（segments 被超 20KB 清空时的
+            # 兜底，mcp_chat.py:482）。判据不满足就降级走 extract_interaction：不写
+            # 小本本记录、不凭空建 member:<句首两三字>。reply 指向本机的判据这轮不做，
+            # 那要查 chat_inbox 的 own 回执，与本库（group_memories.sqlite3）跨库。
+            account = self._self_account(payload)
+            if self._addressed_to_bot(payload, account):
+                return self.handle_explicit_command(sender_id, sender_name, group_id, text)
 
-        # Check if direct mention or reply
+        # Only @-this-bot counts as direct. "@别人" / "回复别人" used to set is_direct
+        # (any at/reply segment), which polluted the interaction path the same way.
+        addressed = self._addressed_to_bot(payload, self._self_account(payload))
+        return self.extract_interaction(sender_id, sender_name, group_id, text, is_direct=addressed)
+
+    def _self_account(self, payload):
+        """The bot's own account for this message, from conversation_id.
+
+        ``conversation_id`` is ``{account}:{kind}:{group}`` (mcp_chat.receive).
+        Missing / malformed -> empty string, which makes ``_addressed_to_bot``
+        return False: a message we cannot attribute degrades to a plain text
+        observation, never to a fabricated notebook entry.
+        """
+        cid = str(payload.get("conversation_id", "") or "")
+        return cid.split(":", 1)[0].strip() if ":" in cid else ""
+
+    def _addressed_to_bot(self, payload, account):
+        """True when the message's ``at`` segment points at our own account.
+
+        ``content`` carries ``@<display name>`` after mcp_chat.receive replaced
+        the bare QQ, so only ``segments`` carries the original ``qq``. The
+        text-level fallback (``@机器人`` / ``@<account>``) covers the rare row
+        whose ``segments`` were dropped for the 20KB inbox ceiling.
+        """
+        if not account:
+            return False
         segs = payload.get("segments", [])
-        is_direct = any(s.get("type") in ("at", "reply") for s in segs)
+        if isinstance(segs, list):
+            for seg in segs:
+                if isinstance(seg, dict) and seg.get("type") == "at" and str(seg.get("qq", "")) == account:
+                    return True
+        return self._text_addresses_bot(str(payload.get("content", "") or ""), account)
 
-        return self.extract_interaction(sender_id, sender_name, group_id, text, is_direct=is_direct)
+    def _text_addresses_bot(self, text, account):
+        """Text fallback: did the sender write ``@机器人`` / ``@bot`` / ``@<qq>``?
+
+        Fixed addresses only, mirroring ``memory_commands.BOT_PREFIX`` but
+        requiring them to actually appear (the prefix in the grammar is an
+        optional group). ``self_names`` from config is the wake layer's concern;
+        memory observation does not reverse-depend on it.
+        """
+        if not text:
+            return False
+        addresses = ("@机器人", "@bot", "@ai", f"@{account}")
+        lowered = text.lower()
+        return any(addr.lower() in lowered for addr in addresses)

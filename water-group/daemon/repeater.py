@@ -32,7 +32,8 @@ natural 群普通消息会进，但复读/接龙要的是**全量**群事件（�
 长度          `max_chars`（默认 60）以上不跟
 冷却          同群 `cooldown_seconds`（默认 600s）内最多跟一次
 一波一次      同一波（`repeat:<正文>` / `chain:<格式>|<正文>`）只**尝试**一次，
-              骰子没中也算尝试过——否则消息越多必然跟
+              骰子没中也算尝试过——否则消息越多必然跟。波记忆按窗口寿命清理
+              （不是冷却）：冷却管「两波之间」，窗口管「这波还活着」
 概率          `probability`（默认 0.5）不中就不跟
 判不出自己    `self_ids` 为空时整条不跟：认不出自己的话就无法保证不死循环
 ============  ============================================================
@@ -40,6 +41,12 @@ natural 群普通消息会进，但复读/接龙要的是**全量**群事件（�
 「一波一次」与「冷却」都要跨进程重启生效，落 `state/wg_repeater.json`；窗口本身
 （`WINDOWS`）是进程内的两分钟上下文，重启丢掉是诚实的——没有人会为了复读等一次
 重启。
+
+波记忆（`waves`）的清理寿命取窗口秒数而非冷却秒数：`cooldown_seconds=0` 是配置
+允许的取值（「不冷却」），若按冷却清理会让波记忆 1 秒就过期，同一波每过一秒就能
+重掷一次骰子直到中——「一波只尝试一次」退化成「一波迟早必跟」（issue #213）。
+窗口是一波能存在的最长时间，按窗口清理既守住承诺，又对默认冷却（600s）无回归：
+窗口外本来就没有那波。
 
 已知边界（不声称任何错都红）：
 
@@ -345,12 +352,12 @@ def _chain_plan(window, options):
     return key, text
 
 
-def _prune_waves(group, now, cooldown):
+def _prune_waves(group, now, window_seconds):
     waves = group.get("waves")
     if not isinstance(waves, dict):
         group["waves"] = {}
         return
-    cutoff = now - max(float(cooldown), 1.0)
+    cutoff = now - max(float(window_seconds), 1.0)
     for key in [k for k, ts in waves.items() if float(ts or 0) < cutoff]:
         waves.pop(key, None)
 
@@ -395,7 +402,7 @@ def consider(event, settings, options, self_ids, clock=None, rng=None):
     if not isinstance(group, dict):
         group = {"waves": {}, "last_sent": 0.0, "sent": 0}
         ledger["groups"][group_id] = group
-    _prune_waves(group, now, options["cooldown_seconds"])
+    _prune_waves(group, now, options["window_seconds"])
     if now - float(group.get("last_sent") or 0) < float(options["cooldown_seconds"]):
         return None
 

@@ -23,6 +23,7 @@
 .venv/Scripts/python.exe water-group/daemon/reply.py --context 30      # 回之前看群里在聊什么（含闲聊）
 .venv/Scripts/python.exe water-group/daemon/reply.py <id> "<正文>"      # 回一条，自动带原生引用；发完默认续挂监听 90s，--no-wait 关闭
 .venv/Scripts/python.exe water-group/daemon/reply.py --show <id>       # 读某条消息全文（wg_events 命中带引用展开；缺 id 明说原因）
+.venv/Scripts/python.exe water-group/daemon/reply.py q<n> "<正文>"     # 首参也可以写 q<n>：会话库 rowid（追问行/--context 的写法，issue #203）
 .venv/Scripts/python.exe water-group/daemon/reply.py <id> "<正文>" --at <花名>  # 正文前 @ 人，可重复；真 @ 不是正文里的文本
 .venv/Scripts/python.exe water-group/daemon/reply.py --context 30 --around <id> # 只看这条之前的部分
 .venv/Scripts/python.exe water-group/daemon/reply.py --who <花名>     # 解析花名到 QQ 与归属群并给出画像卡，不发送
@@ -32,6 +33,16 @@
 
 `reply.py` 共 17 个参数，上面是最常用的；`--also`（连发 @ 用一条答复算作回了多条）、
 `--force`（目标唤醒已过待回时效也发）、`--intent`、`--no-quote` 见 `reply.py --help`。
+**id 有两套（issue #203）**：唤醒行 / `reply.py --list` / `--context` 里的裸数字是**事件流 id**
+（`wg_events`），前面带 `q` 的（`q<n>`、`qid:<n>`）是**会话库 `chat_inbox` 的 rowid**——追问行和
+`--context` 打出来的就是后者。两套编号会撞号，看到 `q<n>` 就照抄带 `q` 的写法，别剥掉前缀；
+裸数字在事件流没命中、会话库唯一命中时会回库兜底，并打一行源说明（不静默换源）。
+**行首记号原样抄（issue #204）**：唤醒行 / `--list` 打 `id=<n>`，追问行打 `id=q<n>`，
+`--context` 行打 `q<n>`，追问窗口状态行打 `qid=<n>`——这些行首的**整段**记号原样当
+`reply.py` 的首参（或 `--show` / `--around` 的取值）都认：`id=7` / `id=q7` / `qid=7` /
+`7` / `q7` 各自指回打它的那套编号，不用手工剥前缀（剥不剥都指回同一条）。记号写错
+（如 `id=-`、`Q7`）会被显式拒绝，不会猜着发。输出侧打的记号 ↔ 解析侧认的写法这条
+往返由 `scripts/check_id_contract.py` 钉住。
 `--image`（issue #128）按**内容**校验：Pillow 把整张图逐帧解开才算数（不是看扩展名、
 也不是看 `verify()`——它只对 PNG 有效），格式限 PNG/JPEG/GIF/WebP，单张 ≤6 MiB、
 合计 ≤80 兆像素、≤300 帧，一次最多 9 张。任何一张不合格就一张都不发（先校验再动手，
@@ -51,9 +62,10 @@
 几十秒后就失真了。这几处格式由 `water-group/daemon/wg_clock.py` 统一提供，
 `scripts/check_now_clock.py` 门禁钉住。
 
-**等待预算（issue #79 / #83）**：三个数只写在 `water-group/daemon/wg_budget.py`——
+**等待预算（issue #79 / #83 / #230）**：三个数只写在 `water-group/daemon/wg_budget.py`——
 宿主工具调用超时 `AGENT_TOOL_TIMEOUT=120`、发送余量 `SEND_BUDGET=30`、单次调用最多能等
-`WAIT_BUDGET=90`。`reply.py --wait` 默认、`listen.py` 常驻周期都是 90；**你自己把工具超时
+`WAIT_BUDGET=90`。`reply.py --wait` 默认、`listen.py` 常驻周期、`reload.py --wait` 默认都是 90
+（`reload.ps1` 无参时不补 `--wait`，单点定义）；**你自己把工具超时
 调小过，就必须同步调小**：被截断时父进程和它起的子进程在同一个进程组里一起死，而那条路径
 上一个字都不打印——Agent 看到的最后一行停在「等下一次唤醒…」，分不清是被杀还是还在等。
 要短一点用 `--wait 60`，要立刻返回用 `--no-wait`。`listen.py` 每轮进入 `watch.py` 之前会打
@@ -66,6 +78,9 @@
 `--timeout`（从命令行读，不是从源码推的），超预算的那个带 ⚠ 点名——修复前起的旧监听
 （远超预算的旧默认值）在状态里一眼看得出，不必再另跑一条 PowerShell 查 WMI。
 `listen.py` 显式传超预算的 `--timeout` 时也会自己打一行 `WARN`。
+`reload.py` 显式传超预算的 `--wait` 时同样打一行 `WARN`（不夹断——重载的等待是「等满 / 不等」
+二选一，压回会把显式取值改成另一个数；只说清「guard 可能在写回结果前被宿主截断，这条路径
+不打印结果」，逃生口是 `--wait 0` + `--status` 轮询，issue #230）。
 
 **监听存亡（issue #112 / #119）**：`listen.py` 每一轮值守都会在
 `~/.water-group/state/wg_listeners/<pid>.json` 留一份（起点、退出时刻、退出原因；并行监听
@@ -80,6 +95,13 @@
 未运行），只有两环都在线时才说「消息照收」；守护行为空时明说「不会自愈，需要重新拉起
 整栈」；账本段的上一轮历史统一带「仅供参考」，不再与现刻结论同形；空栈跑 `--stop`
 会多一句「栈本来就没在跑：无事可做」（退出码仍为 0，`start-bot.pyw` 的幂等前停依赖它）。
+
+**WAKE 退出空窗不说「消息照收」（issue #212）**：「消息照收」说的是「NapCat 在线 ∧ collector
+在跑」两环，与「有没有人在值守」无关。账本最近一条 stop 原因为 `WAKE` 时，正是刚叫醒、
+等重挂的空窗——消息在落盘但没人值守把它变成唤醒，空窗内新 @ 只能靠重挂后首轮 `BACKFILL`
+补扫。此刻监听行改说「等待重挂——空窗内新 @ 靠重挂后首轮 BACKFILL 补扫（此刻无人值守）」，
+不与「消息照收」并排。判据钉死在 `reason == "WAKE"`：NO_WORK / DOSSIER_DUE / WATCH_FAILED /
+硬杀 / 无账本一律仍说「消息照收」。
 
 **禁言解禁会叫醒监听（issue #192）**：账本（`state/wg_send_failure.json`）上压着未定论的
 禁言时，`watch.py` 每 15 秒现查一次 `shut_up_timestamp` / `group_all_shut`；确认解禁就打印
@@ -144,13 +166,15 @@
 判据看 `~/.water-group/logs/wg_commands.log` 的启动行：
 
 ```
-commands start, prefix='#' keywords=[...] groups=[...] handlers=<N> plugins=miyoushe:21,sixty:14
+commands start, prefix='#' keywords=[...] groups=[...] handlers=<N> plugins=miyoushe:21,sixty:0
 ```
 
 这行**时间早于提交时间** = 进程还是旧代码，此时新指令会被当未知指令**静默丢弃**
 （`unknown_reply` 默认空串，症状是「发了完全没反应」，见 issue #68）。`plugins=`
-里缺某个插件或写成 `:0` = 那个插件没加载起来（issue #4 PA：注册表按插件记
-`load_error`，`up.py --status` 的 `插件` 行也会列出来）。
+里**缺某个插件** = 它压根没加载起来（issue #4 PA：注册表按插件记 `load_error`，
+`up.py --status` 的 `插件` 行也会列出来）；写成 `名字:0` = 插件在但 0 条指令过门控
+（被 `enabled=false` 关掉、或事件型插件无 `#` 指令，issue #259），与 `--status`
+的「停用(0 指令)」同口径——不是「没注册」。
 
 重启单棵树（别整栈停，supervisor 会在 8 秒内拉起）：
 
@@ -162,9 +186,9 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
 **群里发 `#` 指令没反应时，按这三步查**（`#` 指令是独立进程，别的日志帮不上忙）：
 
 1. `tail ~/.water-group/logs/wg_commands.log` —— 有 `replied #xxx` 就是已回；**没有**说明压根没被识别，往下走；
-2. 看启动行 `commands start ... handlers=<N> plugins=<名字:指令数,…>`（例：`plugins=miyoushe:21,sixty:14`）：
+2. 看启动行 `commands start ... handlers=<N> plugins=<名字:活跃指令数,…>`（例：`plugins=miyoushe:21,sixty:0`）：
    时间早于提交时间 = 旧进程；`plugins=` 里**缺某个插件** = 它压根没加载起来（注册表记 `load_error`），
-   写成 `sixty:0` = 插件在但一条指令都没注册（两种导入失败现在都会 `log`，见 issue #68 / #4 PA）；
+   写成 `sixty:0` = 插件在但 0 条指令过门控（被 `enabled=false` 关掉、或事件型插件无 `#` 指令，与 `--status` 的「停用(0 指令)」同口径，见 issue #259）；
 3. 取数失败看 `~/.water-group/logs/wg_sixty.log` —— 它**只记失败**，成功不落日志，所以「文件不存在」是正常现象。
 
 ---
@@ -408,7 +432,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 5 | `static` | `check_no_console_child.py` | 子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发） |
 | 6 | `static` | `check_listen_passthrough.py` | 唤醒内容不被 listen.py 吞掉（#91） |
 | 7 | `static` | `check_listener_rehang` | 监听空窗：退出必带重挂指令、回复默认续挂、过期唤醒不静默、退出留痕且空窗可由只读入口报出（#69/#112） |
-| 8 | `static` | `check_gap_disclosure.py` | 停机窗口缺口披露：后端不在的那段时间漏了什么事后说得出来，up.py --status / reply.py --list / listen.py NO_WORK 三处只读入口报出窗口内漏 N 条、@ 本机 M 条，不再报告一切正常（#114） |
+| 8 | `static` | `check_gap_disclosure` | 停机窗口缺口披露：后端不在的那段时间漏了什么事后说得出来，up.py --status / reply.py --list / listen.py NO_WORK 三处只读入口报出窗口内漏 N 条、@ 本机 M 条，不再报告一切正常（#114）。#283：单文件 958 行 advisory 拆成 `scripts/check_gap_disclosure/` 包（_fixture/cases），入口名不变、对 gates.json 与 CI 透明 |
 | 9 | `static` | `check_status_napcat_line.py` | up.py --status 的 NapCat 行：括号内是 OneBot 真账号而非字段名；生产者形状与解析口径两侧各钉一条（只桩最底层 OneBot 调用），反例对照确认判据抓得住（#156/#159） |
 | 10 | `static` | `check_wg_pause.py` | 采集暂停标记（#189）：有主 + 有时限才算数，owner 退出/超 TTL/遗留哑文件都判失效并由采集器当轮清理；暂停期间照写心跳、状态行报出原因与清理人，热重载不再被哑文件永久挡住 |
 | 11 | `static` | `check_module_size.py` | 模块体量红线：文件超 1000 行或类超 800 行即 fail（#11） |
@@ -435,59 +459,66 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 32 | `runtime` | `check_napcat_qq_probe.py` | NapCat 探针契约：假消息 + loopback HTTP |
 | 33 | `runtime` | `check_qq_account_diagnostics.py` | QQ 账号诊断：目录夹具、失败分类、隐私 |
 | 34 | `mcp` | `check_issue_16_audit_fixes.py` | #16 审计缺陷回归：store 异常类型、grants 排序、MCP 响应解析、会话活性 |
-| 35 | `mcp` | `check_mcp.py` | MCP 协议层契约：真实 MCP HTTP + 隔离源夹具，从不发 QQ 消息 |
-| 36 | `mcp` | `check_mcp_onebot.py` | OneBot 设置到工具可见性再到 HTTP notice 读取（隔离夹具） |
-| 37 | `mcp` | `check_mcp_chat_output.py` | 轮询输出截断、游标与版本刷新语义 |
-| 38 | `mcp` | `check_mcp_chat_turns.py` | 对话轮次生命周期与原生引用（19 项并发与防竞争检查） |
-| 39 | `mcp` | `check_mcp_chat_prompts.py` | 提示词装配与人格卡：目录发现、缓存、体积上限与社交状态（#64） |
-| 40 | `mcp` | `check_mcp_picker.py` | 平台过滤先于分页、会话搜索与参数校验（#64） |
-| 41 | `mcp` | `check_mcp_reactions.py` | 表情回应 dry-run：真实 MCP HTTP + loopback OneBot |
-| 42 | `mcp` | `check_mcp_language_learning.py` | 实时边聊边学契约（合成夹具，无模型调用） |
-| 43 | `mcp` | `check_mcp_language_integration.py` | 语言学习跨层集成（真实 MCP wire + 合成 WS） |
-| 44 | `mcp` | `check_mcp_multi_group_learning.py` | 一套凭证两群库的隔离与持久化 |
-| 45 | `mcp` | `check_mcp_jargon_matching.py` | 群友黑话再发现：仅 peer、合成批次 |
-| 46 | `mcp` | `check_mcp_jargon_pipeline.py` | 黑话流水线各阶段独立校验 |
-| 47 | `mcp` | `check_mcp_expression_evidence.py` | 表达证据 vs 机器人政策回归 |
-| 48 | `mcp` | `check_plugin_registry.py` | 插件注册表（#4 PA 与 PB） |
-| 49 | `mcp` | `check_app_plugins.py` | app 侧插件协议：显式 scope/expression 声明、静态表、停用即降级、宿主无插件名硬编码（#4 PD/PD2b） |
-| 50 | `storage` | `check_artifacts.py` | 工件导入、SHA256 共享解析、引用门槛、缓存回收与 OneBot/HTTP 边界（#64） |
-| 51 | `storage` | `check_memory_engine_imports.py` | 水群模块单实例身份（动 shim 或 sync_* 时必跑） |
-| 52 | `storage` | `check_group_memory.py` | 记忆引擎、MCP 读写工具与两层存储 |
-| 53 | `storage` | `check_group_notes.py` | 群级结构化术语读写闭环（#31） |
-| 54 | `storage` | `check_dossier_ingest.py` | dossier 写入动词：--ingest / --through / --apply / --dry-run（#6） |
-| 55 | `storage` | `check_dossier_cadence.py` | 画像沉淀时机：连续 N 轮无人指名即触发，quiet_since 只写首轮、WAKE 与 --mark 清零、--no-digest 与 --probe 不计数、NO 行字段逐项正确（#162）；积压不再冒充爆发、同一批 DUE 只叫一次、--digest --reap 兜底推进停滞游标（#183） |
-| 56 | `storage` | `check_pollution_scrub.py` | 跨群主档污染审计、清理与还原（#34） |
-| 57 | `storage` | `check_qr_login.py` | 每用户扫码登录：passport 双流、DPAPI、限流、隐私（#6） |
-| 58 | `storage` | `check_upgrade.py` | 升级用真实 SQLite/WAL 夹具 |
-| 59 | `storage` | `check_hot_reload.py` | 全栈热重载：闭包覆盖、target 映射、debounce、quarantine、不 spawn（#58） |
-| 60 | `reply` | `check_anti_habituation.py` | 反语癖固化与多样性提示词注入 |
-| 61 | `reply` | `check_plan_recovery.py` | stale 拒绝后的重规划（plan_id 为 None 也不崩） |
-| 62 | `reply` | `check_wake_ledger.py` | 已回判定：一条回复不得把后续 @ 洗成已回 |
-| 63 | `reply` | `check_forward_wake.py` | 合并转发里的 @ 与关键词参与唤醒（#9） |
-| 64 | `reply` | `check_followup.py` | 追问窗口：回复之后还能听见群里说什么 |
-| 65 | `reply` | `check_repeater.py` | 复读/接龙：三人不同 QQ 才跟、接龙四种格式跟下一号、指令/敏感词/本机名字/外链/超长/带 @ 带图一律不跟、一波只尝试一次且冷却跨重启（#155） |
-| 66 | `reply` | `check_pending_reply.py` | 待回时效：超时唤醒不再算待回 |
-| 67 | `reply` | `check_reply_context.py` | reply.py --context 回之前看得到群聊上下文 |
-| 68 | `reply` | `check_bubble_cap.py` | 单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131） |
-| 69 | `reply` | `check_reply_quote.py` | OneBot mention 与引用预检 |
-| 70 | `reply` | `check_reply_send_failure.py` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）；禁言到点必须复查，过期预测不许继续当此刻事实（#145） |
-| 71 | `reply` | `check_unmute_probe.py` | 禁言解禁要叫醒值守的监听：解禁瞬时 WAKE、仍禁言/探测失败/全员禁言静默且不冒充解禁、节流两档、只读入口口径不变、listen 转述完整（#192）；禁言期间不扫追问窗口、窗口原封不动、解禁与无账本两组对照照常 [追问] 唤醒（#197） |
-| 72 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
-| 73 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
-| 74 | `reply` | `check_video_visibility.py` | 视频段标记可执行：唤醒行/--list/--show 三处都带 video.py 命令、无地址与文件段误判都会说明、daemon 下载判据与服务端同值；抽帧在缺 ffmpeg / 时长未知 / 短时长/失败时都说实话（#200） |
-| 75 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、四种格式都真能发、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度（超了拒、额度内照发）、不回退计划通道、发图也记账（#128） |
-| 76 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
-| 77 | `reply` | `check_wake_dossier.py` | 沉淀的群友画像必须到达唤醒行 / --list / --context（不是只挂在 MCP 的 chat_guidance 里）：命中才附、不串到别人身上、每人一行有硬顶且不挤正文额度、群级术语一次一块不跨群、引擎坏了照常唤醒（#163） |
-| 78 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
-| 79 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
-| 80 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
-| 81 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
-| 82 | `reply` | `check_sixty.py` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
-| 83 | `reply` | `check_busboss.py` | 车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103） |
-| 84 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164） |
-| 85 | `reply` | `check_trigger_mode.py` | 按群选择 natural/mention_only 触发模式：collector 请求值按 trigger_mode 取（不再硬编码 True）、natural 群普通消息 wake_reason 放行、@/关键词/is_self/指令早退不破坏、两群不同配置按群生效（#188） |
+| 35 | `mcp` | `check_mint_grant_scope.py` | 冷启动 grant 默认 scope 不许静默开 chat_video/chat_files（#201）：常量口径与 collector 实际所需对齐、空表回落不泄漏、mint() 真实 POST body 媒体授权为关且字段齐全 |
+| 36 | `mcp` | `check_mcp.py` | MCP 协议层契约：真实 MCP HTTP + 隔离源夹具，从不发 QQ 消息 |
+| 37 | `mcp` | `check_mcp_onebot.py` | OneBot 设置到工具可见性再到 HTTP notice 读取（隔离夹具） |
+| 38 | `mcp` | `check_mcp_chat_output.py` | 轮询输出截断、游标与版本刷新语义 |
+| 39 | `mcp` | `check_mcp_chat_turns.py` | 对话轮次生命周期与原生引用（19 项并发与防竞争检查） |
+| 40 | `mcp` | `check_mcp_chat_dialogue_window.py` | mention_only 对话窗口跨 wait 调用与进程重启存活、本机回复重开窗口、跳批只推游标不置 delivered（#217） |
+| 41 | `mcp` | `check_mcp_chat_prompts.py` | 提示词装配与人格卡：目录发现、缓存、体积上限与社交状态（#64） |
+| 42 | `mcp` | `check_mcp_picker.py` | 平台过滤先于分页、会话搜索与参数校验（#64） |
+| 43 | `mcp` | `check_mcp_reactions.py` | 表情回应 dry-run：真实 MCP HTTP + loopback OneBot |
+| 44 | `mcp` | `check_mcp_language_learning.py` | 实时边聊边学契约（合成夹具，无模型调用） |
+| 45 | `mcp` | `check_mcp_language_integration.py` | 语言学习跨层集成（真实 MCP wire + 合成 WS） |
+| 46 | `mcp` | `check_mcp_multi_group_learning.py` | 一套凭证两群库的隔离与持久化 |
+| 47 | `mcp` | `check_mcp_jargon_matching.py` | 群友黑话再发现：仅 peer、合成批次 |
+| 48 | `mcp` | `check_mcp_jargon_pipeline.py` | 黑话流水线各阶段独立校验 |
+| 49 | `mcp` | `check_mcp_expression_evidence.py` | 表达证据 vs 机器人政策回归 |
+| 50 | `mcp` | `check_plugin_registry.py` | 插件注册表（#4 PA 与 PB） |
+| 51 | `mcp` | `check_app_plugins.py` | app 侧插件协议：显式 scope/expression 声明、静态表、停用即降级、宿主无插件名硬编码（#4 PD/PD2b） |
+| 52 | `storage` | `check_artifacts.py` | 工件导入、SHA256 共享解析、引用门槛、缓存回收与 OneBot/HTTP 边界（#64） |
+| 53 | `storage` | `check_memory_engine_imports.py` | 水群模块单实例身份（动 shim 或 sync_* 时必跑） |
+| 54 | `storage` | `check_group_memory.py` | 记忆引擎、MCP 读写工具与两层存储 |
+| 55 | `storage` | `check_group_notes.py` | 群级结构化术语读写闭环（#31） |
+| 56 | `storage` | `check_dossier_ingest.py` | dossier 写入动词：--ingest / --through / --apply / --dry-run（#6） |
+| 57 | `storage` | `check_dossier_cadence` | 画像沉淀时机：连续 N 轮无人指名即触发，quiet_since 只写首轮、WAKE 与 --mark 清零、--no-digest 与 --probe 不计数、NO 行字段逐项正确（#162）；积压不再冒充爆发、同一批 DUE 只叫一次、--digest --reap 兜底推进停滞游标（#183）；下限的读法与机器速度无关、夹具下限与用例 13 共用常量且调松即红（#196/#215）。#247：单文件顶到 1000 行红线后按 #169 PF-2 先例拆成 `scripts/check_dossier_cadence/` 包（_common/quiet_rounds/clock_fields/floor_reading/backlog_cursor），入口名不变、对 gates.json 与 CI 透明。 |
+| 58 | `storage` | `check_pollution_scrub.py` | 跨群主档污染审计、清理与还原（#34） |
+| 59 | `storage` | `check_qr_login` | 每用户扫码登录：passport 双流、DPAPI、限流、隐私（#6） |
+| 60 | `storage` | `check_upgrade.py` | 升级用真实 SQLite/WAL 夹具 |
+| 61 | `storage` | `check_hot_reload.py` | 全栈热重载：闭包覆盖、target 映射、debounce、quarantine、不 spawn（#58）；--wait 默认走 wg_budget.WAIT_BUDGET、reload.ps1 不补发字面量、over_budget(120) 反例（#230） |
+| 62 | `storage` | `check_sync_groups_participation.py` | sync_groups 不得用派生缺省改写会话参与度：未配 participation 的群三轮同步后库值不动且无改写日志、显式配置按配置对齐且打「配置同步」而非「热重载」、非法值告警不写库、人格变更仍报热重载、status.json 仍派生 trigger_mode（#234） |
+| 63 | `reply` | `check_anti_habituation.py` | 反语癖固化与多样性提示词注入 |
+| 64 | `reply` | `check_plan_recovery.py` | stale 拒绝后的重规划（plan_id 为 None 也不崩） |
+| 65 | `reply` | `check_wake_ledger.py` | 已回判定：一条回复不得把后续 @ 洗成已回 |
+| 66 | `reply` | `check_forward_wake.py` | 合并转发里的 @ 与关键词参与唤醒（#9） |
+| 67 | `reply` | `check_wake_words.py` | self-name/wake-word 合并规则单一出处（#279）：顶层 + per-group self_names/wake_words + persona + account；per-group wake_words 配了顶层没配的群 daemon 改前漏认、改后认（翻转用例）；or 短路口径与 mcp_chat_wait 同源 |
+| 68 | `reply` | `check_followup` | 追问窗口：回复之后还能听见群里说什么 |
+| 69 | `reply` | `check_repeater` | 复读/接龙：三人不同 QQ 才跟、接龙四种格式跟下一号、指令/敏感词/本机名字/外链/超长/带 @ 带图一律不跟、一波只尝试一次且冷却跨重启（#155）；「本机名字」闸门读配置而非夹具字面值（换名照样挡、空表照跟两条对照），夹具里不留像真实昵称的常量（#254）。#285：单文件 906 行 advisory 拆成 `scripts/check_repeater/` 包（_fixture），入口名不变、对 gates.json 与 CI 透明 |
+| 70 | `reply` | `check_pending_reply.py` | 待回时效：超时唤醒不再算待回 |
+| 71 | `reply` | `check_reply_context.py` | reply.py --context 回之前看得到群聊上下文 |
+| 72 | `reply` | `check_event_ref.py` | 事件 id 只有一个权威解析入口（#216）：字段名兼容（onebot_message_id/message_id）、列兜底（chat_sessions.conversation_id / chat_inbox.message_id）、来源顺序 wg_events 优先；两种「查不到」分开说；--context 的行能被 reply.py 解析到本群且自带 src=chat_inbox；批量读点（followup.since / wg_context.recent_chatter / wg_gap._local_state）与单条解析同一口径——payload 缺键时回查会话行、非对象 payload 不拖垮整批（#219） |
+| 73 | `reply` | `check_id_contract.py` | 输出记号 ↔ 解析写法的往返（#204）：行首记号原样抄回 parse() 必须认且归对套（id=7 → 事件流，id=q7 / qid=7 → 会话库），拒绝文案 HINT 列的写法逐个 parse 得过且 reply.py 复用同一份，撞号夹具下 id=7 与 id=q7 各回各的消息，watch 两种行 / --list / 追问状态行的行首形态与解析口径对得上；id=- / Q7 等仍拒，parse 退化成一律事件流时用例必须翻转 |
+| 74 | `reply` | `check_bubble_cap.py` | 单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131） |
+| 75 | `reply` | `check_reply_quote.py` | OneBot mention 与引用预检 |
+| 76 | `reply` | `check_reply_send_failure` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）；禁言到点必须复查，过期预测不许继续当此刻事实（#145） |
+| 77 | `reply` | `check_unmute_probe.py` | 禁言解禁要叫醒值守的监听：解禁瞬时 WAKE、仍禁言/探测失败/全员禁言静默且不冒充解禁、节流两档、只读入口口径不变、listen 转述完整（#192）；禁言期间不扫追问窗口、窗口原封不动、解禁与无账本两组对照照常 [追问] 唤醒（#197） |
+| 78 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
+| 79 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
+| 80 | `reply` | `check_video_visibility.py` | 视频段标记可执行：唤醒行/--list/--show 三处都带 video.py 命令、无地址与文件段误判都会说明、daemon 下载判据与服务端同值；抽帧在缺 ffmpeg / 时长未知 / 短时长/失败时都说实话（#200） |
+| 81 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、四种格式都真能发、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度（超了拒、额度内照发）、不回退计划通道、发图也记账（#128） |
+| 82 | `reply` | `check_reply_also.py` | --also 连发不遮蔽外层事件 ref，--also 存在不崩、两条都进账本（#302） |
+| 83 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
+| 84 | `reply` | `check_wake_dossier.py` | 沉淀的群友画像必须到达唤醒行 / --list / --context（不是只挂在 MCP 的 chat_guidance 里）：命中才附、不串到别人身上、每人一行有硬顶且不挤正文额度、群级术语一次一块不跨群、引擎坏了照常唤醒（#163） |
+| 85 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
+| 86 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
+| 87 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
+| 88 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
+| 89 | `reply` | `check_sixty` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
+| 90 | `reply` | `check_busboss.py` | 车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103） |
+| 91 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164）；id 撞号分节：事件流 id 与会话库 rowid 同号时 q&lt;n&gt; 只落到本群那条、裸 id 回库兜底要打出源说明（#203） |
+| 92 | `reply` | `check_trigger_mode.py` | 按群选择 natural/mention_only 触发模式：collector 请求值按 trigger_mode 取（不再硬编码 True）、natural 群普通消息 wake_reason 放行、@/关键词/is_self/指令早退不破坏、两群不同配置按群生效（#188） |
 
-共 85 个 CI 门禁，分 5 个分片（`static` 18、`runtime` 15、`mcp` 16、`storage` 10、`reply` 26）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
+共 92 个 CI 门禁，分 5 个分片（`static` 18、`runtime` 15、`mcp` 18、`storage` 11、`reply` 30）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
 <!-- gates:ci:end -->
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

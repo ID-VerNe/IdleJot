@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -72,6 +73,41 @@ def isolated_env(home=None):
            if key.upper() in {'SYSTEMROOT', 'WINDIR'}}
     env['WATER_GROUP_HOME'] = str(home if home is not None else _scratch_home())
     return env
+
+
+def pin_state_env(state, home=None, *, env=None):
+    """Pin the daemon state dir to ``state`` so fixtures never touch the live tree.
+
+    ``wg_paths.state_dir()`` reads ``IDLEJOT_WG_STATE or TULPA_WG_STATE``
+    (``water-group/daemon/wg_paths.py:34``). **Both** legs must be pinned: only
+    setting ``TULPA_WG_STATE`` leaves a stray external ``IDLEJOT_WG_STATE`` to
+    bleed through -- exactly how fixtures used to write the real send-failure
+    ledger and probe the live OneBot (issue #145, #189; the rule lived only in
+    comments at ``check_reply_send_failure/_fixture.py:45`` / ``check_unmute_probe.py:57``
+    / ``check_gap_disclosure/_fixture.py:39``). Pinning both is the rule in code,
+    not a comment.
+
+    ``isolated_env`` is the ``WATER_GROUP_HOME`` half of this pair; this is the
+    state-dir half. ``home`` additionally pins ``WATER_GROUP_HOME`` when a suite
+    keeps the data root and state dir apart (most do -- they live under
+    different subdirs of the scratch tree, and unifying them would move the
+    data root). Omit ``home`` when the data root is pinned elsewhere or not
+    pinned at all.
+
+    ``env=None`` (default) pins into ``os.environ`` for module-top use before
+    any daemon import -- the constants are evaluated at import time, so a later
+    ``patch.dict`` is too late (issue #89). Pass an ``env`` dict to fill a
+    subprocess environment instead (the child reads its own ``os.environ``).
+    Returns the pinned mapping.
+    """
+    target = {**({'WATER_GROUP_HOME': str(home)} if home is not None else {}),
+              'IDLEJOT_WG_STATE': str(state),
+              'TULPA_WG_STATE': str(state)}
+    if env is None:
+        os.environ.update(target)
+        return target
+    env.update(target)
+    return target
 
 
 def _scratch_home():
@@ -148,6 +184,126 @@ def run_cases(cases, *, setup=None, prefix=True, catch=True):
             bad += 1
     print(tail_ok if not bad else f"{bad} 项失败" if prefix else f"{bad} case(s) failed")
     return 1 if bad else 0
+
+
+class AssertRunner:
+    """即时断言 runner：每条 ``check`` 打印一行 + 累积 FAILED，``summary`` 出尾行。
+
+    与 :func:`run_cases` 的区别：run_cases 跑 ``(name, fn)`` 列表族（issue #169
+    PE-1）；本族是 ``(name, ok, detail)`` 即时断言，调用点直接打印 + 累积 FAILED，
+    不收集 case 列表。8 个 ``check_*.py`` 把同一份 ``def check(name, ok, detail="")``
+    + ``FAILED = []`` + ``if FAILED: print(f"{n} 项失败: ...")`` / ``全部通过`` 尾
+    样板逐字重复（issue #280），本类是单一出处。
+
+    参数化两处差异，保证委派后字节一致：
+
+    * ``markers``：``"ok"``（缺省）打印 ``ok  <name>`` / ``FAIL <name> — <detail>``
+      （6 个 gate）；``"tick"`` 打印 ``<indent>✓ <name>`` / ``<indent>✗ <name>``。
+    * ``indent``：tick 行的前缀，``"  "`` 复刻 ``check_sixty``，``""`` 复刻
+      ``check_log_encoding``（那两个的 ✓/✗ 缩进不同，刻意的）。
+
+    ``check_call`` 是 ``check_log_encoding`` 那种 ``(name, fn)`` 异常捕获形态的归属
+    点（issue #240）：fn 抛错即失败，打印 ``<indent>✗ <name>: Type: msg``。
+    """
+
+    def __init__(self, *, markers="ok", indent=""):
+        if markers == "ok":
+            # ``ok`` 后留两格对齐 ``FAIL`` 的宽度；分隔空格由 ``check`` 的格式串补。
+            self._pass, self._fail = "ok  ", "FAIL"
+        elif markers == "tick":
+            self._pass, self._fail = f"{indent}✓", f"{indent}✗"
+        else:
+            raise ValueError(f"unknown markers {markers!r}; want 'ok' or 'tick'")
+        self._indent = indent
+        self.failed = []
+
+    def check(self, name, ok, detail=""):
+        """打印一行 + 累积。``ok`` 为真打印 pass marker，否则打印 fail marker 并入表。"""
+        if ok:
+            print(f"{self._pass} {name}")
+            return
+        line = f"{self._fail} {name}"
+        if detail:
+            line += f" — {detail}"
+        print(line)
+        self.failed.append(name)
+
+    def check_call(self, name, fn):
+        """跑 ``fn``：抛错即失败并打印异常，否则打印 pass marker（issue #240）。"""
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001  门禁自己坏了也算红
+            self.failed.append(name)
+            print(f"{self._fail} {name}: {type(exc).__name__}: {exc}")
+        else:
+            print(f"{self._pass} {name}")
+
+    def summary(self, *, names=True, ok_tail="全部通过", blank=True):
+        """出尾行，返回退出码（1=有失败，0=全过）。
+
+        * ``names``：失败时列名（``f"{n} 项失败: {', '.join(failed)}"``）还是只计数
+          （``f"{n} 项失败"``）—— ``check_log_encoding`` 的尾只计数。
+        * ``ok_tail``：全过时打印的文案 —— ``check_slash_commands`` 带去重窗口数。
+        * ``blank``：尾前是否打一空行 —— 8 个 gate 都在尾 runner 前打 ``print()``。
+        """
+        if blank:
+            print()
+        if self.failed:
+            if names:
+                print(f"{len(self.failed)} 项失败: {', '.join(self.failed)}")
+            else:
+                print(f"{len(self.failed)} 项失败")
+            return 1
+        print(ok_tail)
+        return 0
+
+
+def assert_runner(*, markers="ok", indent=""):
+    """构造一个 :class:`AssertRunner`（issue #280 即时断言 runner 单一出处）。"""
+    return AssertRunner(markers=markers, indent=indent)
+
+
+# `run_python` owns the text-decoding arguments, so a caller passing one is a
+# mistake: silently honouring it would put the locale back in charge (issue #240).
+_DECODING_KWARGS = ('text', 'universal_newlines', 'encoding', 'errors')
+
+
+def run_python(args, *, cwd=None, env=None, timeout=90, **kwargs):
+    """Run a Python child here and read its output as UTF-8 text (issue #240).
+
+    Every daemon entry point calls ``winconsole.ensure_utf8_stdio()`` and so
+    writes UTF-8 bytes no matter what the host locale is (AGENTS.md §2.5). A
+    bare ``subprocess.run(..., text=True)`` decodes with
+    ``locale.getpreferredencoding()`` -- cp936 on a Chinese Windows box -- and on
+    the first non-ASCII byte the reader thread raises and ``stdout`` comes back
+    as ``None``. The child had succeeded; the assertion then died on
+    ``"..." in None``.
+
+    That is a gate that is green on CI (UTF-8 locale) and red on the developer's
+    machine, and the red says nothing about what the gate is checking: three
+    check scripts had this shape (#240). Pinning the encoding here is what makes
+    "本地绿" mean the same thing as "CI 绿". ``errors="replace"`` is deliberate:
+    one stray byte should not throw away the whole output a failure report needs.
+
+    ``args`` are the child's argv *after* the interpreter; the interpreter is
+    prepended. Returns the ``CompletedProcess``.
+    """
+    for taken in _DECODING_KWARGS:
+        if taken in kwargs:
+            raise TypeError(
+                f'run_python owns {taken!r} (fixed to UTF-8); '
+                'pass it to subprocess.run instead of routing it through here')
+    return subprocess.run(
+        [sys.executable, *args],
+        cwd=str(cwd) if cwd is not None else None,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding='utf-8',
+        errors='replace',
+        timeout=timeout,
+        **kwargs,
+    )
 
 
 @contextmanager

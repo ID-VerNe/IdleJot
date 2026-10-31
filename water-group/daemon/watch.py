@@ -53,6 +53,17 @@ moment the mute lifts the next listener finds it again. A mute does not silence
 a real mention -- somebody is looking for the bot, and `--wait-unmute` can wait
 inside the budget.
 
+The same gate now also pauses the BACKFILL rewind while the mute is in force
+(issue #269): unanswered mentions piled up before the cursor used to be replayed
+the instant a new listener started, even when the bot could not send a word.
+Each replay woke the caller, which re-hung the listener, which replayed again --
+a tight loop that flooded the output until the mute lifted. The rewind is skipped
+while ``muted_now()`` is true; the cursor is not moved, so ``poll_unmute()``'s
+release path still re-hangs the listener the moment the mute ends, and that
+re-hung listener's own ``check_backlog`` pass picks up the backlog with
+``recovered=True`` on the ledger (no longer muted). `--after` / `--replay` are
+explicit caller starts and never pass through this gate.
+
 Exit codes:
   0  a wake was printed
   2  timed out with nothing new (call again)
@@ -71,9 +82,9 @@ sys.path.insert(0, str(HERE))
 import plugins  # noqa: E402  (事件型能力派发口：追问窗口，issue #4 PD2a)
 import up  # noqa: E402  (wake_reason / events / replied_ids live there)
 import wg_budget  # noqa: E402  (等待预算，issue #83)
-import wg_aliases  # noqa: E402  (别名指向渲染，issue #30)
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_dossiers  # noqa: E402  (群友画像 / 群级术语，issue #163)
+import wg_event_ref  # noqa: E402  (id / qid 两套命名空间，issue #203)
 import wg_images  # noqa: E402  (图片标记渲染)
 import wg_videos  # noqa: E402  (视频标记渲染，issue #200)
 import wg_isolation  # noqa: E402  (本会话只管一个群，issue #164 PA)
@@ -289,9 +300,10 @@ def main():
     # 的起点是调用方显式给的，不许被改写。start_cursor 已是回退前的值，
     # report_expired 的口径不受影响。
     check_backlog = args.after is None and not args.replay
-    # 禁言期间的暂停说明只打一次（issue #197）：这句是「为什么没动静」的解释，
+    # 禁言期间的暂停说明只打一次（issue #197 / #269）：这句是「为什么没动静」的解释，
     # 不是唤醒内容；按轮重复会把它变成噪声，恰好盖住真正要看的东西。
     mute_paused = False
+    backfill_paused = False
 
     while True:
         raw_rows = up.events()
@@ -299,7 +311,18 @@ def main():
         ledger = up.replied_ids()
         if check_backlog:
             check_backlog = False
-            cursor = rewind_for_backlog(rows, cursor, ledger)
+            # 禁言期间暂停未回唤醒 BACKFILL（issue #269）：游标之前积压的未回 @ 此刻
+            # 一条都发不出去（reply.py 必失败），重放只会让 watch.py 立刻 WAKE、
+            # listen.py 立即重挂、再 BACKFILL+WAKE，每秒数次死循环刷屏。与 #197 暂停
+            # 追问窗口扫描同构：游标不关，解禁后由 poll_unmute() 触发重挂，重挂首轮
+            # 的 check_backlog 仍会补扫积压（账本 recovered=True 后 muted_now() 为 False，
+            # 这条闸门放行）。`--after` / `--replay` 不经此路（check_backlog 恒 False）。
+            if wg_send_failure.muted_now():
+                if not backfill_paused:
+                    backfill_paused = True
+                    print("# 禁言中：暂停未回唤醒 BACKFILL（解禁后自动补扫，待回时效照旧）")
+            else:
+                cursor = rewind_for_backlog(rows, cursor, ledger)
         # 过滤把自己的会话滤空了要出声（issue #164）：群号/self_account/状态目录
         # 配错时，「过滤生效」与「群里没人说话」在输出里长得一模一样。每轮只报一次。
         empty_note = wg_isolation.filter_report(raw_rows)
@@ -329,7 +352,7 @@ def main():
                                                   e.get("id"))
                 # 人名指向与画像：档案锚 + 正文命中的外号 + 命中者的画像卡
                 # （issue #30 / #163，口径唯一出处在 wg_dossiers.anchors）。
-                gid = wg_aliases.group_of(e.get("conversation_id"))
+                gid = wg_event_ref.group_of(e.get("conversation_id"))
                 tag, hits, cards = wg_dossiers.anchors(e.get("sender"),
                                                        e.get("content"), gid)
                 print(f"id={e.get('id')} {stamp} [{up.wake_reason(e)}] "
@@ -341,7 +364,7 @@ def main():
             # 群级术语每块只印一次（issue #31 的读侧）：它说的是「这个群这些词
             # 什么意思」，不是某条消息的属性，所以不随行重复。
             note = wg_dossiers.group_note_line(
-                wg_aliases.group_of(fresh[0].get("conversation_id")))
+                wg_event_ref.group_of(fresh[0].get("conversation_id")))
             if note:
                 print(note)
             print("WAKE")
@@ -369,22 +392,27 @@ def main():
             print(wg_clock.now_line())
             for r in woke:
                 stamp = wg_clock.clock_ms(r.get("ts"))
+                # 追问行的编号是 chat_inbox 的全局 rowid，和唤醒行的 wg_events id
+                # 是两套各自分配的编号，会撞号（issue #203）。所以这里打 `q<n>`，
+                # 渲染侧给的都是同一个记号：截断提示的 --show、补读命令的 --event、
+                # 行首的 id= 三处必须一致，Agent 抄哪一处都指回这条。
+                ref = wg_event_ref.format_ref(wg_event_ref.INBOX, r.get("id"))
                 # 追问行与唤醒行同一份渲染口径（issue #32）。
                 body, _, _ = wg_text.render_body(r.get("text"),
                                                   wg_text.WAKE_BODY_CHARS,
-                                                  r.get("id"))
+                                                  r.get("id"), name=ref)
                 # 人名指向与画像同唤醒行同款（issue #30 / #163）；追问行没有
                 # conversation_id 字段时退回跨群主档别名。
-                gid = wg_aliases.group_of(r.get("conversation_id"))
+                gid = wg_event_ref.group_of(r.get("conversation_id"))
                 tag, hits, cards = wg_dossiers.anchors(r.get("sender"),
                                                        r.get("text"), gid)
-                print(f"id={r.get('id')} {stamp} [追问] {r.get('sender')}{tag}: "
+                print(f"id={ref} {stamp} [追问] {r.get('sender')}{tag}: "
                       f"{body}"
                       f"{('  ' + r['quote']) if r.get('quote') else ''}"
                       f"{('  ' + r['images']) if r.get('images') else ''}"
                       f"{''.join('  ' + h for h in hits)}{cards}")
             note = wg_dossiers.group_note_line(
-                wg_aliases.group_of(woke[0].get("conversation_id")))
+                wg_event_ref.group_of(woke[0].get("conversation_id")))
             if note:
                 print(note)
             # 报告文案由 followup 决定：额度用完的那一批不说「还剩 0 条」

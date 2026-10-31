@@ -20,15 +20,16 @@
 改前没有这一句，钉死群 111 的会话能把话发进群 222，还把群 222 那条记成「已回」，
 另一个会话于是永远不再回它（``doc/MULTI_GROUP_PLAN.md:63`` 的 P0）。
 
-判定全部基于 ``conversation_id`` 的 ``<账号>:group:<群号>`` 形状，与
-``wg_aliases.group_of`` 同一口径；这里不复用那个函数，是因为它在
-``wg_aliases`` 里（会拖进记忆引擎），而本模块要能被任何 daemon 入口轻量导入。
+判定全部基于 ``conversation_id`` 的 ``<账号>:group:<群号>`` 形状，认群口径归
+``wg_event_ref.group_of``（issue #255 收口后是仓里唯一定义）。``wg_event_ref``
+是轻量模块，本模块 import 它不会拖进记忆引擎。
 """
 from __future__ import annotations
 
 import os
 
 import wg_config
+import wg_event_ref
 from wg_paths import state_dir
 
 # 与 `wg_paths` / `wg_config` 同一族：新名在前，旧名兜底。
@@ -38,12 +39,6 @@ CONVERSATION_FILE = "wg_conversation.txt"
 
 class CrossGroup(Exception):
     """目标事件属于别的群：本会话不许回，也不许把它记成已回（issue #164 PB）。"""
-
-
-def group_of(conversation_id) -> str:
-    """``123456:group:789`` -> ``789``；不是群会话返回空串。"""
-    parts = str(conversation_id or "").split(":")
-    return parts[2] if len(parts) == 3 and parts[1] == "group" else ""
 
 
 def conversation_of(group_id, account=None) -> str:
@@ -96,7 +91,7 @@ def resolve():
 
 def group_id() -> str:
     """本会话的群号；未钉死时返回空串（调用方据此决定要不要过滤）。"""
-    return group_of(resolve()[0])
+    return wg_event_ref.group_of(resolve()[0])
 
 
 def pinned() -> bool:
@@ -136,7 +131,7 @@ def belongs(event, group=None) -> bool:
     gid = group if group is not None else group_id()
     if not gid:
         return True
-    return group_of((event or {}).get("conversation_id")) == gid
+    return wg_event_ref.group_of((event or {}).get("conversation_id")) == gid
 
 
 def rows_of(rows, group=None):
@@ -144,7 +139,7 @@ def rows_of(rows, group=None):
     gid = group if group is not None else group_id()
     if not gid:
         return list(rows)
-    return [e for e in rows if group_of(e.get("conversation_id")) == gid]
+    return [e for e in rows if wg_event_ref.group_of(e.get("conversation_id")) == gid]
 
 
 def same_group_ids(rows, group=None):
@@ -156,7 +151,8 @@ def same_group_ids(rows, group=None):
     gid = group if group is not None else group_id()
     if not gid:
         return None
-    return {e.get("id") for e in rows if group_of(e.get("conversation_id")) == gid}
+    return {e.get("id") for e in rows
+            if wg_event_ref.group_of(e.get("conversation_id")) == gid}
 
 
 def filter_report(rows, group=None):
@@ -170,9 +166,10 @@ def filter_report(rows, group=None):
     gid = group if group is not None else group_id()
     if not gid or not rows:
         return ""
-    if any(group_of(e.get("conversation_id")) == gid for e in rows):
+    if any(wg_event_ref.group_of(e.get("conversation_id")) == gid for e in rows):
         return ""
-    foreign = sorted({group_of(e.get("conversation_id")) or "（无群号）" for e in rows})
+    foreign = sorted({wg_event_ref.group_of(e.get("conversation_id")) or "（无群号）"
+                      for e in rows})
     return (f"WARN: 事件流里 {len(rows)} 条消息没有一条属于本群 {gid}"
             f"（实际出现的群：{'、'.join(foreign)}）——本会话一条唤醒都收不到。"
             f"群号、self_account 与状态目录是否配错？")
@@ -185,6 +182,10 @@ def target_group(event_id, found, group=None):
     查不到 ``found`` 的事件（追问窗口里被 mention_only 滤掉的闲聊）只能靠库兜底，
     兜底也没给出群号时**不**放行到「按最近一条猜」那条路——猜出来的群正是跨群误发
     的来源，所以这里要求调用方自己拿 ``--group`` 明示。
+
+    issue #216：拒绝信息把两种「查不到」分开说——``id 不在任何来源`` 与
+    ``id 在某来源里但取不到群号``（``wg_event_ref.explain()`` 给那半句）。改前
+    两者都是「查不到所属群」，读者会以为这条消息真的不属于本群。
     """
     gid = group if group is not None else group_id()
     if not gid:
@@ -194,6 +195,6 @@ def target_group(event_id, found, group=None):
             raise CrossGroup(f"id={event_id} 属于群 {found[0]}，本会话只管群 {gid}"
                              f"——跨群回复会把那条记成「已回」，另一个会话就不会再回它")
         return found
-    raise CrossGroup(f"id={event_id} 查不到所属群，本会话钉死群 {gid}，"
+    raise CrossGroup(f"id={event_id} {wg_event_ref.explain(event_id)}，本会话钉死群 {gid}，"
                      f"不能确认这条属于本群——请用 --group {gid} 明确指定，"
                      f"或确认这条事件来自本群")

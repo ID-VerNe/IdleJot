@@ -8,7 +8,9 @@ Design notes carried over from the original module:
 
 * ``watchdog`` is only restarted while NapCat answers; otherwise the request is
   deferred.  Killing an injector mid-relaunch is how two QQ instances end up
-  sharing one user-data-dir.
+  sharing one user-data-dir.  A deferral is not a success: it exits non-zero
+  (code 5) so nobody reads "reloaded" while the old code is still running
+  (issue #229).
 * ``db_keeper`` is the one child that may briefly have two instances: start the
   new one, wait, then stop the old one.  There must never be a window with no
   keeper.
@@ -262,6 +264,7 @@ class Reloader:
         self._finish_inflight()
         _log(f"[reload] {mode} nonce={nonce} ok={result.get('ok')} "
              f"restarted={','.join(result.get('restarted') or []) or '-'} "
+             f"deferred={','.join(result.get('deferred') or []) or '-'} "
              f"{result.get('elapsed')}s")
         return result
 
@@ -312,7 +315,10 @@ class Reloader:
                 failed.append(target)
                 warnings.append(f"{target}: {why or 'failed'}")
                 self._record_failure(target, why or "failed")
-        code = 0 if not failed and not deferred else (4 if failed else 0)
+        # issue #229：deferred 是「这次没做」，不能与成功同形。给它自己的非 0
+        # 码（5），于是 ok=False、CLI 退出 5、reload.ps1 透传 5——调用方一眼能
+        # 看出改动的代码一行没生效。4 仍然只表示真的失败（起不来）。
+        code = 4 if failed else (5 if deferred else 0)
         return self._result(nonce, mode, started, restarted, deferred, plan.skipped,
                             plan.rejected, warnings, plan=plan, code=code)
 
@@ -500,9 +506,16 @@ class Reloader:
             if status == "ok":
                 self.deferred.discard(target)
                 self._clear_failure(target)
+                # 补上了才清账：状态文件里那条「推迟未生效」要跟着撤掉，
+                # 否则 --status 会永远说上一次没做完（issue #229）。
+                self._clear_deferred(target)
+                _log(f"[reload] deferred retry ok {target}")
             elif status == "failed":
                 self.deferred.discard(target)
                 self._record_failure(target, why or "deferred retry failed")
+                # 失败说明代码还是旧的：账不能清。清掉的话 --status 立刻回到
+                # 「重启 -」，而跑的还是旧代码——正是 issue #229 要消灭的沉默
+                # （复核意见 2）。真正的失败由 quarantine 面另行报出。
 
     def tick(self, procs, spawn=None):
         spawn = spawn or self.spawn
@@ -581,6 +594,10 @@ class Reloader:
             "last_elapsed": self.state.get("last_elapsed"),
             "last_files": self.state.get("last_files"),
             "last_restarted": self.state.get("last_restarted"),
+            # issue #229：推迟的那次必须落盘，guard 重启后 self.deferred 是空的，
+            # 这是唯一还能说出「上一次有 target 没生效」的地方。
+            "last_deferred": self.state.get("last_deferred") or [],
+            "last_deferred_at": self.state.get("last_deferred_at"),
             "build": build_stamp(self.snapshot),
         })
         if extra.get("last_result"):
@@ -591,4 +608,41 @@ class Reloader:
                 "last_files": result.get("changed") or [],
                 "last_restarted": result.get("restarted") or [],
             })
+            self._note_deferred(result)
         write_json(_state(STATE_NAME), self.state)
+
+    def _note_deferred(self, result):
+        """Track which targets are still running old code (issue #229).
+
+        This is a **debt set**, not a snapshot of the last result.  A target
+        leaves it only when that same target is restarted successfully; a clean
+        reload of some *other* target, or a ``--watch`` toggle that restarts
+        nothing, must not erase a debt that is still outstanding.  The record is
+        what survives a guard restart (``self.deferred`` does not), so
+        ``--status`` can keep saying "未生效" instead of "重启 -".
+        """
+        previous = [str(name) for name in (self.state.get("last_deferred") or [])]
+        pending = set(previous)
+        pending.difference_update(str(name) for name in (result.get("restarted") or []))
+        pending.update(str(name) for name in (result.get("deferred") or []))
+        self.state["last_deferred"] = sorted(pending)
+        if pending:
+            # 欠账起始时刻：只在「本来没欠」变「欠了」时记一次。
+            if not previous:
+                self.state["last_deferred_at"] = time.time()
+        else:
+            self.state["last_deferred_at"] = None
+
+    def _clear_deferred(self, target):
+        """Settle one target: it was restarted, so the debt is paid (issue #229)."""
+        pending = [name for name in (self.state.get("last_deferred") or [])
+                   if name != target]
+        restarted = [str(name) for name in (self.state.get("last_restarted") or [])]
+        if target not in restarted:
+            restarted.append(target)
+        self.state["last_restarted"] = restarted
+        self.state["last_at"] = time.time()
+        self.state["last_deferred"] = pending
+        if not pending:
+            self.state["last_deferred_at"] = None
+        self._write_state()

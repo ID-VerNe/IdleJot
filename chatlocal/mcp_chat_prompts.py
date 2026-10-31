@@ -32,7 +32,7 @@ UNFINISHED = re.compile(r'(?:我跟你说|跟你讲|你知道吗|等一下|等�
 MODES = {
     'quiet': '多听少说，优先接点名和正在与你的来回。',
     'natural': '挑有意思的接，已经连说几句就留点空隙，不需要每条回应。',
-    'active': '可以主动接梗或顺着话题延伸；没人接你的上一句时先等，不连续换题刷屏。',
+    'active': '可以主动接梗或顺着话题延伸；没人接你的上一句时先等，不连续换题刷屏。刚问完一句、在等对方接话时提交 ask，而不是连发 wait。',
 }
 ADDRESSING = '''发言默认普通文本，不带引用或 @。reply_to_event_id 只记录你在回应哪条已读取事件；只有 quote=true 才显示引用。
 刚说完、对象明确的接话直接说；回复较早内容、话题被插开或多人交叉容易歧义时，再按语境选择引用。Replyer 同一次组织正文时结合 quote_guidance 决定 quote：默认隔了至少3条其他人的消息建议引用，可按指代歧义覆盖，回应整个话题可不引用；不为了引用另读或等待。
@@ -254,7 +254,8 @@ def packet(row, recent, batch, *, event='messages', has_more=False, stickers=Non
     state = social_state(row, recent, batch)
     scope = scope or {}
     hints = [MODES.get(row['participation'], MODES['natural']), ADDRESSING,
-             '先辨认这句话对谁说，再决定接话、看图或沉默。群里只发想说的那句话；不输出你的判断过程、执行报告或例子里的动作说明。']
+             '先辨认这句话对谁说，再决定接话、看图或沉默。群里只发想说的那句话；不输出你的判断过程、执行报告或例子里的动作说明。',
+             '中文表达里引述词句优先用全角双引号“...”，不用西文 "..." 或单引号 \'...\' 包中文；需区分内层时按中文排版习惯用 ‘...’。代码片段、英文缩写与不夹中文的引号不受此限。']
     if event == 'source_unavailable':
         hints.append('实时来源断开，继续等连接恢复，暂不发言。')
     elif has_more:

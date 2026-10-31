@@ -46,6 +46,23 @@
 | `mcp_token.txt` | 当前授权 token |
 | `wg_send_failure.json` | 上一次发送失败的账本（真实 retcode / 禁言时刻 / 是否已恢复，issue #132）。禁言时刻是**失败那一刻的预测**，所以 `reply.py --list` 打表头前会复查一次（`mute_until` 到点且 `recovered` 未定时现查 `shut_up_timestamp`，issue #145）：实测解禁就写 `recovered_at` 并改口说「实测解禁」，查不动就降级成「未复查 / 复查未能确认」——不再拿过期预测当此刻的事实 |
 
+## 两套 id：事件流 `id` 与会话库 `qid`（issue #203）
+
+同一时刻可能有两种编号在流转，撞号时只靠裸数字分不清，所以 `wg_event_ref.py` 是唯一
+的解析口：**裸数字 = 事件流 id**（`wg_events`），**`q<n>` / `qid:<n>` = 会话库 `chat_inbox`
+的 rowid**（追问行、`--context` 的表现就是 `q<n>`，`id:<n>` 是显式写法）。
+
+| 入口 | 规则 |
+| --- | --- |
+| `reply.py <反射> …` / `--show` | 带 `q<n>` 就去会话库取，裸数字先在事件流找；**事件流没命中、会话库唯一命中时回库兜底，并打出源说明**（不静默） |
+| `reply.py --also` | 只做存在性与归属校验，不进 `wg_replied.jsonl`（取答记录只认真回复） |
+| `followup.py` / 追问窗 | 游标记号由 `wg_event_ref.format_ref(namespace, n)` 生成，`after_ref` 把 `after_id` 的库 rowid 语义显式化 |
+| `look.py` | `INBOX` 直接当库 rowid 补读，`EVENT` 经验证反查库行 |
+| 渲染侧（`wg_text` / `wg_context` / `wg_images` / `watch` / `followup`） | 一律打印 `q<n>`，不让 Agent 拿到会被误解的裸库 rowid |
+
+会话库行必须属于本会话：钉死会话时（`wg_isolation.pinned()`）跨会话的行直接拒，不回退
+到别群的消息上。
+
 ## 时间基准
 
 所有面向 Agent 的输出都带「现在」，格式统一由 `wg_clock.py` 提供（issue #95）：

@@ -180,6 +180,42 @@ def 状态行报出上一轮监听与空窗():
 
 
 @case
+def wake退出空窗不说消息照收改说等待重挂():
+    """账本 stop=WAKE 且无人值守时，监听行不许再说「消息照收」（issue #212）。
+
+    WAKE 退出正是「刚叫醒、等重挂」的空窗：消息确实在落盘，但没人值守把它变成唤醒。
+    说「消息照收」让这几分钟读起来像一切正常——这几分钟的新 @ 只能靠重挂后的 BACKFILL
+    事后补扫。改说「等待重挂…BACKFILL 补扫」，与「消息照收」显式分开。
+
+    判据钉死在账本最近一条 `reason == "WAKE"`：NO_WORK / DOSSIER_DUE / WATCH_FAILED /
+    硬杀 / 无账本一律保持「消息照收」——所以对照组用 NO_WORK 退出 + 两环在线，仍必须
+    出「消息照收」（防止把这句整体删掉、回到 #142 之前的静默）。
+
+    这条是 issue #212「钉住复发」的断言：账本 stop 原因为 WAKE 且无人值守时，状态行
+    必须同时出现「无人值守」与「等待重挂」类措辞，且不得出现「消息照收」。
+    """
+    with temp_dir(prefix="wg-wake-ack-") as home:
+        fixture_home(home)
+        restore = ledger_at(home)
+        try:
+            # WAKE 退出 + 两环在线：刚叫醒、等重挂的空窗
+            wg_listener_state.start(timeout=wg_budget.WAIT_BUDGET)
+            wg_listener_state.stop("WAKE")
+            wake_line = status_report_line("监听", [], port_open=lambda *a, **k: True,
+                                           collector_pids=lambda *a, **k: ["4321"])
+            # 对照组：NO_WORK 退出 + 两环在线，仍说「消息照收」
+            wg_listener_state.start(timeout=wg_budget.WAIT_BUDGET)
+            wg_listener_state.stop("NO_WORK")
+            nowork_line = status_report_line("监听", [], port_open=lambda *a, **k: True,
+                                             collector_pids=lambda *a, **k: ["4321"])
+        finally:
+            restore()
+    return ("未挂" in wake_line and "等待重挂" in wake_line
+            and "消息照收" not in wake_line and "无人值守" in wake_line
+            and "未挂" in nowork_line and "消息照收" in nowork_line)
+
+
+@case
 def 栈全下线不得说消息照收():
     """NapCat 或 collector 不在时，监听行不许再说「消息照收」（issue #142）。
 

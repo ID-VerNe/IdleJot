@@ -23,174 +23,38 @@ issue #132 的现场：机器人被禁言，`reply.py ... --at <花名>` 打出
      「禁言至 …」；未到点不查也不改口径；现查仍禁言 / 全员禁言 / 探测失败都不许
      冒充解禁（对照组）；未到点、已有结论、无账本三种前置零请求。
 
-    .venv/Scripts/python.exe scripts/check_reply_send_failure.py
+    .venv/Scripts/python.exe -m scripts.check_reply_send_failure
+
+#287：本文件曾是单文件 `scripts/check_reply_send_failure.py`（946 行，advisory 带）。
+按 #282（`scripts/check_qr_login/`）与 #186（`scripts/check_listener_rehang/`）的
+先例拆成包：`_fixture`（`Handler` + 8 fixture-state helper + 模块级状态），本
+`__init__.py` 保留 docstring 与 37 个 `@case` 用例 + `CASES`/`case` 收集器 +
+`_has` 断言 helper + `main()`，`__main__.py` 供 `python -m`。入口名不变
+（`check_reply_send_failure`），对 `gates.json` / `run_gates.py` / CI 透明。
+用例注册序、断言、正文逐字搬运，零重排。
+
+runner 归属：本文件**没有** R4 的 `check()`/`FAILED` 族（grep 零命中），主收集器
+是 `@case`/`CASES`（dedup §6 特殊形态，不归 R4）——故 `assert_runner` 委派不适用。
 """
+# 导入序是 load-bearing（issue #287）：`_fixture` 必须最先——它把 `scripts/` 插进
+# `sys.path`、钉住数据根（`check_fixture_support` import 期会把它钉成夹具目录）、
+# 并定义 `Handler` / 8 fixture-state helper / 模块级状态（`_SCRATCH` / `FIX` / `_BASE` /
+# `GROUP` / `SELF` / `PEER` / `MUTE_MESSAGE` / `PARAM_MESSAGE` / `TEXT`）。本主模块
+# 的 37 条 `@case` 用例依赖这些名字先就位。顺序即旧文件的 `case()` 调用序——37 条
+# 契约的运行顺序靠 `main()` 里 `for fn in CASES` 逐字保持（#186 保序纪律）。禁止改成
+# 一行 `from . import _fixture`：显式分行防后人误重排。
+from ._fixture import (  # noqa: F401
+    FIX, GROUP, MUTE_MESSAGE, PARAM_MESSAGE, PEER, SELF, TEXT, _BASE, _SCRATCH,
+    Handler, _ledger, _list, _mute_send, _ok_send, _point, _reset, _run,
+    _write_config, _write_state, fixture_server, followup, fs, reply, wg_budget,
+    wg_clock, wg_send_failure,
+)
 import contextlib
 import io
 import json
-import os
 import socket
 import sys
 import time
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-from check_fixture_support import scratch_dir  # noqa: E402
-fs.bootstrap_paths(scripts=False)
-
-# 数据根 / 配置 / 库全部钉进临时目录，import 任何 daemon 模块之前完成：
-# memory_store 与 wg_paths 的常量是 import 期求值的（与 check_alias_visibility 同款）。
-# `IDLEJOT_WG_STATE` 必须**显式覆盖**：`wg_paths.state_dir()` 的优先级是
-# `IDLEJOT_WG_STATE or TULPA_WG_STATE`，只钉后者会被外部环境穿透——那正是
-# 「测试写生产状态」的口子（#145 的账本复查上线后，穿透就意味着向实机 OneBot
-# 发查询、把结论写进实机账本）。
-_SCRATCH = scratch_dir(prefix="wg_send_failure_")
-os.environ["WATER_GROUP_HOME"] = str(_SCRATCH / "home")
-os.environ["TULPA_WG_STATE"] = str(_SCRATCH / "state")
-os.environ["IDLEJOT_WG_STATE"] = str(_SCRATCH / "state")
-os.environ["IDLEJOT_WG_DB"] = str(_SCRATCH / "chats.sqlite3")
-os.environ["IDLEJOT_WG_CONFIG"] = str(_SCRATCH / "config.json")
-for path in ("home", "state"):
-    (_SCRATCH / path).mkdir(parents=True, exist_ok=True)
-
-from fixture_server import FixtureHandler, fixture_server  # noqa: E402
-import reply  # noqa: E402
-import wg_budget  # noqa: E402
-import wg_clock  # noqa: E402
-import wg_send_failure  # noqa: E402
-
-GROUP = "777000111"
-SELF = "99999"
-PEER = "88888"
-MUTE_MESSAGE = ("EventChecker Failed: NTEvent serviceAndMethod:"
-                "NodeIKernelMsgService/sendMsg EventRet: {\"result\": 120}")
-PARAM_MESSAGE = "参数错误：group_id 无效"
-TEXT = "第一句\\n第二句"
-
-# 夹具状态：每个用例自己写，Handler 只读。
-# `member_queries` 数的是 `get_group_member_info` 次数——#145 的「未到点不查」
-# 只能靠请求计数判定，看输出是看不出少发了一次查询的。
-FIX = {"sends": [], "replies": [], "member": {}, "group": {},
-       "member_fails": False, "group_fails": False, "member_queries": 0}
-
-
-def _ok_send():
-    return {"status": "ok", "retcode": 0, "data": {"message_id": 4242}}
-
-
-def _mute_send():
-    return {"status": "failed", "retcode": 200, "message": MUTE_MESSAGE,
-            "wording": "发送失败", "data": None}
-
-
-class Handler(FixtureHandler):
-    def do_POST(self):
-        self.read_json()
-        action = self.path.strip("/")
-        if action == "send_group_msg":
-            FIX["sends"].append(1)
-            self.send_json(FIX["replies"].pop(0) if FIX["replies"] else _ok_send())
-        elif action == "get_group_member_info":
-            FIX["member_queries"] += 1
-            if FIX["member_fails"]:
-                self.send_json({"status": "failed", "retcode": 1200, "message": "查询失败"})
-            else:
-                self.send_json({"status": "ok", "retcode": 0, "data": FIX["member"]})
-        elif action == "get_group_info":
-            if FIX["group_fails"]:
-                self.send_json({"status": "failed", "retcode": 1200, "message": "查询失败"})
-            else:
-                self.send_json({"status": "ok", "retcode": 0, "data": FIX["group"]})
-        elif action == "get_group_member_list":
-            self.send_json({"status": "ok", "retcode": 0, "data": [
-                {"user_id": int(SELF), "card": "机器人", "nickname": "bot"},
-                {"user_id": int(PEER), "card": "群友A", "nickname": "A"}]})
-        else:
-            self.send_json({"status": "failed", "retcode": 1404, "message": action})
-
-
-def _write_config(base):
-    (_SCRATCH / "config.json").write_text(json.dumps({
-        "self_account": SELF, "onebot_token": "fixture-token",
-        "onebot_http_url": base, "groups": {},
-    }, ensure_ascii=False), encoding="utf-8")
-
-
-def _point(url):
-    """让 `reply.py` 与诊断模块指向同一个夹具地址。
-
-    `reply.py` 的 `onebot_config()` 固定在这里是为了让本门禁只管 #132：未打补丁
-    的 base 读的是仓库配置（干净 checkout 里根本没有），不钉住的话「成功路径」
-    也会红，红的原因就跟 issue 无关了。诊断模块自己读 `IDLEJOT_WG_CONFIG`。
-    """
-    _BASE[0] = url
-    _write_config(url)
-
-
-def _write_state():
-    """一条可回的 @ + 会话 id，让 `reply.main()` 走真实的取群号/取 message_id 路径。"""
-    state = _SCRATCH / "state"
-    (state / "wg_session.txt").write_text("s1", encoding="utf-8")
-    row = {"id": 1, "conversation_id": f"1:group:{GROUP}", "onebot_message_id": "12345",
-           "sender": "群友A", "content": "在吗", "timestamp": int(time.time() * 1000)}
-    (state / "wg_events.jsonl").write_text(json.dumps(row, ensure_ascii=False) + "\n",
-                                           encoding="utf-8")
-    for name in ("wg_replied.jsonl",):
-        path = state / name
-        if path.exists():
-            path.unlink()
-
-
-def _run(argv):
-    """跑一次 reply.main()，返回 (退出码, 输出)。"""
-    buf = io.StringIO()
-    real_argv = sys.argv
-    sys.argv = ["reply.py"] + argv
-    try:
-        with contextlib.redirect_stdout(buf):
-            try:
-                code = reply.main()
-            except SystemExit as exc:   # argparse 拒绝未知参数（如旧版不认 --wait-unmute）
-                code = int(exc.code or 0)
-    finally:
-        sys.argv = real_argv
-    return code, buf.getvalue()
-
-
-def _reset(now, shut_up=None, all_shut=False, member_fails=False, group_fails=False):
-    _write_state()
-    wg_send_failure.clear()
-    FIX["sends"].clear()
-    FIX["replies"].clear()
-    FIX["member_fails"] = member_fails
-    FIX["group_fails"] = group_fails
-    FIX["member_queries"] = 0
-    FIX["member"] = {"user_id": int(SELF), "card": "机器人", "nickname": "bot",
-                     "role": "member", "shut_up_timestamp": shut_up or 0}
-    FIX["group"] = {"group_id": int(GROUP), "group_all_shut": all_shut}
-
-
-def _ledger(mute_until, at=None, recovered=None, **extra):
-    """直接写一条账本（模拟上一次失败留下的冻结记录），不经过发送路径。"""
-    entry = {"at": int(time.time() if at is None else at), "group_id": GROUP,
-             "kind": "onebot", "retcode": 200, "reason": "EventChecker Failed",
-             "mute_until": int(mute_until), "recovered": recovered,
-             "recovered_at": None, "rechecked_at": None, "group_shut": None}
-    entry.update(extra)
-    wg_send_failure.LEDGER.parent.mkdir(parents=True, exist_ok=True)
-    wg_send_failure.LEDGER.write_text(json.dumps(entry, ensure_ascii=False),
-                                      encoding="utf-8")
-    return entry
-
-
-def _list():
-    """跑一次 `--list` 的真实表头路径，返回输出。"""
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        reply.list_wakes()
-    return buf.getvalue()
-
 
 CASES = []
 
@@ -324,15 +188,29 @@ def 全员禁言与单人禁言分开说():
 
 @case
 def 等待预算_边界与唯一出处():
-    """85+5=90 正好等于预算 → 允许；86+5=91 → 拒绝（预算是 wg_budget 的唯一出口）。"""
+    """85+5=90 正好等于预算 → 允许；86+5=91 → 拒绝（预算是 wg_budget 的唯一出口）。
+
+    issue #224 的钉子：`wait_plan` 的「等不等得起」判定走 `remaining_budget()` 的
+    原始浮点，不走 `clamp_wait()` 的 ceil——`clamp_wait(90, 0.4)` 会回 90（ceil 89.6），
+    拿它当 `allowance < need` 的操作数就把 `90 > 89.6` 读成「90 不大于 90」，
+    判成等得起、睡 90s，叠加 0.4s 已用 + 30s 发送就超出宿主 120s。
+    """
     allowed, _ = wg_send_failure.wait_plan(wg_budget.WAIT_BUDGET - wg_send_failure.UNMUTE_MARGIN)
     refused, lines = wg_send_failure.wait_plan(
         wg_budget.WAIT_BUDGET - wg_send_failure.UNMUTE_MARGIN + 1)
     # 形参 budget 必须真的参与判定，不能只进文案（复核遗留 2）；elapsed 同理。
     tight, _ = wg_send_failure.wait_plan(30, budget=30)   # need=35 > 预算 30
     spent, _ = wg_send_failure.wait_plan(60, elapsed=30)
+    # issue #224：已用 0.4s 时真实剩余 89.6，need=90 不该塞进去。
+    # 85+5=90（need=90）在剩余 89.6 内塞不进 → None；84+5=89（need=89）塞得进 → 89。
+    ceil_skipped, _ = wg_send_failure.wait_plan(
+        wg_budget.WAIT_BUDGET - wg_send_failure.UNMUTE_MARGIN, elapsed=0.4)
+    one_short, _ = wg_send_failure.wait_plan(
+        wg_budget.WAIT_BUDGET - wg_send_failure.UNMUTE_MARGIN - 1, elapsed=0.4)
     return (allowed == wg_budget.WAIT_BUDGET and refused is None and tight is None
             and spent is None
+            and ceil_skipped is None            # need=90 > remaining=89.6 → 不硬等
+            and one_short == wg_budget.WAIT_BUDGET - 1   # mute=84 → need=89 塞得进，返回 need
             and any(f"超出单次调用等待预算 {wg_budget.WAIT_BUDGET}s" in ln for ln in lines))
 
 
@@ -401,6 +279,47 @@ def 成功路径文案不变():
     code, out = _run(["1", TEXT, "--at", "群友A", "--no-wait"])
     return (code == 0 and "send: retcode=0 message_id=4242" in out
             and "SENT" in out and "SEND_FAILED" not in out)
+
+
+@case
+def 开窗失败不拖垮已发出的回复():
+    """issue #227：开窗写盘失败不许让一次成功的发送表现为失败。
+
+    现场是「窗口父目录建不出来」（磁盘/权限/占位文件的真实形态）：`reply.main()`
+    在 `print("SENT")` 之后调 `open_followup()`，`followup.save()` 的 `STATE.mkdir` /
+    `WINDOW.write_text` 抛 `OSError` 系，旧实现一路冒泡到 CLI，进程带 traceback 退出、
+    退出码非 0——而群里那条已经发出去。Agent 按 `SENT`+traceback + 非零退出码读成
+    「发送可能失败」，于是同一条消息再回一遍（重复回复）；`--wait` 续挂也被整段跳过。
+
+    用 monkeypatch `followup.save` 抛 `OSError` 站在 issue 复现里「窗口父目录不可建」
+    的位置（避开 Windows mkdir-on-file 的 OS 特异性，CI matrix 可移植）。断言输出里
+    **有** `SENT`、**有** `[追问] 开窗失败`、**有** `消息已发送`，**没有** `Traceback`、
+    **没有** `SEND_FAILED`、**没有** `窗口已开`（没开成就不许说开了），且 `main()` 正常
+    返回 0——`SENT` 与退出码只由发送结果决定。
+
+    对照组：门控关（`--no-followup`）时 `wanted=False`，连 `plugins.emit` 都不调，
+    不出失败行——这条不能被「开窗失败」的 monkeypatch 误染（门控不开是合法的静默 None）。
+    """
+    _reset(time.time(), shut_up=0)
+    real = followup.save
+    followup.save = lambda _state: (_ for _ in ()).throw(
+        OSError("窗口父目录建不出来（issue #227 复现形态）"))
+    try:
+        code, out = _run(["1", TEXT, "--at", "群友A", "--no-wait"])
+    finally:
+        followup.save = real
+    ok = (code == 0 and "SENT" in out and "[追问] 开窗失败" in out
+          and "消息已发送" in out and "Traceback" not in out
+          and "SEND_FAILED" not in out and "窗口已开" not in out)
+    if not ok:
+        print(f"    退出码={code} 输出={out.strip()!r}")
+    if not ok:
+        return False
+    # 对照组：门控关时不走 emit，不该有失败行
+    _reset(time.time(), shut_up=0)
+    code2, out2 = _run(["1", TEXT, "--at", "群友A", "--no-wait", "--no-followup"])
+    return (code2 == 0 and "SENT" in out2 and "开窗失败" not in out2
+            and "窗口已开" not in out2)
 
 
 @case
@@ -723,7 +642,141 @@ def 补发成功后不再重复禁言尾巴():
             and "实测解禁" not in out)
 
 
-_BASE = [""]
+# ---------- issue #207：OneBot 直发失败不许回退计划通道 ----------
+
+
+def _append_wake(event_id, *, at_self=True):
+    """向事件流追加一条本群唤醒（`@ 机器人`），供「还有 N 条没回」用例用。"""
+    state = _SCRATCH / "state"
+    segments = [{"type": "at", "qq": SELF}] if at_self else []
+    row = {"id": event_id, "conversation_id": f"1:group:{GROUP}",
+           "onebot_message_id": f"msg-{event_id}", "sender": "群友A",
+           "content": "在吗", "segments": segments,
+           "timestamp": int(time.time() * 1000)}
+    path = state / "wg_events.jsonl"
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+@case
+def 直发失败带引用也不回退():
+    """issue #207 的核心现场：带引用（事件有 onebot_message_id）、不带 `--at`、
+    不带图，首条 OneBot 发送失败。
+
+    改前 `reply.py:931` 的 `if sent or has_at: return 1` 在 `sent=0` 且 `has_at=False`
+    时穿过去，落到 `:937` 的 `falling back to the plan path`——把带 `reply` 段的
+    消息交给计划通道，而 `send()` 的气泡写死 `kind=text`，引用段整个丢掉。断言：
+    不回退、失败真实原因在、未记账、计划通道零输出、报账行照旧（不删）。
+    """
+    now = time.time()
+    _reset(now, shut_up=0)
+    FIX["replies"].append({"status": "failed", "retcode": 1400,
+                           "message": PARAM_MESSAGE, "wording": "参数错误",
+                           "data": None})
+    code, out = _run(["1", TEXT, "--no-wait"])
+    replied = _SCRATCH / "state" / "wg_replied.jsonl"
+    ok = (code == 1
+          and "falling back to the plan path" not in out
+          and "没有可用批次" not in out
+          and "PLAN_FAILED" not in out
+          and "no OneBot id on record" not in out
+          and "SEND_FAILED: OneBot retcode=1400" in out
+          and "未退回计划通道" in out
+          and "NOTE 还有" not in out
+          and "cost:" in out                     # 报账行照旧（#88/#136，不因失败删）
+          and not replied.exists())              # 未记账
+    if not ok:
+        print(f"    输出={out.strip()!r} 记账文件存在={replied.exists()}")
+    return ok
+
+
+@case
+def 直发成功后才报还有N条():
+    """对照组：`NOTE 还有 N 条没回` 是「这条答完了、还有 N 条」，必须排在 `SENT` 之后。
+
+    只断言「NOTE 出现」的实现在失败路径也会把它打出来（issue #207 的症状），所以
+    这里同时断言：发送成功才说、且说在 `SENT` 之后。
+    """
+    now = time.time()
+    _reset(now, shut_up=0)
+    _append_wake(2)                              # 第二条 @ 本机的唤醒，仍待回
+    code, out = _run(["1", TEXT, "--no-wait"])
+    return (code == 0
+            and "SENT" in out
+            and "NOTE 还有 1 条没回：2" in out
+            and out.index("SENT") < out.index("NOTE 还有 1 条没回"))
+
+
+@case
+def 直发失败不带引用也不回退():
+    """`--no-quote` + 事件无引用：带 `--at` 的既有语义不许被回退破坏（#132 的
+    对照组）。断言「不回退 + 失败原因」与 `直发失败带引用也不回退` 同构，覆盖
+    `has_at=True` 那一路（`handle()` 里那句「未退回计划通道」）。
+    """
+    now = time.time()
+    _reset(now, shut_up=0)
+    FIX["replies"].append({"status": "failed", "retcode": 1400,
+                           "message": PARAM_MESSAGE, "wording": "参数错误",
+                           "data": None})
+    code, out = _run(["1", TEXT, "--no-quote", "--at", "群友A", "--no-wait"])
+    return (code == 1
+            and "falling back to the plan path" not in out
+            and "没有可用批次" not in out
+            and "SEND_FAILED: OneBot retcode=1400" in out
+            and "未退回计划通道：带 @ 的消息只能走 OneBot" in out)
+
+
+# ---------- issue #208: --at 全部未解析时不许出现「未退回计划通道」 ----------
+
+
+@case
+def at全部未解析_提前拦下零请求():
+    """issue #208 的核心现场：`--at <花名册里没有的名字>` 一个都没解析出来。
+
+    改前 build_segments 把未解析的名字按文字发出，has_at=False，OneBot 直发失败
+    时 `no_fallback_line(has_at=False)` 打「未退回计划通道：带引用…」——
+    与「没 @ 成」自相矛盾。issue 期望：要么发送前明确报错并停手，要么如实说明
+    本次没有 @ 段。这里钉前者：`AT_UNRESOLVED: <名字>` + 退出码 1 + 夹具
+    `send_group_msg` 零请求 + 输出里**不许**同时出现「未退回计划通道」与
+    `falling back`（issue 原话）。
+    """
+    now = time.time()
+    _reset(now, shut_up=0)
+    code, out = _run(["1", TEXT, "--at", "查无此人", "--no-wait"])
+    sends = len(FIX["sends"])
+    ok = (code == 1
+          and "AT_UNRESOLVED: 查无此人" in out
+          and sends == 0
+          and "未退回计划通道" not in out
+          and "falling back to the plan path" not in out
+          and "SEND_FAILED" not in out)
+    if not ok:
+        print(f"    输出={out.strip()!r} sends={sends}")
+    return ok
+
+
+@case
+def at部分解析_照发且不打未退回误判():
+    """对照组：`--at 群友A --at 查无此人` 部分解析成功——照发，at 段确实带了
+    能解析的人，未解析名字留在 build_segments 的 `at:` 前缀行里。
+
+    断言 has_at 路径成立（OneBot 直发），失败时按 has_at=True 走「带 @ 不回退」
+    的既有语义——不能因为「本次没全解析」就降级或自相矛盾。
+    """
+    now = time.time()
+    _reset(now, shut_up=0)
+    FIX["replies"].append({"status": "failed", "retcode": 1400,
+                           "message": PARAM_MESSAGE, "wording": "参数错误",
+                           "data": None})
+    code, out = _run(["1", TEXT, "--at", "群友A", "--at", "查无此人",
+                      "--no-quote", "--no-wait"])
+    sends = len(FIX["sends"])
+    return (code == 1
+            and sends == 1                       # 真发了一条
+            and "at: 查无此人 未解析" in out       # 未解析的名字仍被说明
+            and "SEND_FAILED: OneBot retcode=1400" in out
+            and "未退回计划通道：带 @ 的消息只能走 OneBot" in out
+            and "AT_UNRESOLVED" not in out)       # 部分解析不拦
 
 
 def main():
@@ -747,7 +800,3 @@ def main():
             bad += 0 if ok else 1
     print("全部通过" if not bad else f"{bad} 项失败")
     return 1 if bad else 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

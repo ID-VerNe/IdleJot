@@ -17,7 +17,8 @@ Design notes that matter when editing this file:
 * A syntax error rejects the whole batch.  The old processes keep running.
 * ``watchdog`` is only restarted while NapCat answers; otherwise the request is
   deferred.  Killing an injector mid-relaunch is how two QQ instances end up
-  sharing one user-data-dir.
+  sharing one user-data-dir.  A deferral is reported as a failure (exit 5), not
+  as a success: the changed code is still the old code (issue #229).
 * ``db_keeper`` is the one child that may briefly have two instances: start the
   new one, wait, then stop the old one.  There must never be a window with no
   keeper.
@@ -37,6 +38,7 @@ import sys
 import time
 
 from wg_daemon import pid_alive, read_json  # noqa: E402  (issue #11 PB: 助手收口)
+import wg_budget  # noqa: E402  (issue #230：--wait 默认走预算口径)
 from reload_exec import (  # noqa: E402  (issue #11 PD: 执行层)
     Reloader,
     _heartbeat_age,
@@ -103,8 +105,16 @@ def status_line() -> str:
     restarted = ",".join(state.get("last_restarted") or []) or "-"
     elapsed = state.get("last_elapsed")
     elapsed = f"{elapsed}s" if isinstance(elapsed, (int, float)) else "-"
-    return (f"watch {watch}（间隔 {state.get('interval', 2)}s，"
+    line = (f"watch {watch}（间隔 {state.get('interval', 2)}s，"
             f"上次 {stamp} 重启 {restarted} {elapsed}）")
+    # issue #229：推迟 = 改动的代码没生效。只报「重启 -」等于说一切正常，
+    # 所以把还欠着的 target 单独说出来。
+    deferred = [str(name) for name in (state.get("last_deferred") or [])]
+    if deferred:
+        at = state.get("last_deferred_at")
+        when = time.strftime("%H:%M", time.localtime(at)) if at else stamp
+        line += f"；{when} 有 {len(deferred)} 个 target 推迟未生效：{','.join(deferred)}"
+    return line
 
 
 def _request_payload(mode, only, requested_by, dry_run=False):
@@ -153,6 +163,16 @@ def _wait_result(nonce: str, wait: float, guard: int):
         time.sleep(0.2)
 
 
+def _defer_reasons(result: dict) -> dict:
+    """把 warnings 里的 ``target: why`` 还原成 target → why（issue #229）。"""
+    reasons = {}
+    for item in result.get("warnings") or []:
+        name, sep, why = str(item).partition(": ")
+        if sep:
+            reasons[name] = why
+    return reasons
+
+
 def _print_result(result: dict):
     if not result:
         print("等待超时：guard 没有写结果文件")
@@ -160,9 +180,16 @@ def _print_result(result: dict):
     if result.get("rejected"):
         for item in result["rejected"]:
             print(f"拒绝: {item.get('path') or '-'} {item.get('why')}")
+    deferred = [str(name) for name in (result.get("deferred") or [])]
     print(f"ok={result.get('ok')} elapsed={result.get('elapsed')}s "
           f"restarted={','.join(result.get('restarted') or []) or '-'} "
-          f"deferred={','.join(result.get('deferred') or []) or '-'}")
+          f"deferred={','.join(deferred) or '-'}")
+    # issue #229：推迟是「这次没做」，改动的代码一行没生效。必须单独一行说清，
+    # 否则 `ok=True deferred=watchdog restarted=-` 读起来跟成功一样。
+    if deferred:
+        reasons = _defer_reasons(result)
+        for name in deferred:
+            print(f"未生效（推迟）: {name} —— {reasons.get(name) or '原因未记录'}")
     for item in result.get("warnings") or []:
         print(f"warning: {item}")
 
@@ -175,7 +202,8 @@ def main(argv=None):
     parser.add_argument("--only", metavar="app,commands", help="只处理指定 target")
     parser.add_argument("--dry-run", action="store_true", help="只打印计划，不执行")
     parser.add_argument("--full", action="store_true", help="P0 未支持：连 guard 一起换")
-    parser.add_argument("--wait", type=float, default=120, help="等待结果秒数（默认 120）")
+    parser.add_argument("--wait", type=float, default=wg_budget.WAIT_BUDGET,
+                        help=f"等待结果秒数（默认 {wg_budget.WAIT_BUDGET}，= WAIT_BUDGET，issue #230）")
     parser.add_argument("--status", action="store_true", help="读取上次重载状态")
     parser.add_argument("--config", action="store_true", help="只重启吃 config 的进程")
     parser.add_argument("--requested-by", default="agent")
@@ -228,10 +256,24 @@ def main(argv=None):
     print(f"已投递 nonce={request['nonce']} mode={mode} guard={guard}")
     if args.wait <= 0:
         return 0
+    # 超预算的显式取值自己说一声（issue #230）。reload 与 listen/reply 不同：等待是「等
+    # 满 / 不等」二选一，没有「压回预算后继续等」的语义——静默夹断会把用户「我就是要
+    # 等 120s」改成另一个数，是谎言；所以这里**不 clamp**，只把事实说在前头。WARN 必须
+    # 打在等待之前：被宿主在 AGENT_TOOL_TIMEOUT 处截断进程树时，_wait_result 的超时
+    # 分支（:151-152、:233-234）来不及执行，Agent 看到的最后一行就停在这里，分不清被
+    # 杀还是还在等。默认值 = WAIT_BUDGET，不打 WARN。逃生口是 --wait 0（只投递）+
+    # --status 轮询，与 reply.py:713-717 的 shorter_hint 同一个思路。
+    if wg_budget.over_budget(args.wait):
+        print(f"WARN: --wait {args.wait}s 加上发送余量 {wg_budget.SEND_BUDGET}s 已超过常见工具调用"
+              f"超时 {wg_budget.AGENT_TOOL_TIMEOUT}s；guard 可能在写回结果前被宿主截断进程树，"
+              f"这条路径上不会打印结果。要只投递不等待：--wait 0（再 --status 轮询）",
+              flush=True)
     result = _wait_result(request["nonce"], args.wait, guard)
     _print_result(result)
     if result is None:
         return 3
+    # 退出码即 guard 给的 code：2 拒绝 / 4 失败 / 5 推迟未生效（issue #229）。
+    # reload.ps1 末行 exit $LASTEXITCODE 直接透出，调用方按非 0 处理即可。
     return int(result.get("code", 0))
 
 

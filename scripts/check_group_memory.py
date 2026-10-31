@@ -238,6 +238,69 @@ def test_interaction_extraction(tmp_dir):
     print("✓ 5. 直接互动捎带提取、QQ号动态绑定与防冒名劫持测试通过")
 
 
+def test_observe_intent_gate(tmp_dir):
+    """issue #220: a casual remark whose opening hits the notebook-action prefix
+    must NOT be recorded as an explicit command unless the message is actually
+    addressed to the bot."""
+    db_file = tmp_dir / "test_memories.sqlite3"
+    engine = MemoryEngine(db_file)
+    engine.seed_from_persona(persona_path=persona_stub(tmp_dir))
+    # conversation_id "{account}:{kind}:{group}" lets _self_account resolve the
+    # bot account (999) so the intent gate has a real value to test against.
+    gid = "g1"
+    payload_cid = "999:group:" + gid
+
+    def payload(content, segs=None, sender_id="444", sender="一个群友"):
+        return {"conversation_id": payload_cid, "sender_id": sender_id,
+                "sender": sender, "content": content,
+                "segments": segs or [], "is_self": False, "synthetic": False}
+
+    # The suite shares one db_file across tests; test_explicit_commands above
+    # already wrote explicit_command rows into it. So we assert the DELTA: a
+    # remark not addressed to the bot must not ADD any explicit_command event.
+    with engine._connect() as conn:
+        before = conn.execute(
+            "SELECT COUNT(*) FROM member_events WHERE source='explicit_command'"
+        ).fetchone()[0]
+
+    # Case 1: prefix hit, no @-bot segment -> degrade to plain text, no notebook.
+    r1 = engine.observe_message(gid, payload("记在小本本上 摸鱼才是正经事"))
+    assert r1 is None or "ack_hint" not in (r1 or {}), \
+        "casual prefix-hit remark must not return a notebook ack"
+    assert engine.find_profile("摸鱼才") is None, \
+        "prefix-hit remark must not fabricate a member:<句首两三字> profile"
+    with engine._connect() as conn:
+        after = conn.execute(
+            "SELECT COUNT(*) FROM member_events WHERE source='explicit_command'"
+        ).fetchone()[0]
+    assert after == before, \
+        f"remark not addressed to the bot must add no explicit_command event (before={before}, after={after})"
+    # Case 2: same text, but an at-segment targets self_account -> recorded.
+    r2 = engine.observe_message(
+        gid, payload("记在小本本上 一个群友喜欢摸鱼",
+                     segs=[{"type": "at", "qq": "999"}]))
+    assert r2 and r2.get("target") == "一个群友", r2
+    assert "喜欢摸鱼" in r2["fact"]
+    a_prof = engine.find_profile("一个群友", group_id=gid)
+    group_row = a_prof.get("_group") if isinstance(a_prof, dict) else None
+    mems = json.loads((group_row["key_memories"] if group_row else a_prof["key_memories"]) or "[]")
+    assert any("喜欢摸鱼" in m for m in mems)
+
+    # Case 3: prefix hit, no @, pure noise -> no target fabricated.
+    engine.observe_message(gid, payload("记在小本本上 哈哈哈哈",
+                                        sender_id="666", sender="第三个群友"))
+    assert engine.find_profile("哈哈哈哈") is None
+    # The speaker may get an empty profile (legitimate first-seen), but never a
+    # member:<noise> or a notebook memory from this remark.
+    prof666 = engine.find_profile("666", group_id=gid)
+    if prof666:
+        mems666 = json.loads((prof666.get("_group", {}) or {}).get("key_memories")
+                             or prof666.get("key_memories") or "[]")
+        assert not any("哈哈哈哈" in m for m in mems666), \
+            "noise remark must not produce a notebook memory"
+    print("✓ 6. observe_message 意图门：撞前缀的家常话不进小本本（issue #220）")
+
+
 def test_idle_digest(tmp_dir):
     db_file = tmp_dir / "test_memories.sqlite3"
     engine = MemoryEngine(db_file)
@@ -763,6 +826,7 @@ def main():
         test_alias_matching(tmp_dir)
         test_explicit_commands(tmp_dir)
         test_interaction_extraction(tmp_dir)
+        test_observe_intent_gate(tmp_dir)
         test_idle_digest(tmp_dir)
         test_l1_context_generation(tmp_dir)
         test_l2_dossier_and_boundary_rules(tmp_dir)

@@ -48,3 +48,18 @@ def clamp_wait(timeout, elapsed=0.0):
     """
     remaining = WAIT_BUDGET - max(0.0, float(elapsed))
     return max(0, min(int(timeout), math.ceil(remaining)))
+
+
+def remaining_budget(elapsed=0.0):
+    """整次调用还剩多少秒等待额度（原始浮点，issue #224）。
+
+    给判定用——`wait_plan()` 回答「need 秒塞不塞得进剩余额度」，是 `need > remaining`
+    的不等式两边：左边是 `mute + UNMUTE_MARGIN`（秒），右边必须同口径、不取整。
+    `clamp_wait()` 的 ceil 是给「等最多 90s」类调用方（`reply.py`/`listen.py`）取
+    实际睡眠秒数的——拿它当不等式操作数会让 `90 > 89.6` 被读成「90 不大于 90」，
+    于是 0.4s 已用 + 90s 等待 + 30s 发送 = 120.4s 超出宿主 120s，进程树被砍，
+    `record(..., recovered=True)` 跑不到，账本卡在旧失败结论（#224）。
+
+    与 `over_budget()` / `clamp_wait()` 同口径：只给事实，不替调用方做决定。
+    """
+    return WAIT_BUDGET - max(0.0, float(elapsed))

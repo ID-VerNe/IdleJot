@@ -2,11 +2,14 @@
 
 这些规则每条都对应一种群里真实会发生的双击式故障（自己发的 # 被当指令、
 @机器人 #体力 双响应、未开群泄入、同一条消息重连后回两次），不能靠手点群消息
-验证，所以在这里用合成事件全量钉住。
+验证，所以在这里用合成事件全量钉住。文档里的 `groups` 示例同样在这里自证
+（示例少一个 `enabled` 就等于教人把整群静默，issue #235）。
 
     .venv/Scripts/python.exe scripts/check_slash_commands.py
 """
+import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -18,12 +21,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import commands  # noqa: E402
 import up  # noqa: E402  (唤醒侧的 `#` 闸门，issue #70)
 import wg_up_wake  # noqa: E402  (issue #37 PC: config 的真实调用点；up.config 只是门面引用)
-from check_fixture_support import temp_dir  # noqa: E402
+from check_fixture_support import assert_runner, temp_dir  # noqa: E402
 
 # 守护的 log() 写死运维日志；检查进程不该往里混行，整体改道临时目录。
 commands.LOG = Path(tempfile.gettempdir()) / "wg_commands_check.log"
 
-FAILED = []
+# 即时断言 runner（issue #280 合流）：check() 打印 + 累积，summary() 出尾行。
+_runner = assert_runner(markers="ok")
+check = _runner.check
 SELF = "100000000"
 SELF_IDS = {SELF}
 CFG = {
@@ -42,12 +47,6 @@ CFG = {
     },
 }
 S = commands.settings_from(CFG)
-
-
-def check(name, ok, detail=""):
-    print(f"{'ok  ' if ok else 'FAIL'} {name}" + (f" — {detail}" if detail and not ok else ""))
-    if not ok:
-        FAILED.append(name)
 
 
 def event(**over):
@@ -76,6 +75,72 @@ check("settings_from: cooldown 负数回落默认值",
       commands.settings_from({"slash_commands": {"cooldown_seconds": -3}})["cooldown_seconds"] == 5)
 check("settings_from: cooldown 非数字回落默认值",
       commands.settings_from({"slash_commands": {"cooldown_seconds": "abc"}})["cooldown_seconds"] == 5)
+
+# ---- 文档示例自证：groups 片段必须真能进白名单（issue #235） -------------------
+# 症状：doc/SLASH_COMMANDS.md 的 groups 示例少写 "enabled": true，照抄即整群
+# `#` 指令静默。文档与实现谁对不靠人工比对——把文档里每个 `"groups": {…}`
+# 喂给 settings_from，产出必须非空。按大括号配平取对象，不逐字比对原文：
+# 改排版、换群号、加字段都不误报，只要求「示例自己成立」。
+def _json_fences(text):
+    """`[(起始行号, 片段正文)]`，只收 ```json / ```jsonc 围栏。"""
+    fences, start, buf, lang = [], 0, None, ""
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("```"):
+            if buf is None:
+                lang, start, buf = line.strip()[3:].strip().lower(), lineno, []
+            else:
+                if lang.startswith("json"):
+                    fences.append((start, "\n".join(buf)))
+                buf = None
+            continue
+        if buf is not None:
+            buf.append(line)
+    return fences
+
+
+def _groups_objects(block):
+    """块内每个 `"groups": {…}` 的对象文本与块内行偏移（字符串里的括号不算）。"""
+    found = []
+    for match in re.finditer(r'"groups"\s*:\s*\{', block):
+        begin = match.end() - 1
+        depth, in_str, esc = 0, False, False
+        for idx in range(begin, len(block)):
+            char = block[idx]
+            if in_str:
+                if esc:
+                    esc = False
+                elif char == "\\":
+                    esc = True
+                elif char == '"':
+                    in_str = False
+            elif char == '"':
+                in_str = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    found.append((block[begin:idx + 1], block.count("\n", 0, begin)))
+                    break
+    return found
+
+
+_doc = ROOT / "doc" / "SLASH_COMMANDS.md"
+_examples = 0
+for _fence_line, _block in _json_fences(_doc.read_text(encoding="utf-8")):
+    for _obj, _offset in _groups_objects(_block):
+        _examples += 1
+        _where = f"doc/SLASH_COMMANDS.md:{_fence_line + 1 + _offset}"
+        try:
+            _parsed = json.loads(_obj)
+        except json.JSONDecodeError as exc:
+            check(f"doc 示例: groups 片段可解析（{_where}）", False, str(exc))
+            continue
+        check(f"doc 示例: groups 片段进白名单（{_where}）",
+              bool(commands.settings_from({"groups": _parsed})["groups"]),
+              "settings_from 产出空集——示例缺 groups.<群号>.enabled（issue #235）")
+check("doc 示例: 至少扫到一个 groups 片段（防断言空转）", _examples > 0,
+      f"{_doc} 里没找到 ```json 围栏内的 groups 对象")
 
 # ---- command_key：前缀解析 ----------------------------------------------------
 check("command_key: '#体力' → ('体力','')", commands.command_key("#体力", "#") == ("体力", ""))
@@ -249,8 +314,5 @@ check("pid_alive: 本进程判活", commands.pid_alive(os.getpid()))
 check("pid_alive: 不存在的 pid 判死", not commands.pid_alive(999999))
 check("pid_alive: 非法 pid 判死", not commands.pid_alive(0))
 
-print()
-if FAILED:
-    print(f"{len(FAILED)} 项失败: {', '.join(FAILED)}")
+if _runner.summary(ok_tail=f"全部通过（{commands.SEEN_MAX} 条去重窗口）"):
     sys.exit(1)
-print(f"全部通过（{commands.SEEN_MAX} 条去重窗口）")

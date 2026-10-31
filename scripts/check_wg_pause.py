@@ -53,13 +53,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # 数据根在 import 前隔离：collector / up / reload_exec 都在模块级求 state_dir()。
 import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
 
 HOME = scratch_dir(prefix="tulpa-wg-pause-gate-")
 STATE = HOME / "state"
 STATE.mkdir(parents=True, exist_ok=True)
 os.environ["WATER_GROUP_HOME"] = str(HOME)
-os.environ["IDLEJOT_WG_STATE"] = str(STATE)
+pin_state_env(STATE)  # state 两腿都钉（#281：IDLEJOT 先于 TULPA，单钉一条会被外部穿透）
 
 fs.bootstrap_paths(scripts=False, root=False)
 

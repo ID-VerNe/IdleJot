@@ -183,9 +183,41 @@ def self_account():
     return str(config().get("self_account") or "")
 
 
-def wake_words():
-    words = config().get("self_names") or []
-    return [str(w) for w in words if w]
+def wake_words(event=None):
+    """唤醒词合并后的有序 list——委派 ``wg_wake_words.wake_words``（issue #279）。
+
+    合并规则（顶层 ``self_names`` + per-group ``self_names``/``wake_words`` + 人格
+    名 + account）单一出处在 ``wg_wake_words``；改前这里只取顶层 ``self_names``，
+    per-group ``wake_words`` 配了但顶层没配的群 daemon 不认（issue #279 复现命令
+    指向的就是这条差异）。
+
+    ``event`` 给定时从中反解 ``conversation_id`` 的群号与账号，把 per-group 名单
+    纳入；缺省（如 ``check_trigger_mode.py`` 的退化桩）只读顶层——与改前同形状。
+    """
+    import wg_wake_words  # noqa: PLC0415  (同目录 flat import，与 wg_aliases 同范式)
+
+    group_id = ""
+    persona_name = ""
+    account = self_account()
+    cfg = None
+    if isinstance(event, dict):
+        cfg = config()
+        conv = str(event.get("conversation_id") or "")
+        parts = conv.split(":")
+        if len(parts) == 3 and parts[1] == "group":
+            group_id = parts[2]
+            if parts[0]:
+                account = parts[0]
+        # daemon 事件流不带 persona_name（chat_sessions 才有），preset id 走 config：
+        # per-group persona 回退 default_persona。preset id 是文件名、几乎不出现在
+        # 群友正文里，这一支形式对齐 chatlocal、运行上对 daemon 几乎无新增唤醒。
+        grp_cfg = (cfg.get("groups") or {}).get(group_id) if group_id else None
+        if isinstance(grp_cfg, dict) and grp_cfg.get("persona"):
+            persona_name = str(grp_cfg["persona"])
+        elif cfg.get("default_persona"):
+            persona_name = str(cfg["default_persona"])
+    return wg_wake_words.wake_words(cfg=cfg, group_id=group_id,
+                                    persona_name=persona_name, account=account)
 
 
 def trigger_mode(group_id=None):
@@ -327,10 +359,17 @@ def wake_reason(event):
     for detail in forwards:
         if _forward_at(detail.get("nodes"), account, budget):
             return "at"
-    for word in wake_words():
+    # issue #279：唤醒词走合并规则（顶层 + per-group + persona + account），
+    # 委派 wg_wake_words；传 event 让 per-group 名单按本条消息的群号生效。
+    # 退化兼容（check_pending_reply 等旧桩把 ``wake_words`` 打成 0 参 lambda）：
+    # 桩按 0 参调用回退，不传 event——测的是账本/时效，不是 per-group 合并。
+    try:
+        words = wake_words(event)
+    except TypeError:
+        words = wake_words()
+    for word in words:
         if word in text:
             return f"keyword:{word}"
-    words = wake_words()
     budget = {"nodes": FORWARD_WAKE_NODES, "chars": FORWARD_WAKE_CHARS}
     for detail in forwards:
         word = _forward_word(detail.get("nodes"), budget, words)
@@ -414,7 +453,7 @@ def replied_ids():
     return ids
 
 
-_LEDGER_START = {"mtime": None, "ts": 0.0}
+_LEDGER_START = {"size": None, "ts": 0.0}
 
 
 def ledger_started():
@@ -422,15 +461,23 @@ def ledger_started():
 
     Everything older than this was answered before the ledger existed, so a later
     self message is the only evidence left for it. Everything newer has to be in
-    the ledger itself. Cached on mtime: the file is append-only, so the first
-    line never moves.
+    the ledger itself.
+
+    The starting point is the first entry's own ``ts`` (issue #209), not the file's mtime:
+    mtime is however precise the filesystem happens to be and lands *after* the
+    line was written, so comparing event timestamps against it made the two
+    clocks disagree by up to a second. Cached on ``st_size`` instead: the file is
+    append-only, so the first line only moves when the ledger is rewritten from
+    scratch — and then the size drops to 0 first, which busts the cache. Keying
+    on mtime instead meant every reply (each one appends) invalidated it, so the
+    whole file was re-read on every judgement.
     """
     path = STATE / "wg_replied.jsonl"
     try:
-        mtime = path.stat().st_mtime
+        size = path.stat().st_size
     except OSError:
         return 0.0
-    if _LEDGER_START["mtime"] == mtime:
+    if _LEDGER_START["size"] == size:
         return _LEDGER_START["ts"]
     ts = 0.0
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -439,7 +486,7 @@ def ledger_started():
             break
         except (ValueError, KeyError, TypeError):
             continue
-    _LEDGER_START.update(mtime=mtime, ts=ts)
+    _LEDGER_START.update(size=size, ts=ts)
     return ts
 
 
@@ -460,6 +507,18 @@ def replied_after(event_id, rows, ledger=None):
     marks every @ that arrived while it was being typed as answered — which is
     exactly how a burst gets dropped: a later message swallowed by the
     reply to 1563「？」, because that reply landed two seconds later.
+
+    The fence is half-open on the ledger side: strictly after ``ledger_started()``
+    and the ledger is the only judge; at or before it, the fallback decides. The
+    comparison is strict (issue #209): an event whose millisecond timestamp lands
+    exactly on the starting point could not be proven to come after the ledger
+    started. With ``>=`` that single millisecond was handed to the ledger —
+    ``seen`` was already set, so it returned False and a message that was in fact
+    answered stayed ``[待回]``, replaying it. The starting point is
+    seconds-granular, so an event and the first ledger entry collide on it
+    routinely. Landing on the fallback side does not by itself answer "yes" —
+    the fallback still needs a later self message; it only stops the ledger from
+    answering "no" on evidence it does not have.
     """
     if ledger and event_id in ledger:
         return True
@@ -468,7 +527,7 @@ def replied_after(event_id, rows, ledger=None):
     for row in rows:
         if row.get("id") == event_id:
             seen = True
-            if started and (row.get("timestamp") or 0) / 1000 >= started:
+            if started and (row.get("timestamp") or 0) / 1000 > started:
                 # The ledger was already keeping score by then. Not in it, not answered.
                 return False
             continue

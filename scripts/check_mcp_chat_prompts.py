@@ -140,6 +140,11 @@ def main():
     assert any('断开' in s for s in p.packet(row,[],[],event='source_unavailable')['reminders'])
     own=[dict(msg(7,'发言1',True),received_at=p.time.time()),dict(msg(8,'发言2',True),received_at=p.time.time())]
     assert any('自己的话较密' in s for s in p.packet(row,own,own)['reminders'])
+    # 中文引号规范（issue #306）：每轮 prompt 的 reminders 都要带「引述用全角双引号」
+    # 的通用 hint，不依赖 full / 特定人格 / 图片授权。断言原文含“全角双引号”字样。
+    _zhq = p.packet(dict(row,persona='任意人格'),[],[],full=False)['reminders']
+    assert any(('全角双引号' in hint and '“' in hint and '不用西文' in hint) for hint in _zhq), \
+        'reminders 缺中文引号规范 hint（issue #306）'
     custom=p.packet(dict(row,persona='沉稳的摄影爱好者',persona_preset=''),[],[msg(9,'代码炸了 大肥鱼')],full=True)
     assert custom['persona']=='沉稳的摄影爱好者' and custom['persona_name']=='自定义人格'
     assert all(e['id'] not in ('banter','code','identity') for e in custom['examples'])

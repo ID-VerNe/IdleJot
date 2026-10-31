@@ -12,6 +12,7 @@ def compact_wait(data,known_prompt_version=None,brief=None):
     active=bool(data.get('decision_required'))
     hints=[]
     if event=='source_unavailable':hints.append('来源断开，继续等待恢复；不要发言。')
+    elif event=='wait_elapsed':hints.append('暂缓的等待已到期，原输入仍在：现在决定接话（reply/ask）或明确收场（silence），不要再用 wait 无声跳过。')
     elif data.get('deferred_until'):hints.append('本批暂缓决定，到期会重新交付；直接 next_call 等待，不确认处理完成。')
     elif data.get('has_more'):hints.append('还有未读消息，先接着读再决定，不把一页当全部。')
     elif brief:hints.append(brief)

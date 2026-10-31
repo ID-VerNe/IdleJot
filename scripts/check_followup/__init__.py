@@ -27,8 +27,39 @@ issue #138：**只 @ 了别人、正文空白**的消息不算接话——不唤
 的 ``segments``（``followup.mention_info``），没有段清单的老行退化成从 ``content``
 认 ``@<qq>``。同一 issue 的第二半在渲染侧：追问行不许把 ``@<qq>`` 抹成裸 ``@``。
 
-    .venv/Scripts/python.exe scripts/check_followup.py
+issue #218：额度判据取消息自己的时间（``ts``，毫秒）而不是本地收到时刻（``at``，
+秒）——多气泡回复在途那几秒里「发送前发出、发送中收到」的话不再白嫖
+``max_messages``；``ts`` 缺失时才退回 ``at``。
+
+#284：本文件曾是单文件 `scripts/check_followup.py`（980 行，advisory 带）。按
+#169 PF-2（`scripts/check_listener_rehang/`）与 #247（`scripts/check_dossier_cadence/`）
+的先例拆成包：`_fixture`（临时库 / 临时状态目录 / `WATCH` 路径 / `MESSAGES` /
+`FOREIGN` / `GROUP` / `ONEBOT` / `append` / `build` / `run_watch`），本 `__init__.py`
+保留 docstring 与 24 条用例 + `main()`，`__main__.py` 供 `python -m`。入口名不变
+（`check_followup`），对 `gates.json` / `run_gates.py` / CI 透明。用例调用序、
+断言、正文逐字搬运，零重排。
+
+runner 形态不在 R4（issue #280）的 `check()` / `FAILED` / `全部通过` 族里——
+check_followup 是更早的裸 `assert` + 每条用例末尾 `print("  ok  <desc>")` +
+`main()` 末尾 `print("PASS")` 形态（grep 证实原文件 0 处 `check(` / `FAILED` /
+`全部通过` / `assert_runner`）。故 `_fixture` 不委派 `assert_runner`——委派会把
+输出从 `  ok  <desc>` / `PASS` 改成 `ok  <name>` / `全部通过`（ok+3 空格 vs
+2 空格+ok+2 空格，尾行 PASS vs 全部通过），破 byte-identity。拆包只搬夹具层，
+runner 形态原样留在本主模块。issue #284 正文「runner 是 R4 形态」一句是误述。
+
+    .venv/Scripts/python.exe -m scripts.check_followup
 """
+# 导入序是 load-bearing（issue #284）：`_fixture` 必须最先——它把 `scripts/` +
+# daemon 插进 `sys.path`、钉住临时库与临时状态目录（`check_fixture_support` import
+# 期会把它钉成夹具目录）、进口 followup/up/wg_text/wg_up_wake，并定义 `MESSAGES` /
+# `FOREIGN` / `GROUP` / `ONEBOT` / `append` / `build` / `run_watch`。本主模块的
+# 24 条用例依赖这些名字先就位。顺序即旧文件的用例调用序——24 条契约的运行顺序
+# 靠 `main()` 里那张调用表逐字保持。禁止改成一行 `from . import _fixture`：
+# 显式分行防后人误重排。
+from ._fixture import (  # noqa: F401
+    DB, FOREIGN, GROUP, MESSAGES, ONEBOT, ROOT, SID, TMP, WATCH, append, build,
+    followup, pin_state_env, run_watch, up, wg_text, wg_up_wake,
+)
 import json
 import os
 import sqlite3
@@ -36,79 +67,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
-from check_fixture_support import scratch_dir  # noqa: E402
-fs.bootstrap_paths(scripts=False, root=False)
-
-TMP = scratch_dir(prefix="wg_followup_")
-DB = TMP / "fixture.sqlite3"
-SID = "session-fixture"
-WATCH = ROOT / "water-group" / "daemon" / "watch.py"
-
-# 两个旧名都要钉：state_dir()/DB 先读 IDLEJOT_*，只设 TULPA_* 时外面若已有
-# IDLEJOT_* 就会落回实机状态——本文件会 close() 窗口，等于删掉真实窗口文件。
-os.environ["TULPA_WG_DB"] = str(DB)
-os.environ["IDLEJOT_WG_DB"] = str(DB)
-os.environ["TULPA_WG_STATE"] = str(TMP)
-os.environ["IDLEJOT_WG_STATE"] = str(TMP)
-
-sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
-
-import followup  # noqa: E402
-import up  # noqa: E402  (`#` 指令闸门与 wake_reason 同源，issue #70)
-import wg_text  # noqa: E402  (追问行正文渲染，issue #138)
-import wg_up_wake  # noqa: E402  (issue #37 PC: config 的真实调用点；up.config 只是门面引用)
-
-# 5 是被回复的那条；6/9 是群友接话；7 是机器人自己；8 是系统提示；
-# 10 属于另一个会话；11 是稍后机器人自己补的一句。第三个字段是入库时刻 at。
-MESSAGES = [
-    (5, {"sender": "甲", "content": "@机器人 在吗", "timestamp": 1792500000000}, 1792500000.0),
-    (6, {"sender": "乙", "content": "在的在的", "timestamp": 1792500001000}, 1792500001.0),
-    (7, {"sender": "小鲸鱼", "content": "在呢", "timestamp": 1792500002000,
-         "is_self": True}, 1792500002.0),
-    (8, {"sender": "系统", "content": "提示", "timestamp": 1792500003000,
-         "synthetic": True}, 1792500003.0),
-    (9, {"sender": "丙", "content": "问作业吗", "timestamp": 1792500004000}, 1792500004.0),
-    (11, {"sender": "小鲸鱼", "content": "刚那句当我没说", "timestamp": 1792500006000,
-          "is_self": True}, 1792500006.0),
-]
-FOREIGN = (10, {"sender": "外人", "content": "别的会话", "timestamp": 1792500005000},
-           1792500005.0)
-GROUP = "123"
-ONEBOT = {5: "775", 6: "776", 7: "777", 8: "778", 9: "779", 10: "7710", 11: "7711"}
-
-
-def append(rows):
-    """往临时库里追加消息：(id, payload, at)，at 是入库时刻。"""
-    db = sqlite3.connect(DB)
-    for event_id, payload, at in rows:
-        data = dict(payload)
-        data["conversation_id"] = f"111:group:{GROUP}"
-        data["onebot_message_id"] = ONEBOT.get(event_id, str(7000 + event_id))
-        db.execute("INSERT INTO chat_inbox VALUES (?, ?, ?, ?, '[]')",
-                   (event_id, SID, json.dumps(data, ensure_ascii=False), at))
-    db.commit()
-    db.close()
-
-
-def build():
-    db = sqlite3.connect(DB)
-    db.execute("CREATE TABLE chat_sessions (id TEXT, conversation_id TEXT, active INTEGER)")
-    db.execute("CREATE TABLE chat_inbox "
-               "(id INTEGER PRIMARY KEY, session_id TEXT, payload TEXT, at REAL NOT NULL,"
-               " media TEXT NOT NULL DEFAULT '[]')")
-    db.execute("INSERT INTO chat_sessions VALUES (?, ?, 1)", (SID, f"111:group:{GROUP}"))
-    db.execute("INSERT INTO chat_sessions VALUES ('dead-session', '100:group:999', 0)")
-    foreign = dict(FOREIGN[1])
-    foreign["conversation_id"] = "100:group:999"
-    foreign["onebot_message_id"] = ONEBOT[FOREIGN[0]]
-    db.execute("INSERT INTO chat_inbox VALUES (?, ?, ?, ?, '[]')",
-               (FOREIGN[0], "dead-session", json.dumps(foreign, ensure_ascii=False), FOREIGN[2]))
-    db.commit()
-    db.close()
-    append(MESSAGES)
 
 
 def check_open():
@@ -208,6 +166,117 @@ def check_session():
     print("  ok  换会话即收窗（防 after_id 对错号）")
 
 
+def check_multigroup_session_pinned():
+    """issue #206：多群机器上 active_session_id() 必须按本会话钉死的群过滤。
+
+    复现 issue #206 的现场：`chat_sessions` 里两条 `active=1`（一会话一群，#164），
+    改前 `active_session_id()` 的 SQL 没有群过滤，取到的是「后创建的那一个」——
+    钉死群 111 的会话把追问窗口绑到群 222 的会话上，`since()` 整窗口读别群，
+    `stale()` 还会因那条会话重建而误判收窗。
+
+    本夹具钉死群 111（env），库里塞两条 active 会话（111 / 222），断言：
+      - `active_session_id()` 取本群那条（s111），不是整表最后一行的 s222；
+      - `open()` 默认走 active_session_id，窗口 session = s111；
+      - `since(s111)` 不会返回群 222 的消息；
+      - `stale()` 在本群会话存活时为 None。
+    对照组：把 env 撤掉（未钉死 + 多群）退化成改前整表取最后一行——
+    单群机器不触发本 bug，但多群未钉死也不该静默选群，这里只断言「行为退化、
+    不报错」，与 `wg_isolation.note()` 的口径一致（未钉死时读侧不隔离）。
+    """
+    import wg_isolation
+
+    saved_env = os.environ.pop("IDLEJOT_WG_CONVERSATION", None)
+    saved_env2 = os.environ.pop("TULPA_WG_CONVERSATION", None)
+    # 临时库 + 临时状态目录：本用例不能共用 TMP——会污染既有窗口文件。
+    import tempfile
+    tmp2 = Path(tempfile.mkdtemp(prefix="wg_followup_multigroup_"))
+    db2 = tmp2 / "multigroup.sqlite3"
+    saved_db = os.environ.get("IDLEJOT_WG_DB")
+    saved_state = os.environ.get("IDLEJOT_WG_STATE")
+    os.environ["IDLEJOT_WG_DB"] = str(db2)
+    os.environ["TULPA_WG_DB"] = str(db2)
+    pin_state_env(tmp2)  # state 两腿都钉（#281），还原仍按 saved_state 复原
+    os.environ["IDLEJOT_WG_CONVERSATION"] = "111:group:111"
+    try:
+        conn = sqlite3.connect(db2)
+        conn.execute("CREATE TABLE chat_sessions (id TEXT, conversation_id TEXT, active INTEGER)")
+        conn.execute("CREATE TABLE chat_inbox (id INTEGER PRIMARY KEY, session_id TEXT, payload TEXT, at REAL NOT NULL, media TEXT NOT NULL DEFAULT '[]')")
+        conn.execute("INSERT INTO chat_sessions VALUES ('s111', '111:group:111', 1)")
+        conn.execute("INSERT INTO chat_sessions VALUES ('s222', '111:group:222', 1)")
+        # s111 的接话：在锚点之后、属于本群
+        conn.execute("INSERT INTO chat_inbox VALUES (101, 's111', ?, 1792500004.0, '[]')",
+                     (json.dumps({"sender": "甲", "content": "本群接话", "conversation_id": "111:group:111", "timestamp": 1792500004000}, ensure_ascii=False),))
+        # s222 的闲聊：同 id 空间里、属于别群——绝不能被 since(s111) 捞到
+        conn.execute("INSERT INTO chat_inbox VALUES (102, 's222', ?, 1792500005.0, '[]')",
+                     (json.dumps({"sender": "乙", "content": "别群闲聊", "conversation_id": "111:group:222", "timestamp": 1792500005000}, ensure_ascii=False),))
+        conn.commit()
+        conn.close()
+
+        # 重读 DB / WINDOW：本用例改了 os.environ，但 followup 的 DB / WINDOW 是
+        # import 期求值的——同一进程里改不了它们指向，只能在子进程里验。
+        env = dict(os.environ)
+        env["PYTHONUTF8"] = "1"
+        script = tmp2 / "probe.py"
+        script.write_text(
+            "import sys; sys.path.insert(0, r'" + str(ROOT / "water-group" / "daemon") + "');\n"
+            "import followup, json, sqlite3;\n"
+            "print('active=', followup.active_session_id());\n"
+            "w = followup.open(100, max_messages=3, idle_seconds=600);\n"
+            "print('session=', w['session']);\n"
+            "rows = followup.since(100, w['session']);\n"
+            "print('ids=', [r['id'] for r in rows]);\n"
+            "print('convs=', [r.get('conversation_id') for r in rows]);\n"
+            "print('stale=', followup.stale(w));\n"
+            "followup.close();\n",
+            encoding="utf-8")
+        proc = subprocess.run([sys.executable, str(script)], cwd=str(ROOT),
+                              env=env, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=60)
+        out = proc.stdout or ""
+        err = proc.stderr or ""
+        assert proc.returncode == 0, f"probe 退出 {proc.returncode}:\n{out}\n{err}"
+        assert "active= s111" in out, f"未按本群过滤，取到别群会话：{out}"
+        assert "session= s111" in out, f"窗口绑到别群会话：{out}"
+        assert "ids= [101]" in out, f"since() 混进了别群消息：{out}"
+        assert "111:group:222" not in out, f"别群 conversation_id 漏进追问行：{out}"
+        assert "stale= None" in out, f"本群会话存活却判 stale：{out}"
+
+        # 对照组：撤掉 env（未钉死 + 多群）→ 退化成改前的整表取最后一行，
+        # 不报错、不静默选群——单群机器不触发本 bug，多群未钉死由 wg_isolation.note()
+        # 单独告警，这里只断言「行为退化、不崩」。
+        env2 = dict(env)
+        for key in ("IDLEJOT_WG_CONVERSATION", "TULPA_WG_CONVERSATION"):
+            env2.pop(key, None)
+        proc2 = subprocess.run([sys.executable, str(script)], cwd=str(ROOT),
+                               env=env2, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=60)
+        out2 = proc2.stdout or ""
+        assert proc2.returncode == 0, f"未钉死退化崩溃：{out2}\n{proc2.stderr}"
+        # 未钉死时 active_session_id 退化成整表取最后一行（s222），这是改前行为，
+        # 与单群机器等价——bug 只在多群未钉死时由 wg_isolation.note() 告警，不在这里拦。
+        assert "active=" in out2, f"未钉死退化没跑通：{out2}"
+    finally:
+        for key, value in (("IDLEJOT_WG_DB", saved_db),
+                           ("TULPA_WG_DB", saved_db),
+                           ("IDLEJOT_WG_STATE", saved_state),
+                           ("TULPA_WG_STATE", saved_state)):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        if saved_env is not None:
+            os.environ["IDLEJOT_WG_CONVERSATION"] = saved_env
+        else:
+            os.environ.pop("IDLEJOT_WG_CONVERSATION", None)
+        if saved_env2 is not None:
+            os.environ["TULPA_WG_CONVERSATION"] = saved_env2
+        else:
+            os.environ.pop("TULPA_WG_CONVERSATION", None)
+        import shutil
+        shutil.rmtree(tmp2, ignore_errors=True)
+    print("  ok  多群追问窗口绑本群（active_session_id 按 wg_isolation 过滤，issue #206）")
+
+
 def check_lookup():
     followup.close()
     assert followup.load() is None, "close 之后不该还有窗口"
@@ -243,9 +312,11 @@ def check_backlog():
     assert state["after_id"] == 35, "游标要越过积压，不能卡在锚点"
     assert state["wakes"] == 1, state
     assert followup.stale(state) is None, followup.stale(state)
-    # 开窗之后真有人接话，才该扣额度
+    # 开窗之后真有人接话，才该扣额度。时间写成 sent_at+2 而不是 sent_at：额度判据
+    # 比的是消息自己的时间（issue #218），`int(sent_at*1000)` 截断后比 sent_at 还早
+    # 一点，会被算成「发送开始之前开口」——夹具要表达的是「发送之后说的」。
     append([(40, {"sender": "群友", "content": "回复之后说的",
-                  "timestamp": int(sent_at * 1000)}, sent_at + 5)])
+                  "timestamp": int((sent_at + 2) * 1000)}, sent_at + 5)])
     woke = followup.consume(state, followup.since(state["after_id"], SID,
                                                   state["not_before"]))
     assert [r["id"] for r in woke] == [40], woke
@@ -282,9 +353,9 @@ def check_pre_reply_visible():
     assert state["budget"] == 5, "pre-reply 不该扣额度（issue #117）"
     assert followup.stale(state) is None, followup.stale(state)
 
-    # 发送开始之后的接话才占预算
+    # 发送开始之后的接话才占预算（消息时间同样要真的晚于 not_before，见 check_backlog）
     append([(810, {"sender": "群友", "content": "回复之后说的",
-                   "timestamp": int(sent_at * 1000)}, sent_at + 5)])
+                   "timestamp": int((sent_at + 2) * 1000)}, sent_at + 5)])
     woke = followup.consume(state, followup.since(state["after_id"], SID,
                                                   state["not_before"]))
     assert [r["id"] for r in woke] == [810], woke
@@ -298,8 +369,9 @@ def check_pagination():
     anchor = 100
     sent_at = time.time()
     ids = list(range(110, 170))  # 60 条，超过 since() 的默认每页 50 条
+    # 消息时间与入库时间都排在 not_before 之后（+2）：判据比的是消息时间（issue #218）
     append([(i, {"sender": "群友", "content": f"接话 {i}",
-                 "timestamp": int(sent_at * 1000)}, sent_at + i * 0.001) for i in ids])
+                 "timestamp": int((sent_at + 2) * 1000)}, sent_at + 2 + i * 0.001) for i in ids])
     rows = followup.since(anchor, SID, sent_at)
     assert [r["id"] for r in rows] == ids, f"分页漏了：{[r['id'] for r in rows]}"
     state = followup.open(anchor, max_messages=100, idle_seconds=600, not_before=sent_at)
@@ -398,8 +470,7 @@ def run_watch():
     for name in ("WATER_GROUP_HOME", "IDLEJOT_WG_STATE", "TULPA_WG_STATE",
                  "IDLEJOT_WG_DB", "TULPA_WG_DB"):
         env.pop(name, None)
-    env["IDLEJOT_WG_STATE"] = str(TMP)
-    env["TULPA_WG_STATE"] = str(TMP)
+    pin_state_env(TMP, env=env)  # state 两腿都钉给 watch 子进程（#281）
     env["IDLEJOT_WG_DB"] = str(DB)
     env["TULPA_WG_DB"] = str(DB)
     env["IDLEJOT_WG_CONFIG"] = str(fixture)
@@ -527,12 +598,18 @@ def check_db_fallback_not_gated():
     import plugins
 
     off = commands.settings_from({"plugins": {"followup": {"enabled": False}}})
-    # event_lookup / active_group 连 settings 都不看：停用态照旧回答
-    assert plugins.emit("event_lookup", {"event_id": 6, "settings": off}) == (GROUP, "776")
-    assert plugins.emit("event_lookup", {"event_id": 9999, "settings": off}) is None
+    # event_lookup / active_group 连 settings 都不看：停用态照旧回答。
+    # 编号必须是**库记号**（q<n>）：这条链查的是 chat_inbox（issue #203），
+    # 裸数字是事件流编号，交给它会拿别群同号那条顶替。
+    assert plugins.emit("event_lookup", {"event_id": "q6", "settings": off}) == (GROUP, "776")
+    assert plugins.emit("event_lookup", {"event_id": "qid:6"}) == (GROUP, "776")
+    assert plugins.emit("event_lookup", {"event_id": "q9999", "settings": off}) is None
+    assert plugins.emit("event_lookup", {"event_id": 6, "settings": off}) is None, \
+        "裸数字（事件流编号）不该走库兜底（issue #203 撞号本体）"
+    assert plugins.emit("event_lookup", {"event_id": "id:6", "settings": off}) is None
     assert plugins.emit("active_group", {"settings": off}) == GROUP
     # commands 注册表同一条路，答案一样
-    assert commands.PLUGINS.emit("event_lookup", {"event_id": 6}) == (GROUP, "776")
+    assert commands.PLUGINS.emit("event_lookup", {"event_id": "q6"}) == (GROUP, "776")
     assert commands.PLUGINS.emit("active_group") == GROUP
     print("  ok  event_lookup / active_group 不受门控（回复链路 DB 兜底）")
 
@@ -718,11 +795,94 @@ def check_bare_at_others_watch():
     code, out = run_watch()
     assert code == 0, f"watch.py 退出码 {code}：\n{out}"
     assert "WAKE" in out, f"@我 的空白消息该唤醒，不能连坐：\n{out}"
-    assert "id=951" not in out, \
+    assert "q951" not in out and "id=951" not in out, \
         f"只 @ 别人的空白消息进了追问行（issue #138 复发）：\n{out}"
-    assert "id=952" in out, f"@我 的那条没进追问行：\n{out}"
+    # 追问行的编号改打 `q<n>`（issue #203）：那是 chat_inbox 的 rowid，与事件流
+    # 的裸数字是两套编号，撞号时必须能一眼分开。
+    assert "id=q952" in out, f"@我 的那条没进追问行（issue #203 的 q<n> 形态）：\n{out}"
+    assert "id=952" not in out, f"追问行仍在打裸数字编号（issue #203 复发）：\n{out}"
     followup.close()
     print("  ok  watch.py 追问行只放真接话：@别人+空白不出现，@我+空白照旧（issue #138）")
+
+
+def check_skipped_rows_still_wake():
+    """issue #217：服务端跳批的行 delivered=0，追问窗口照样要捞到。
+
+    两套窗口互不依赖，唯一的交集是 `chat_inbox`：服务端「这批不投递」不等于
+    「追问也不许看」。修复前服务端跳批会把整批置 `delivered=1`，`--context`
+    看得见、追问窗口看不见（靠 delivered 判已处理的下游也会漏），两个入口对
+    「群里还在聊」给出不同答案。
+    """
+    db = sqlite3.connect(DB)
+    columns = {r[1] for r in db.execute("PRAGMA table_info(chat_inbox)")}
+    if "delivered" not in columns:
+        db.execute("ALTER TABLE chat_inbox ADD COLUMN delivered INTEGER NOT NULL DEFAULT 0")
+    db.commit()
+    db.close()
+    now = time.time()
+    append([
+        (1301, {"sender": "甲", "content": "跳批的闲聊",
+                "segments": [{"type": "text", "text": "跳批的闲聊"}]}, now),
+        (1302, {"sender": "乙", "content": "投递过的闲聊",
+                "segments": [{"type": "text", "text": "投递过的闲聊"}]}, now),
+    ])
+    db = sqlite3.connect(DB)
+    db.execute("UPDATE chat_inbox SET delivered=1 WHERE id=1302")
+    db.commit()
+    db.close()
+    state = followup.open(1300, max_messages=4, idle_seconds=60)
+    rows = followup.since(1300, SID)
+    assert [r["id"] for r in rows] == [1301, 1302], [r["id"] for r in rows]
+    woke = followup.consume(state, rows)
+    assert [r["id"] for r in woke] == [1301, 1302], "delivered=0 的行被追问窗口跳过了"
+    print("  ok  delivered=0 的跳批行照样唤醒追问窗口（与 #217 口径一致）")
+
+
+def check_charge_uses_message_time():
+    """issue #218：额度按消息自己的时间扣，不是本地收到时刻。
+
+    现场：一条多气泡回复在途 `BUBBLE_GAP=1.2s × 条数`（最长到 `SEND_BUDGET=30s`），
+    这段里群里说的话几乎全是「发送开始之前发出、发送开始之后才收到」。旧判据
+    `at >= not_before` 把它们全判成 pre-reply，`max_messages` 在发送期间被整段绕过
+    ——和 #144 压 turn 成本的方向相反。判据要的是「谁在发送开始之后**开口**」，
+    只有 `ts`（`payload.timestamp`，毫秒）答得上来。
+
+    三行夹具就是 issue 的复现形态：`ts < not_before < at`（发送在途到达）不扣额度
+    但仍唤醒（#117 的可见性不倒退）；`not_before <= ts` 扣；`ts` 缺失退回 `at` 扣。
+    """
+    anchor = 1000
+    sent_at = time.time()
+    append([
+        # 1) 发送开始之前发出、发送期间才收到：不扣额度（issue #218 的症状行）
+        (1001, {"sender": "甲", "content": "在途到达",
+                "timestamp": int((sent_at - 2) * 1000)}, sent_at + 1),
+        # 2) 发送开始之后开口：扣
+        (1002, {"sender": "乙", "content": "发送后接话",
+                "timestamp": int((sent_at + 2) * 1000)}, sent_at + 2.5),
+        # 3) 没有消息时间（老行/手搓行）：退回 at，at 在发送开始之后 → 扣
+        (1003, {"sender": "丙", "content": "没有消息时间"}, sent_at + 3),
+    ])
+    state = followup.open(anchor, max_messages=5, idle_seconds=600, not_before=sent_at)
+    rows = followup.since(anchor, SID)
+    assert [r["id"] for r in rows] == [1001, 1002, 1003], [r["id"] for r in rows]
+
+    woke = followup.consume(state, rows)
+    assert [r["id"] for r in woke] == [1001, 1002, 1003], \
+        f"在途到达的接话也要唤醒，不能吞：{[r['id'] for r in woke]}"
+    assert state["budget"] == 3, (
+        "发送期间到达的消息被扣了额度（issue #218 复发）："
+        f"该扣 1002/1003 两条，实际扣了 {5 - state['budget']} 条")
+    assert state["after_id"] == 1003, state
+
+    # 判据本身也钉一下：ts 是毫秒、at 是秒；ts 缺失才退回 at。放在行为断言之后，
+    # 是为了让未打补丁的 base 先红在「额度多扣」这个症状上，而不是红在缺函数上。
+    assert followup.sent_at(rows[0]) == int((sent_at - 2) * 1000) / 1000.0, \
+        followup.sent_at(rows[0])
+    assert followup.sent_at(rows[1]) == int((sent_at + 2) * 1000) / 1000.0, \
+        followup.sent_at(rows[1])
+    assert followup.sent_at(rows[2]) == sent_at + 3, followup.sent_at(rows[2])
+    followup.close()
+    print("  ok  额度按消息时间扣，发送在途到达的不扣（issue #218）")
 
 
 def main():
@@ -734,6 +894,7 @@ def main():
     check_budget()
     check_idle()
     check_session()
+    check_multigroup_session_pinned()
     check_lookup()
     check_backlog()
     check_pagination()
@@ -757,6 +918,12 @@ def main():
     # 用例之后——否则会被它们当成接话捞进去。
     check_bare_at_others()
     check_bare_at_others_watch()
+    # issue #218 专项：追加 id 1000+ 的新消息，同样必须排在所有 `since(小 anchor)`
+    # 用例之后。
+    check_charge_uses_message_time()
+    # issue #217 专项：追加 id 1301+ 的新消息，必须再排在 #218（id 1000+）之后，
+    # 否则 #218 的 since(1000) 会把 1301/1302 当接话捞进去。
+    check_skipped_rows_still_wake()
     print("PASS")
     return 0
 

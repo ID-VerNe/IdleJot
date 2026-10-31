@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 
-from check_fixture_support import network_guard, scratch_dir  # noqa: E402
+from check_fixture_support import assert_runner, network_guard, scratch_dir  # noqa: E402
 from fixture_server import FixtureHandler, fixture_server  # noqa: E402
 
 # 路径必须在 import busboss **之前**钉到临时目录：TOKEN_FILE / CITY_FILE 是
@@ -45,7 +45,9 @@ os.environ["WATER_GROUP_HOME"] = str(_SCRATCH / "home")
 import busboss  # noqa: E402
 import commands  # noqa: E402
 
-FAILED = []
+# 即时断言 runner（issue #280 合流）：check() 打印 + 累积，summary() 出尾行。
+_runner = assert_runner(markers="ok")
+check = _runner.check
 PORTS = set()
 
 GOOD_TOKEN = "Bearer good"
@@ -76,12 +78,6 @@ CLASSES = [
                         "classTime": "07:00:00"}],
      "arrivalNodeList": [{"nodeName": "北理工公交站", "classTime": "09:00:00"}]},
 ]
-
-
-def check(name, ok, detail=""):
-    print(f"{'ok  ' if ok else 'FAIL'} {name}" + (f" — {detail}" if detail and not ok else ""))
-    if not ok:
-        FAILED.append(name)
 
 
 class Handler(FixtureHandler):
@@ -375,12 +371,7 @@ def main():
                            test_tokens, test_query_end_to_end, test_zero_is_not_error,
                            test_no_credential_no_request, test_plugin_registry):
                     _run(fn)
-    print()
-    if FAILED:
-        print(f"{len(FAILED)} 项失败: {', '.join(FAILED)}")
-        return 1
-    print("全部通过")
-    return 0
+    return _runner.summary()
 
 
 if __name__ == "__main__":

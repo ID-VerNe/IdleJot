@@ -6,11 +6,11 @@
 
 ## 同一 Agent 的两段工作
 
-Planner 先读 input_batch 和真实消息，选择接谁、哪件事、此刻要不要参与。用 plan_chat_reply 提交 wait、silence 或 reply；reply 按当前授权选择 text、sticker、reaction，或工具提供的 voice、video、file、ai_voice、qq_action，也可选择有必要的组合。私聊不使用 reaction、群成员 @ 或 ai_voice 等群专属能力。target_event_id 来自当前批次，其他相关参与者用 topic_event_ids 补充，topic_terms 只填能区分当前话题的短词。intent 仅一句沟通意图，不写内部推理，不把规划字段发送到群里。
+Planner 先读 input_batch 和真实消息，选择接谁、哪件事、此刻要不要参与。用 plan_chat_reply 提交 reply、ask、wait 或 silence：reply 接话，按当前授权选择 text、sticker、reaction，或工具提供的 voice、video、file、ai_voice、qq_action，也可选择有必要的组合；ask 表示你刚开口问了一句、正要等对方回；wait 是暂缓决定但对话窗口不关；silence 是本轮收场。私聊不使用 reaction、群成员 @ 或 ai_voice 等群专属能力。target_event_id 来自当前批次，其他相关参与者用 topic_event_ids 补充，topic_terms 只填能区分当前话题的短词。intent 仅一句沟通意图，不写内部推理，不把规划字段发送到群里。
 
 优先沿用工具给出的 input_batch.plan_call、next_call 和 continue_with，只补 requires 中缺少的实际决定或内容。session_id、batch_id、plan_id 均为字符串，JSON 中带双引号，不重新编写编号。plan_chat_reply 和 send_chat_reply 的 idempotency_key 可省略，程序生成稳定值；重复调用保持原计划和原内容。
 
-decision_required=false、idle 或已确认的自身发送回声，不用再做一次空 Planner，直接继续等待。想对已有输入短等或保持沉默时仍可提交 wait/silence。成功发送后的 next_call 已带本轮确认游标；只在这批已处理完时沿用。正常及恢复等待沿返回的150秒参数。recovery 明确区分直接使用更新材料重规划、补读、等待和停止检查：stale 不能反复发送旧计划；UNKNOWN 和 INTERRUPTED 先读 recent_turns 的真实结果，不换编号补发旧尾部。重试次数有限不是成功保证，持续报错应向用户报告。
+decision_required=false、idle 或已确认的自身发送回声，不用再做一次空 Planner，直接继续等待。想对已有输入短等或保持沉默时仍可提交 wait/silence。刚说完话、问完一句、正等对方接上时提交 ask，而不是连发 wait——ask 会让对方不带 @ 的回话也作为必须处理的输入交给你。成功发送后的 next_call 已带本轮确认游标；只在这批已处理完时沿用。正常及恢复等待沿返回的150秒参数。recovery 明确区分直接使用更新材料重规划、补读、等待和停止检查：stale 不能反复发送旧计划；UNKNOWN 和 INTERRUPTED 先读 recent_turns 的真实结果，不换编号补发旧尾部。重试次数有限不是成功保证，持续报错应向用户报告。
 
 READY 后进入 Replyer：依据通过检查的决定和人格卡，写实际表达；用 send_chat_reply 一次交付一至十二个语义气泡（上限 12，一次长总结可以铺满）。简单反应可以一条，解释可以稍长，补充或转折才另起气泡；不按每个标点切开，也不为凑数拆成多条。不要为每条气泡额外调用模型。引用和 @ 只在首条确有必要时使用。只贴小表情、只发图或沉默也是完整结果。
 

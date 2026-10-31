@@ -40,16 +40,13 @@ sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 import commands  # noqa: E402
 import reload as wg_reload  # noqa: E402
 import wg_config  # noqa: E402
+from check_fixture_support import assert_runner  # noqa: E402
 from plugins.base import Command, Plugin, PluginError  # noqa: E402
 from plugins.registry import Registry  # noqa: E402
 
-FAILED = []
-
-
-def check(name, ok, detail=""):
-    print(f"{'ok  ' if ok else 'FAIL'} {name}" + (f" — {detail}" if detail and not ok else ""))
-    if not ok:
-        FAILED.append(name)
+# 即时断言 runner（issue #280 合流）：check() 打印 + 累积，summary() 出尾行。
+_runner = assert_runner(markers="ok")
+check = _runner.check
 
 
 def _fake(name="fake", keys=("echo",)):
@@ -333,12 +330,7 @@ def main():
     test_duplicate()
     test_static_reachable()
     test_cross_protocol()
-    print()
-    if FAILED:
-        print(f"{len(FAILED)} 项失败: {', '.join(FAILED)}")
-        return 1
-    print("全部通过")
-    return 0
+    return _runner.summary()
 
 
 if __name__ == "__main__":

@@ -49,18 +49,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False)
 
 # 数据根 / 配置 / 库全部钉进临时目录，import 任何 daemon 模块之前完成：`wg_config`
 # 的 CONFIG 与 `wg_paths` 的 state_dir 都是 import 期求值的，晚一步就会指向实机。
-# `IDLEJOT_WG_STATE` 必须显式覆盖：`wg_paths.state_dir()` 的优先级是
-# `IDLEJOT_WG_STATE or TULPA_WG_STATE`，只钉后者会被外部环境穿透——那正是
-# 「测试写生产状态」的口子（穿透就意味着向实机 OneBot 发查询）。
+# state 两腿钉合走 pin_state_env（#281）：`wg_paths.state_dir()` 的优先级是
+# `IDLEJOT_WG_STATE or TULPA_WG_STATE`，两腿都钉堵住「只钉 TULPA 被外部 IDLEJOT
+# 穿透」——那正是「测试写生产状态」的口子（穿透就意味着向实机 OneBot 发查询）。
 _SCRATCH = scratch_dir(prefix="wg_unmute_")
 os.environ["WATER_GROUP_HOME"] = str(_SCRATCH / "home")
-os.environ["TULPA_WG_STATE"] = str(_SCRATCH / "state")
-os.environ["IDLEJOT_WG_STATE"] = str(_SCRATCH / "state")
+pin_state_env(_SCRATCH / "state")
 os.environ["IDLEJOT_WG_DB"] = str(_SCRATCH / "chats.sqlite3")
 os.environ["IDLEJOT_WG_CONFIG"] = str(_SCRATCH / "config.json")
 for path in ("home", "state"):
@@ -412,6 +411,77 @@ def 禁言期间不扫追问窗口():
 
 
 @case
+def 禁言期间不回退未回唤醒游标():
+    """禁言期 BACKFILL 暂停（issue #269）：游标之前积压未回 @ 时，禁言未解除
+    不许 `rewind_for_backlog()` 把游标回退并 WAKE 退出。
+
+    改前：watch.py 每轮启动立刻 BACKFILL + WAKE + rc=0，listen.py 据此立即重挂，
+    再 BACKFILL+WAKE——每秒数次死循环刷屏，禁言几百秒里整屏都是这两行。
+    改后：禁言期跳过 `rewind_for_backlog()`，与 #197 暂停追问窗口扫描同构；
+    游标不关、`start_cursor` 不动，解禁后由 `poll_unmute()` 触发重挂，重挂首轮
+    的 `check_backlog` 在 `recovered=True` 的账本上（`muted_now()` 为 False）放行，
+    照旧补扫积压。对照组：解禁后（`recovered=True`）同一份积压必须 BACKFILL+WAKE。
+    """
+    now = int(time.time())
+    _reset(now, shut_up=now + 600, all_shut=False)
+    _ledger(now + 600, at=now - 3600)
+    # 游标 12、之前积压 id=10/11 两条新鲜未回 @（与 issue 现象段同形：11433/11434）
+    (STATE / "wg_watch.txt").write_text("12", encoding="utf-8")
+    fresh_ms = (now - 30) * 1000
+    rows = [
+        {"id": 10, "timestamp": fresh_ms, "is_self": False, "sender": "甲",
+         "content": "@机器人 在吗", "segments": [{"type": "at", "qq": SELF}],
+         "conversation_id": f"111:group:{GROUP}", "onebot_message_id": "7010"},
+        {"id": 11, "timestamp": fresh_ms + 1000, "is_self": False, "sender": "乙",
+         "content": "@机器人 说话呀", "segments": [{"type": "at", "qq": SELF}],
+         "conversation_id": f"111:group:{GROUP}", "onebot_message_id": "7011"},
+    ]
+    EVENTS.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+                      encoding="utf-8")
+    before_cursor = int((STATE / "wg_watch.txt").read_text(encoding="utf-8").strip())
+    r = _run("watch.py", "--timeout", "2")
+    after_cursor = int((STATE / "wg_watch.txt").read_text(encoding="utf-8").strip())
+    return (r.returncode == 2 and "TIMEOUT" in r.stdout
+            and "BACKFILL:" not in r.stdout
+            and "WAKE" not in r.stdout
+            and "暂停未回唤醒 BACKFILL" in r.stdout
+            and before_cursor == 12
+            and after_cursor == 12)              # 游标没被回退到 9
+
+
+@case
+def 解禁后未回唤醒照旧回退补扫():
+    """对照组（issue #269）：`recovered=True` 之后同一份积压必须 BACKFILL+WAKE。
+
+    真实时序：`poll_unmute()` 解禁唤醒 → Agent 重挂监听 → 新监听读到账本
+    `recovered=True`（`muted_now()` 为 False），`rewind_for_backlog()` 放行，
+    游标回退到最老未回 @ 之前并重放。断言 `id=10` 被打印、`BACKFILL:` 出现、
+    rc=0 + WAKE——只摘「暂停」那句不是修复。
+    """
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=False)
+    _ledger(now + 600, at=now - 3600, recovered=True, recovered_at=now - 5,
+            recheck_result="released")
+    (STATE / "wg_watch.txt").write_text("12", encoding="utf-8")
+    fresh_ms = (now - 30) * 1000
+    rows = [
+        {"id": 10, "timestamp": fresh_ms, "is_self": False, "sender": "甲",
+         "content": "@机器人 在吗", "segments": [{"type": "at", "qq": SELF}],
+         "conversation_id": f"111:group:{GROUP}", "onebot_message_id": "7010"},
+        {"id": 11, "timestamp": fresh_ms + 1000, "is_self": False, "sender": "乙",
+         "content": "@机器人 说话呀", "segments": [{"type": "at", "qq": SELF}],
+         "conversation_id": f"111:group:{GROUP}", "onebot_message_id": "7011"},
+    ]
+    EVENTS.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+                      encoding="utf-8")
+    r = _run("watch.py", "--timeout", "5")
+    return (r.returncode == 0
+            and "BACKFILL:" in r.stdout
+            and "id=10 " in r.stdout
+            and _last_line(r.stdout) == "WAKE")
+
+
+@case
 def 解禁后追问窗口照旧唤醒():
     """对照组：`recovered=True` 之后同一份窗口必须照常唤醒（抑制不能关死追问）。
 
@@ -447,6 +517,75 @@ def 无禁言账本时追问正常唤醒():
     return (r.returncode == 0 and "[追问]" in r.stdout
             and _last_line(r.stdout) == "WAKE"
             and "暂停追问窗口扫描" not in r.stdout)
+
+
+@case
+def 抖动后孤立muted不永久停扫():
+    """issue #205：全员禁言被复查过一次，那一次 `group_all_shut` 读不到 → 账本只剩
+    孤立的 `recheck_result="muted"`（`mute_until=None` + `group_shut=None`）。
+
+    改前死结：`muted_now()` 恒 True（不看 `mute_until` 缺失）→ `watch.py` 每轮跳过
+    追问扫描；`probe()` 恒 idle（前置 `if not until and group_shut is not True` 直接
+    返回）→ `poll_unmute()` 永不探测、`UNMUTED:` 永不出现。两边都不会自己恢复。
+
+    改后：`muted_now()` 对孤立的 muted 降级成 False（解除停扫），`probe()` 把孤立的
+    muted/unknown 当成可复查对象探一次（带节流）。这一轮 `group_all_shut` 又读到了
+    → 探到仍禁言，如实留 `group_shut=True` + `muted`，`muted_now()` 回到 True（有
+    事实撑着）。下一轮再抖动 → unknown，`muted_now()` 又降级 False，停扫再解除。
+
+    本用例钉的是「死结解开后时序能自洽」：第一次 probe 必须探（不再 idle），探到
+    muted 后账本要有 `group_shut=True` 撑着；同一个账本 `muted_now()` 必须与
+    `probe()` 结论一致——不允许「仍在禁言」与「无需探测」同时成立。
+    """
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=True)           # 这一轮又能读到全员禁言
+    # 账本停在「上一轮探测失败、group_shut 被擦掉、只剩孤立 muted」的现场
+    _ledger(None, at=now - 3600, group_shut=None,
+            recheck_result="muted", rechecked_at=now - 90)   # 节流已过
+    r = _run("watch.py", "--timeout", "5")
+    rec = _read_ledger()
+    # 不变量：muted_now() 与 probe() 对同一账本不得给出「仍在禁言」+「无需探测」
+    # 这里 probe 必须探到 muted（夹具 shut_up=0 + all_shut=True），muted_now() 必须为 True
+    # （group_shut=True 撑住了）——死结解开，但结论如实。
+    return (FIX["member_queries"] == 1               # 不再 idle，探了一次
+            and rec.get("recheck_result") == "muted"
+            and rec.get("group_shut") is True        # 这一轮读到了，撑住结论
+            and rec.get("recovered") is None)        # 没冒充解禁
+
+
+@case
+def 抖动擦掉group_shut后不再永久停扫():
+    """issue #205 第二条时序：上一轮 `group_shut=True` 撑着 muted，这一轮 `group_info`
+    抖动读不到 → 账本被擦成 `group_shut=None` + `recheck_result="unknown"`。
+
+    改前：`group_shut=True` 被这一轮探测自己擦掉（`fresh["group_shut"]=None` 先写
+    再探），下一轮前置 `if not until and group_shut is not True` 直接 idle，永久
+    不再探——「下一次探测的资格」被这次探测自己取消。
+
+    改后：孤立的 `recheck_result="unknown"`（`mute_until=None` + `group_shut=None`）
+    同样让 `muted_now()` 降级 False（停扫解除），`probe()` 仍把它当成可复查对象探
+    一次（带节流）。这一轮 `group_info` 又抖动 → 仍是 unknown，但 `watch.py` 不会再
+    因为孤立的 muted 永久停扫——停扫只在有事实撑着时才发生。
+
+    本用例钉的是「擦掉 group_shut 后能恢复」：probe 必须探（不再 idle），结论是
+    unknown，但 `muted_now()` 必须为 False（孤立 unknown 不算仍在禁言）——watch 的
+    追问扫描恢复，不再被这一轮探测自己永久关死。
+    """
+    now = int(time.time())
+    _reset(now, shut_up=0, all_shut=False, group_fails=True)   # group_info 这一轮抖动
+    # 账本停在「上一轮 group_shut=True 撑着 muted，这一轮刚擦掉」之后的状态
+    _ledger(None, at=now - 3600, group_shut=None,
+            recheck_result="unknown", rechecked_at=now - 90)   # 节流已过
+    r = _run("watch.py", "--timeout", "2")
+    rec = _read_ledger()
+    # 关键不变量：muted_now() 与 probe() 不得同时给出「仍在禁言」+「无需探测」
+    # 这里 probe 探了一次（unknown），muted_now() 必须为 False（孤立 unknown 不算仍在禁言）
+    # ——停扫解除，watch 不会再被这条账本永久关死。
+    return (FIX["member_queries"] == 1               # 不再 idle，探了一次
+            and rec.get("recheck_result") == "unknown"
+            and rec.get("group_shut") is None
+            and rec.get("recovered") is None         # 没冒充解禁
+            and "暂停追问窗口扫描" not in r.stdout)   # 停扫解除
 
 
 @case

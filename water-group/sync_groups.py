@@ -63,6 +63,23 @@ def get_onebot_group_members(url, token, group_id):
         print(f"[Warn] 获取群 {group_id} 成员列表失败: {e}")
     return []
 
+def explicit_participation(config, gcfg):
+    """配置里**显式写了的**参与度；没写就返回 ``None``（#234）。
+
+    ``participation`` 是公开配置项（``quiet`` / ``natural`` / ``active``），列在
+    ``chat_sessions.participation`` 里。缺省派生值不是用户意图，**不能成为写库依据**：
+    issue #234 里只配了 ``enabled`` 的群，第一次 ``sync_groups`` 就把会话改写成
+    ``mention_only``（``trigger_mode`` 的缺省），值不在提示词 ``MODES`` 里，
+    还打了一条假的「🔄 [热重载]」。
+
+    所以这里只认配置里真实出现的键：群级 ``groups.<gid>.participation`` 优先，
+    其次是顶层 ``default_participation``（它本身就是部署者显式写的缺省）。
+    两处都没有就返回 ``None``，调用方据此一个字段都不碰。
+    """
+    value = gcfg.get("participation") or config.get("default_participation")
+    return str(value) if value else None
+
+
 def get_active_sessions(db_path):
     if not Path(db_path).exists():
         return {}
@@ -101,7 +118,9 @@ def inspect_and_sync():
             continue
 
         persona = gcfg.get("persona") or config.get("default_persona", "little_whale")
-        participation = gcfg.get("participation") or config.get("default_participation", "natural")
+        # 报告用的「拟分配」参与度：显式配置优先，没配就按 natural 缺省展示（#234）。
+        # 这个值只进 status.json 的 pending_activation_groups，不写 chat_sessions。
+        participation = explicit_participation(config, gcfg) or "natural"
         trigger_mode = gcfg.get("trigger_mode") or config.get("default_trigger_mode", "mention_only")
         reply_addressing = gcfg.get("reply_addressing") or config.get("default_reply_addressing", "quote")
         member_mappings = gcfg.get("member_mappings") or config.get("member_mappings", {})
@@ -121,20 +140,32 @@ def inspect_and_sync():
             sess = active_sessions[cid]
             # 检查人格或模式是否发生变更，支持热重载
             needs_update = False
+            persona_changed = False
+            participation_changed = False
             update_fields = {}
             try:
                 resolved = prompts.resolve_persona_details(preset=persona)
                 if sess.get("persona_preset") != persona or sess.get("persona") != resolved["prompt"] or sess.get("persona_name") != resolved["name"]:
                     needs_update = True
+                    persona_changed = True
                     update_fields["persona_preset"] = persona
                     update_fields["persona_name"] = resolved["name"]
                     update_fields["persona"] = resolved["prompt"]
             except Exception as e:
                 print(f"[Warn] 解析人格 {persona} 失败: {e}")
 
-            if sess.get("participation") != trigger_mode:
-                needs_update = True
-                update_fields["participation"] = trigger_mode
+            # 参与度只按配置里**显式写了**的值对齐（#234）：缺省派生值不是用户意图，
+            # 不能借它改写会话。`trigger_mode` 不写这一列——它由
+            # wg_up_wake.trigger_mode() 每次现读 config（#233 同根）。
+            configured_participation = explicit_participation(config, gcfg)
+            if configured_participation:
+                if configured_participation not in prompts.MODES:
+                    print(f"[Warn] 群 {gid} ({gname}) 的 participation={configured_participation!r} 不是"
+                          f" {'/'.join(prompts.MODES)} 之一，保留会话原值 {sess.get('participation')!r}")
+                elif sess.get("participation") != configured_participation:
+                    needs_update = True
+                    participation_changed = True
+                    update_fields["participation"] = configured_participation
 
             if needs_update:
                 set_clause = ", ".join(f"{k}=?" for k in update_fields.keys()) + ", updated=?"
@@ -142,7 +173,13 @@ def inspect_and_sync():
                 with sqlite_connect(DB_PATH, timeout=5) as conn:
                     conn.execute(f"UPDATE chat_sessions SET {set_clause} WHERE id=?", vals)
                 sess.update(update_fields)
-                print(f"🔄 [热重载] 群 {gid} ({gname}) 已更新 -> 人格: {sess['persona_name']} ({persona}) | 模式: {trigger_mode}")
+                # 两种改写分开说：人格变了才是「热重载」，参与度只是把配置同步进会话，
+                # 混成一行会让排查者以为用户改过配置（#234）。
+                if persona_changed:
+                    print(f"🔄 [热重载] 群 {gid} ({gname}) 已更新 -> 人格: {sess['persona_name']} ({persona})")
+                if participation_changed:
+                    print(f"🔄 [配置同步] 群 {gid} ({gname}) 参与度: {sess['participation']} "
+                          f"（来自 config.groups.{gid}.participation）")
 
             mode_desc = "仅@触发" if trigger_mode == "mention_only" else "自然参与"
             addr_desc = "QQ原生引用" if reply_addressing == "quote" else ("定向@" if reply_addressing == "at" else "双重提醒" if reply_addressing == "both" else "自然")

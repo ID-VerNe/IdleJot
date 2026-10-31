@@ -197,16 +197,20 @@ def wait_plan(mute, budget=None, elapsed=0.0):
     「等不起」不是失败，是边界事实：宿主在 `AGENT_TOOL_TIMEOUT` 处砍进程树，
     硬睡到解禁等于把「发不出去」变成「进程静默消失」（#79）。`elapsed` 是这次调用
     已经用掉的秒数（诊断与发送本身就吃掉一部分）——额度是**整次调用共享的总额**，
-    所以走 `wg_budget.clamp_wait()` 而不是自己减预算（#88）。
+    所以剩余额度从 `wg_budget.remaining_budget()` 取原始浮点（#224）——判定要的是
+    事实，不是 ceil 后的整数；`clamp_wait()` 留给取睡眠秒数的调用方。
     """
     budget = wg_budget.WAIT_BUDGET if budget is None else int(budget)
     need = int(mute) + UNMUTE_MARGIN
     # 两个上限都要满足：调用方给的预算（本模块里恒等于 WAIT_BUDGET，但形参不能只进文案）
-    # 与整次调用剩余额度（clamp_wait 按 elapsed 算，#88）。
-    allowance = min(int(budget), wg_budget.clamp_wait(need, elapsed))
-    if allowance < need:
+    # 与整次调用剩余额度（#88 的总额口径）。判定走原始浮点 `remaining_budget()`，
+    # 不走 `clamp_wait()` 的 ceil——ceil 是给「等最多 Ns」类调用方取睡眠秒数的，
+    # 拿它当 `allowance < need` 的操作数会把 90>89.6 读成 90≯90，判成等得起、
+    # 睡 90s，叠加已用秒数与发送余量超出宿主 120s（issue #224）。
+    remaining = wg_budget.remaining_budget(elapsed)
+    if need > min(int(budget), remaining):
         return None, [f"  需等 {need} 秒才解禁，超出单次调用等待预算 {budget}s"
-                      f"（已用 {max(0, int(elapsed))}s，剩 {allowance}s）："
+                      f"（已用 {round(max(0.0, float(elapsed)), 1)}s，剩 {int(remaining)}s）："
                       f"这次不硬等，请稍后重挂再发（失败已记进 {LEDGER.name}）"]
     return need, [f"  等 {need} 秒解禁后补发（--wait-unmute，等待预算 {budget}s 内）…"]
 
@@ -270,6 +274,9 @@ def muted_now(now=None):
       - `group_shut is True`：全员禁言没有解禁时刻（NapCat 常常不给成员写
         `shut_up_timestamp`），账本明确记着就仍算禁言；
       - `recheck_result == "muted"`：预测已过点，但最后一次复查实测仍禁言。
+        必须有可复查的对象撑着（`mute_until` 在或 `group_shut is True`）——两者都
+        缺时这条结论是孤立的，既不知道禁言到何时、也不知道是不是全员禁言，
+        `watch.py` 据此停扫追问窗口就是永久停扫（issue #205）。
 
     `recovered is True`（实测解禁 / 补发成功）、无账本、非禁言类失败（参数错、
     网络错）一律 False。**不探测**：打接口的是 `probe()`；调用方（`watch.py` 的
@@ -288,7 +295,11 @@ def muted_now(now=None):
         return True
     if rec.get("group_shut") is True:
         return True
-    return rec.get("recheck_result") == "muted"
+    # 孤立的 `recheck_result="muted"`（mute_until 缺失 + group_shut 也读不到）不算
+    # 仍在禁言：那条结论没有可复查的对象撑着，watch.py 据此停扫就是永久停扫
+    # （issue #205）。让它降级成 False，解禁扫描恢复，下一次 probe() 或下一次发送
+    # 的 diagnose() 会重建事实。
+    return rec.get("recheck_result") == "muted" and bool(until or rec.get("group_shut") is True)
 
 
 def clear():
@@ -410,7 +421,12 @@ def probe(post=None, now=None, min_interval=None):
     except (TypeError, ValueError):
         return "idle", False
     if not until and rec.get("group_shut") is not True:
-        return "idle", False  # 不是禁言类失败（参数错 / 网络错 / 状态未知），没有对象
+        # 没有禁言时刻、账本也没明确记着全员禁言：普通失败（参数错 / 网络错）
+        # 没有复查对象，idle。但**上一轮探测留下的 muted / unknown 不算「没有对象」
+        # ——那只是接口抖动把 group_shut 擦掉了，不是解禁了**（issue #205）：这一轮
+        # 仍要探一次（带节流），探到仍禁言就如实留 muted/unknown，探到解禁就 recovered。
+        if rec.get("recheck_result") not in ("muted", "unknown"):
+            return "idle", False
     try:
         wrote_at = int(rec.get("at") or 0)
     except (TypeError, ValueError):
@@ -515,6 +531,25 @@ def send(group_id, bubble_segments, message_id, *, deliver, has_at, unmute=False
                   bubbles=len(bubble_segments), has_at=has_at, unmute=unmute)
 
 
+def no_fallback_line(*, has_at, has_image):
+    """OneBot 直发失败后，为什么不换计划通道（issue #207 的一句话）。
+
+    改前「带 @ 只能走 OneBot」写在 `handle()` 里（只在 `has_at` 时打），「带图只能
+    走 OneBot」写在 `reply.py` 的图片分支里——同一条纪律的两个副本，第二个副本
+    漏掉了带引用的文字消息（它照样在 `falling back to the plan path` 后把引用段
+    丢掉）。收敛到这里：`reply.py` 直发失败一律打这一句，`has_at` 与 `has_image`
+    按真值选措辞，两者都没有（带引用的文字）给通顺的实话。
+
+    返回**一句话**（带前导空格与句号），由调用方打印；`handle()` 与 `reply.py`
+    共用同一措辞，不各自复述。
+    """
+    if has_image:
+        return " 未退回计划通道：带图的消息只能走 OneBot，计划通道会把图片整个丢掉"
+    if has_at:
+        return " 未退回计划通道：带 @ 的消息只能走 OneBot（计划通道会降级成纯文本）"
+    return " 未退回计划通道：带引用的消息只能走 OneBot，计划通道会把引用降级成纯文本"
+
+
 def handle(sent, attempt, failure, *, group_id, bubbles, has_at, unmute=False):
     """失败处置的唯一入口：说清原因、诊断禁言、可选解禁补发；返回最终已发条数。
 
@@ -533,7 +568,7 @@ def handle(sent, attempt, failure, *, group_id, bubbles, has_at, unmute=False):
     for line in lines:
         print(line)
     if has_at:
-        print("  未退回计划通道：带 @ 的消息只能走 OneBot（计划通道会降级成纯文本）")
+        print(no_fallback_line(has_at=has_at, has_image=False))
     # 解禁时刻只算一次（绝对时刻），睡完再记账也不会漂。
     mute_until = (started + int(mute)) if mute else None
     # `scope` 一起落盘：全员禁言没有解禁时刻，只有 `group_shut=True` 能让账本
@@ -547,6 +582,10 @@ def handle(sent, attempt, failure, *, group_id, bubbles, has_at, unmute=False):
         print(line)
     if wait is None:
         return sent
+    # 钉住复发（#224）：被宿主在 120s 处砍掉时，这一行是 Agent 看到的最后一句真话——
+    # 补发时刻、已用秒数都按 started 算，不靠事后补写。
+    print(f"  补发时刻预计在 {wg_clock.stamp(started + (time.time() - started) + wait)}"
+          f"，本次调用已用 {int(time.time() - started)}s")
     SLEEP(wait)
     retry_failure = {}
     retried = attempt(retry_failure)

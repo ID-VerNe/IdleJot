@@ -24,22 +24,14 @@ issue #32 的翻车形态：唤醒行 `(content or '')[:80]` 硬切 80 字，而
 `python water-group/daemon/xxx.py` 直接跑，`sys.path[0]` 是 daemon 目录自身，
 仓库根不在路径上——与 `dossier.py:event_ceiling()` 同一范式（issue #90）。
 """
-import json
-import os
 import re
-import sqlite3
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 
-from wg_paths import data_dir, state_dir
-
-STATE = state_dir()
-EVENTS = STATE / "wg_events.jsonl"
-DB = Path(os.environ.get("IDLEJOT_WG_DB")
-          or os.environ.get("TULPA_WG_DB", data_dir() / "mcp-access.sqlite3"))
+import wg_event_ref  # noqa: E402  (按 id 取行与来源顺序的唯一入口，issue #216)
 
 # 四个调用点的显示额度。曾经是 80 / 50 / 120 / 40 四个散落字面量；收口到这里
 # 之后改一处即四处一致，且每个数字的名字说明了它服务哪一行。
@@ -130,12 +122,17 @@ def render_fitted(value, limit):
     return result.text if not result.truncated else f"{result.text}…"
 
 
-def render_body(text, limit, event_id=None):
+def render_body(text, limit, event_id=None, name=None):
     """一行里能显示的正文：段占位不占额度，截断了就说被切过。
 
     返回 (text, truncated, original_length)，与 text_limits.Clipped 同构——
     唯一差别是截断时尾部有 `…` 和读全文的路径。调用方直接把 text 拼进行里，
     不需要再判断 truncated；参数化 event_id 只是为了生成那条路径（拿得到才给）。
+
+    ``name`` 是那条路径上要打的记号（issue #203）。事件流的行仍打裸数字
+    ``--show 7``；会话库的行（追问行 / 上下文行）必须打 ``--show q7``——同一个
+    数字在两套编号里都可能有，提示里不给命名空间就等于教 Agent 抄错。省略时
+    退回裸 ``event_id``，与改前一致。
     """
     if limit <= 0:
         raise ValueError("render_body() needs a positive limit")
@@ -144,8 +141,9 @@ def render_body(text, limit, event_id=None):
     if not result.truncated:
         return result.text, False, original_length
     hint = f"（原 {original_length} 字）"
-    if event_id:
-        hint = f"（原 {original_length} 字，--show {event_id} 读全文）"
+    ref = name if name is not None else event_id
+    if ref:
+        hint = f"（原 {original_length} 字，--show {ref} 读全文）"
     return f"{result.text}…{hint}", True, original_length
 
 
@@ -199,57 +197,20 @@ def bounded_handler(fn, *, limit, need_ck=True):
     return wrapped
 
 
-def _read_events():
-    rows = []
-    try:
-        for line in EVENTS.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line:
-                try:
-                    rows.append(json.loads(line))
-                except ValueError:
-                    continue
-    except OSError:
-        pass
-    return rows
+def _print_event(event_id, payload, source, name=None):
+    """一条消息的全文。引用/转发展开字段在就原样附在后面，不截断。
 
-
-def _inbox_row(event_id):
-    """chat_inbox 里按全局 rowid 取一行；拿不到或库不可读都返回 None。
-
-    只读连接走 `wg_text.connect_ro`（issue #169 PC：`?mode=ro` 的唯一归属在
-    `chatlocal.sqlite_util.connect_ro`，本模块延迟导入），与 followup.lookup /
-    reply.recent_chatter 同一套姿势——这条路径永远不改库。
+    ``name`` 是首行要打给 Agent 抄的记号（issue #203）：会话库的行打 ``q<n>``，
+    事件流的行打裸数字。省略时按裸 ``event_id`` 打，与改前一致。
     """
-    try:
-        db = connect_ro(DB, timeout=5)
-    except sqlite3.Error:
-        return None
-    try:
-        row = db.execute("SELECT payload FROM chat_inbox WHERE id=?",
-                         (int(event_id),)).fetchone()
-    except sqlite3.Error:
-        return None
-    finally:
-        db.close()
-    if not row:
-        return None
-    try:
-        payload = json.loads(row[0])
-    except ValueError:
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _print_event(event_id, payload, source):
-    """一条消息的全文。引用/转发展开字段在就原样附在后面，不截断。"""
     import wg_clock
     import wg_images
     import wg_quotes
     import wg_videos
 
+    ref = name if name is not None else event_id
     stamp = wg_clock.stamp((payload.get("timestamp") or 0) / 1000)
-    print(f"id={event_id} {stamp} {payload.get('sender') or '?'}（{source}）")
+    print(f"id={ref} {stamp} {payload.get('sender') or '?'}（{source}）")
     print(payload.get("content") or "")
     if payload.get("truncated"):
         # 入库时就超了 12000 字上限：字段说的是实话，这里必须转述。
@@ -292,22 +253,52 @@ def unsupported_lines(segments):
     return lines
 
 
-def show_event(event_id):
+def show_event(event_id, namespace=None):
     """按 id 读一条消息的全文：wg_events → chat_inbox → 明说没有。
 
     wg_events.jsonl 只收 @ 和关键词（mention_only），追问要读的闲聊不在里面，
     所以第二条路必须有；chat_inbox 每会话只留最近 1000 条
     （`chatlocal/mcp_chat.py` 的 cutoff），滚出去了就说滚出去了，不编。
+
+    issue #203：两套编号会撞号，``--show 7`` 与 ``--show q7`` 必须读到不同的两条。
+    ``namespace`` 显式给出时只查那一处（``wg_event_ref.EVENT`` / ``.INBOX``）；
+    省略时保留改前的回退链（事件流优先，未命中回库）——直接调本函数的旧调用方
+    不受影响，``reply.py --show`` 则由 ``wg_event_ref.parse`` 给出命名空间。
+
+    issue #216：来源顺序与「按 id 取行」都归 `wg_event_ref`——这里以前自己写了一份
+    「先扫事件流、再查库」的扫描，与 `reply.event_target` 各认一套字段名，于是同一个
+    id 两个入口给出两种结论（这里读得到、那边回不了）。命名空间决定问哪一处，
+    回退仍然只发生在裸数字上。
     """
-    for row in _read_events():
-        if row.get("id") == event_id:
-            return _print_event(event_id, row, "wg_events")
+    ref = wg_event_ref.resolve_id(event_id, namespace=namespace)
+    if ref is not None:
+        name = wg_event_ref.format_ref(ref.namespace, ref.event_id)
+        return _print_event(event_id, ref.payload, ref.source, name=name)
+    # 读不到时记号按**字面**写法打：裸数字没说要看哪套，就用裸数字问一遍。
+    name = (wg_event_ref.format_ref(namespace, event_id) if namespace
+            else str(event_id))
+    return _missing(name, src_name(namespace))
 
-    payload = _inbox_row(event_id)
-    if payload is not None:
-        return _print_event(event_id, payload, "chat_inbox")
 
-    print(f"本地没有 id={event_id} 的全文。")
-    print("可能的原因：它超过 1000 条被 chat_inbox 挤掉（每会话只留最近 1000 条）、")
-    print("不在当前数据根的库里、或这个 id 从来不存在。")
+def src_name(namespace):
+    """命名空间 -> ``_missing`` 认的来源名（``wg_events`` / ``chat_inbox`` / ``""``）。"""
+    if namespace is None:
+        return ""
+    return wg_event_ref.SRC_INBOX if namespace == wg_event_ref.INBOX else wg_event_ref.SRC_EVENTS
+
+
+def _missing(ref, source):
+    """读不到那条时说清是哪套编号、读的是哪一处，以及可能的原因。"""
+    where = {"wg_events": "事件流 wg_events.jsonl",
+             "chat_inbox": "会话库 chat_inbox"}.get(source, "本地")
+    print(f"{where}里没有 id={ref} 的全文。")
+    if source == "chat_inbox":
+        print("它可能超过 1000 条被 chat_inbox 挤掉（每会话只留最近 1000 条）、")
+        print("不在当前数据根的库里、或这个 id 从来不存在。")
+    elif source == "wg_events":
+        print("事件流只收 @ 与关键词命中的消息，闲聊不在里面；")
+        print("要看群里的闲聊请用追问行/上下文行的 q<n>（--show q<n>）。")
+    else:
+        print("可能的原因：它超过 1000 条被 chat_inbox 挤掉（每会话只留最近 1000 条）、")
+        print("不在当前数据根的库里、或这个 id 从来不存在。")
     return 1

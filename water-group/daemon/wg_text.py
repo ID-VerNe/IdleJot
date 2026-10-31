@@ -221,7 +221,9 @@ def _print_event(event_id, payload, source, name=None):
         print(line)
     suffix = wg_quotes.render_event(payload)
     images = wg_images.render(payload)
-    videos = wg_videos.render(payload)
+    # 视频标记的记号必须跟着首行走（issue #200）：``chat_inbox`` 的 payload 里
+    # 没有 ``id`` 键，直接交给 ``wg_videos.render`` 会打出 ``--event 0``。
+    videos = wg_videos.render(dict(payload, id=event_id), ref_name=ref)
     if suffix:
         print(suffix)
     if images:

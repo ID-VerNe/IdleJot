@@ -36,6 +36,7 @@ import wg_event_ref  # noqa: E402  (id / qid 两套命名空间 + 来源标记�
 import wg_images  # noqa: E402  (图片标记渲染，issue #27)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
+import wg_videos  # noqa: E402  (视频标记渲染，issue #200)
 from wg_paths import data_dir
 
 DB = Path(os.environ.get("IDLEJOT_WG_DB")
@@ -140,6 +141,11 @@ def recent_chatter(limit, around=None):
                 "images": wg_images.render(
                     dict(data, id=event_id), media,
                     ref_name=wg_event_ref.format_ref(wg_event_ref.INBOX, event_id)),
+                # 视频同理（issue #200）：上下文里群友发的小视频改前只剩裸 [视频]，
+                # 补读口最常被用的正是这条入口。记号同样打 `q<n>`。
+                "videos": wg_videos.render(
+                    dict(data, id=event_id),
+                    ref_name=wg_event_ref.format_ref(wg_event_ref.INBOX, event_id)),
             })
     except sqlite3.Error:
         pass
@@ -199,5 +205,5 @@ def show_context(limit, around=None):
         # 行首编号后面紧跟来源（issue #216 / #204 的同形契约）：这些 id 只活在
         # chat_inbox，`reply.py <id>` 与 `look.py --event <id>` 都按这个来源解析。
         # 编号本身打 `q<n>`（issue #203），与唤醒行的裸事件 id 在字面上就分得开。
-        print(f"{ref} src={wg_event_ref.SRC_INBOX} {stamp} {who}{tag}: {text}{quote}{('  ' + row['images']) if row.get('images') else ''}{alias_tail}{cards}{tail}")
+        print(f"{ref} src={wg_event_ref.SRC_INBOX} {stamp} {who}{tag}: {text}{quote}{('  ' + row['images']) if row.get('images') else ''}{('  ' + row['videos']) if row.get('videos') else ''}{alias_tail}{cards}{tail}")
     return 0

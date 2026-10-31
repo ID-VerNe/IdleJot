@@ -410,6 +410,7 @@ def main():
                       f"{body}"
                       f"{('  ' + r['quote']) if r.get('quote') else ''}"
                       f"{('  ' + r['images']) if r.get('images') else ''}"
+                      f"{('  ' + r['videos']) if r.get('videos') else ''}"
                       f"{''.join('  ' + h for h in hits)}{cards}")
             note = wg_dossiers.group_note_line(
                 wg_event_ref.group_of(woke[0].get("conversation_id")))

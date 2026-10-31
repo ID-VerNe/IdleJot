@@ -130,7 +130,7 @@ def labels(event):
     return found
 
 
-def render(event):
+def render(event, ref_name=None):
     """渲染成一行视频标记；没有视频段返回空串（不长出噪音）。
 
     三种形态都说出事实：
@@ -138,13 +138,19 @@ def render(event):
     * 有地址 → ``可下载 video.py --event <id> --index <i>``
     * 没地址 → ``无下载地址``（明说下不了，不让 Agent 反复试）
     * 名字/大小缺失 → 缺哪项不印哪项，但命令始终在
+
+    ``ref_name`` 是命令里要打给 Agent 抄的记号（issue #203）：事件流的行仍打裸
+    ``--event 7``；会话库的行（追问行 / 上下文行 / ``--show q7``）必须打
+    ``--event q7``，否则同一个数字在撞号时会去下**另一条**消息的视频。省略时
+    退回 ``event["id"]``，与 ``wg_images.render`` 同款参数、同一纪律。
     """
     event_id = int(event.get("id") or 0)
+    ref = event_id if ref_name is None else ref_name
     parts = []
     for item in labels(event):
         who = f" name={item['name']}" if item["name"] else ""
         size = f" size={item['size']}" if item["size"] else ""
-        hint = f"video.py --event {event_id} --index {item['index']}"
+        hint = f"video.py --event {ref} --index {item['index']}"
         if item["url"] or item["file_id"]:
             parts.append(f"[视频{who}{size} 可下载 {hint}]")
         else:

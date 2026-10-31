@@ -29,6 +29,7 @@
 .venv/Scripts/python.exe water-group/daemon/reply.py --who <花名>     # 解析花名到 QQ 与归属群并给出画像卡，不发送
 .venv/Scripts/python.exe water-group/daemon/reply.py <id> "看这张" --image <图片路径>  # 发本地图片，可重复；每张独占一条气泡排在文字之后
 .venv/Scripts/python.exe water-group/daemon/look.py --event <id>       # 唤醒行图片标「可补读」时先落盘再读；--pick 看候选、--recent 看最近
+.venv/Scripts/python.exe water-group/daemon/video.py --event <id>      # 视频标「可下载」时下到本地；--frames 抽首/中/尾 3 帧、--list 看候选、--recent 看最近
 ```
 
 `reply.py` 共 17 个参数，上面是最常用的；`--also`（连发 @ 用一条答复算作回了多条）、
@@ -54,6 +55,13 @@
 唤醒行里的图片标记三种形态：`path=…`（已落盘，直接读）、`可补读 look.py --event <id> --index <i>`
 （deferred，先跑命令再读）、`未登记`（无任何记录，命令照样能补读）。别对着裸 `[图片]` 说
 「看不到图」——先看标记尾缀（issue #35）。
+
+视频标记同理（issue #200）：`[视频 name=… size=… 可下载 video.py --event <id> --index <i>]`
+是「现在下得到」，`无下载地址` 是「这条段里没 URL，别再试」。QQ 多媒体 CDN 的地址带 `rkey`，
+实测约 8 小时就 `retcode -5503`——所以旧消息下载失败时 `video.py` 会先用 `get_msg` 重签一次，
+两级都失败才让你「请群友重发」。抽帧需要 PATH 里有 `ffmpeg`（不在 `pyproject.toml` 里），
+缺失时它明说缺什么，不会把视频说成「没有内容」。`--event` 同样认 `q<n>`：上下文行与追问行
+打的就是后者。
 
 **时间基准（issue #95）**：`up.py --status` 首个非空行、`reply.py --list` / `--context`
 表头、`watch.py` 唤醒块首行、`followup.py --show` 首行都带

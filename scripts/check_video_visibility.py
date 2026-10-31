@@ -4,15 +4,19 @@
 ``url`` 留在了 ``unsupported.raw`` 里，但唤醒行只印中文标签——「可下载」不是一句
 状态词，必须带具体命令，否则 Agent 每次都要现场试错。
 
-本门禁钉住五件事：
+本门禁钉住七件事：
 
-  1. 唤醒行 / ``--list`` / ``--show`` 三处都带 ``video.py --event <id> --index <i>``；
+  1. **四处入口**（唤醒行 / ``--list`` / ``--show`` / ``--context`` + 追问行）都带
+     ``video.py --event <记号> --index <i>``，且记号与行首一致（``q<n>`` 就是 ``q<n>``）；
   2. 没有下载地址时明说「无下载地址」，不许留一个裸 ``[视频]``；
   3. ``file`` 段只有在名字像视频时才当视频，普通文档不冒充；
   4. daemon 侧的下载判据与 ``chatlocal/mcp_media_transport.py`` 同值（重定向上限、
      超时、拒绝非公网、只认 http/https）——判据漂移就是安全边界漂移；
   5. 抽帧：ffmpeg 缺失时**明说缺什么**、时长未知时只抽首帧而不是猜、
-     短时长去重不抽三张一样的图。
+     短时长去重不抽三张一样的图；抽帧产物也进缓存预算（否则永不淘汰）；
+  6. 记号口径（issue #203 / #216）：``q<n>`` 读会话库、裸数字只认事件流且不猜库，
+     重签按名字匹配、对不上就说对不上，不拿别的视频顶替；
+  7. 非视频字节落盘要说明（存成 ``.bin``，不假装它是视频）。
 
 抽帧那组用假子进程桩（``winconsole.run_hidden``）与假 ffmpeg 可执行文件，所以
 **CI 上没装 ffmpeg 也能验**——否则「本机有、CI 没有」会让这组静默跳过。
@@ -23,6 +27,7 @@ import contextlib
 import io
 import json
 import os
+import sqlite3
 import stat
 import sys
 import time
@@ -30,18 +35,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False)
 
 TMP = scratch_dir(prefix="wg_video_")
+DB = TMP / "fixture.sqlite3"
 STATE = TMP / "state"
 STATE.mkdir(parents=True)
 SID = "session-fixture"
 SELF = "10001"
 
-os.environ["TULPA_WG_STATE"] = str(STATE)
+os.environ["TULPA_WG_DB"] = str(DB)
+pin_state_env(STATE)  # state 两腿都钉（#281：IDLEJOT 先于 TULPA，单钉一条会被外部穿透）
 
 import wg_download  # noqa: E402
+import wg_event_ref  # noqa: E402
 import wg_frames  # noqa: E402
 import wg_videos  # noqa: E402
 import video  # noqa: E402
@@ -54,12 +62,17 @@ EID_FILE_MP4 = 9103  # file 段，名字 .mp4 → 当视频
 EID_FILE_TXT = 9104  # file 段，名字 .txt → 不是视频
 EID_PLAIN = 9105     # 纯文字
 EID_WAKE = 9106      # watch 唤醒行端到端
+EID_INBOX = 9201     # 只在会话库里的视频（q<n> 那条）
+EID_CTX = 9202       # --context 行
+EID_FUP = 9203       # 追问行
+EID_BIN = 9204       # 下回来的字节不像视频
+EID_RENEW = 9205     # 重签按名字匹配
 
 VIDEO_URL = "https://media.example.test/v.mp4"
 
 
-def video_segment(url=VIDEO_URL, kind="video", name=None, size="3418642"):
-    data = {"file": "abc123.mp4", "file_size": size}
+def video_segment(url=VIDEO_URL, kind="video", name=None, size="3418642", file="abc123.mp4"):
+    data = {"file": file, "file_size": size}
     if url:
         data["url"] = url
     if name:
@@ -79,6 +92,32 @@ CASES = []
 def case(fn):
     CASES.append(fn)
     return fn
+
+
+def build():
+    """会话库夹具：两条只在 chat_inbox 里的视频（上下文行 / 追问行 / q<n> 都靠它）。"""
+    db = sqlite3.connect(DB)
+    db.execute("CREATE TABLE chat_sessions (id TEXT, conversation_id TEXT, active INTEGER)")
+    db.execute("CREATE TABLE chat_inbox (id INTEGER PRIMARY KEY, session_id TEXT, message_id TEXT,"
+               " payload TEXT, media TEXT NOT NULL DEFAULT '[]', details TEXT NOT NULL DEFAULT '[]',"
+               " delivered INTEGER NOT NULL DEFAULT 0, at REAL NOT NULL DEFAULT 0)")
+    db.execute("INSERT INTO chat_sessions VALUES (?,?,1)", (SID, f"{SELF}:group:123"))
+    for event_id, message_id in ((EID_INBOX, "7101"), (EID_CTX, "7102"), (EID_FUP, "7103")):
+        db.execute("INSERT INTO chat_inbox (id,session_id,message_id,payload,media,at)"
+                   " VALUES (?,?,?,?,?,?)",
+                   (event_id, SID, message_id, json.dumps({
+                       "sender": "群友丁", "content": "[视频]",
+                       "timestamp": NOW_MS, "is_self": False,
+                       "segments": [video_segment()]}, ensure_ascii=False),
+                    "[]", float(NOW_MS / 1000)))
+    db.commit()
+    db.close()
+    (STATE / "wg_events.jsonl").write_text("", encoding="utf-8")
+
+
+def append_event(event):
+    with (STATE / "wg_events.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
 @case
@@ -208,6 +247,159 @@ def 列表入口读得到视频段():
     return f"{EID_WAKE} i=0" in text
 
 
+# ---- 记号口径（issue #203 / #216）：四处入口的 --event 必须与行首一致 ----------
+
+
+@case
+def show_视频命令跟着首行记号走():
+    """``--show q<n>`` 的 payload 里没有 ``id`` 键，改前这里打的是 ``--event 0``。"""
+    import wg_text
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = wg_text.show_event(EID_INBOX, namespace=wg_event_ref.INBOX)
+    text = buf.getvalue()
+    return (code == 0 and f"video.py --event q{EID_INBOX} --index 0" in text
+            and "--event 0 " not in text)
+
+
+@case
+def context_行带视频命令且打q号():
+    """``--context`` 是补读口最常被用的入口，改前这里只剩裸 [视频]。"""
+    import wg_context
+    rows = wg_context.recent_chatter(10)
+    hit = [r for r in rows if r.get("id") == EID_CTX]
+    text = (hit[0].get("videos") or "") if hit else ""
+    return (bool(hit) and f"video.py --event q{EID_CTX} --index 0" in text
+            and f"video.py --event {EID_CTX} " not in text)
+
+
+@case
+def 追问行带视频命令且打q号():
+    """追问窗口里发的视频同理：追问行 id 是库 rowid，命令必须打 ``q<n>``。"""
+    import followup
+    rows = followup.since(0, SID)
+    hit = [r for r in rows if r.get("id") == EID_FUP]
+    text = (hit[0].get("videos") or "") if hit else ""
+    return (bool(hit) and f"video.py --event q{EID_FUP} --index 0" in text
+            and f"video.py --event {EID_FUP} " not in text)
+
+
+@case
+def video_认q号读会话库那条():
+    """``video.py --event q<n>`` 必须真的读到会话库里那条——#216 删掉
+    ``wg_text._inbox_row`` 之后，改前的兜底是静默失效的。"""
+    event, token, source, problem = video.resolve_event(f"q{EID_INBOX}")
+    return (token == f"q{EID_INBOX}" and source == "chat_inbox" and problem == ""
+            and bool(wg_videos.labels(event)))
+
+
+@case
+def 裸数字不猜会话库():
+    """裸数字只认事件流；没命中就明说去看 ``q<n>``，不拿这个数字去猜库。"""
+    event, _, _, problem = video.resolve_event(str(EID_INBOX))
+    return not event and "事件流" in problem and f"q{EID_INBOX}" in problem
+
+
+@case
+def 坏记号被拒绝():
+    event, _, _, problem = video.resolve_event("Q7")
+    return not event and bool(problem)
+
+
+@case
+def 重签按名字匹配不拿别的视频顶替():
+    """事件里的视频来自引用原文、``get_msg`` 只回本条的另一个视频：名字对不上就
+    说对不上，不许把另一条的地址当成这条的。"""
+    import wg_up_wake
+    event = dict(id=EID_RENEW, onebot_message_id="7201", segments=[])
+    event["referenced_messages"] = [{"segments": [video_segment(name="cat.mp4")]}]
+    real = wg_up_wake._onebot_call
+    wg_up_wake._onebot_call = lambda action, payload: {
+        "message": [{"type": "video", "data": {"file": "dog.mp4",
+                                              "url": "https://media.example.test/dog.mp4"}}]}
+    try:
+        url, why = video.fresh_url(event, 0, "cat.mp4")
+    finally:
+        wg_up_wake._onebot_call = real
+    return url == "" and "对不上" in why
+
+
+@case
+def 重签按名字命中同一条():
+    import wg_up_wake
+    event = dict(id=EID_RENEW, onebot_message_id="7201", segments=[])
+    real = wg_up_wake._onebot_call
+    wg_up_wake._onebot_call = lambda action, payload: {
+        "message": [{"type": "video", "data": {"file": "cat.mp4",
+                                              "url": "https://media.example.test/fresh.mp4"}}]}
+    try:
+        url, why = video.fresh_url(event, 0, "cat.mp4")
+    finally:
+        wg_up_wake._onebot_call = real
+    return url.endswith("fresh.mp4") and why == ""
+
+
+@case
+def 栈没起时不说成链接过期():
+    """重签根本没试成（OneBot 不答）与「重签了也过期」是两件事。"""
+    import wg_up_wake
+    event = dict(id=EID_RENEW, onebot_message_id="7201", segments=[])
+
+    def boom(action, payload):
+        raise OSError("connection refused")
+
+    real = wg_up_wake._onebot_call
+    wg_up_wake._onebot_call = boom
+    try:
+        url, why = video.fresh_url(event, 0, "cat.mp4")
+    finally:
+        wg_up_wake._onebot_call = real
+    return url == "" and "OneBot 不答" in why
+
+
+# ---- 缓存与落盘 ---------------------------------------------------------------
+
+
+@case
+def 抽帧目录也进缓存预算():
+    """抽帧产物是目录，改前 ``glob("*")`` + ``is_file()`` 把它滤掉 → 永不淘汰。"""
+    saved = (video.VIDEOS, video.CACHE_BYTES)
+    room = TMP / "prune_room"
+    room.mkdir(parents=True, exist_ok=True)
+    frames = room / "9301-0-frames"
+    frames.mkdir(exist_ok=True)
+    (frames / "9301-0-0.png").write_bytes(b"x" * 4096)
+    video.VIDEOS = room
+    video.CACHE_BYTES = 1024
+    try:
+        video.prune()
+        gone = not frames.exists()
+        # keep_path 必须保住刚抽的那一组（否则抽完立刻被自己删掉）
+        frames.mkdir(exist_ok=True)
+        (frames / "9301-0-0.png").write_bytes(b"x" * 4096)
+        video.prune(keep_path=frames)
+        kept = frames.exists()
+    finally:
+        video.VIDEOS, video.CACHE_BYTES = saved
+    return gone and kept
+
+
+@case
+def 非视频字节落盘要说明():
+    """下回来的不是视频时要说出来，不许假装它是视频。"""
+    append_event(event_of(EID_BIN, [video_segment()]))
+    real = video.wg_download.download
+    video.wg_download.download = lambda url, **kwargs: b"PK\x03\x04 this is a zip"
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            code = video.fetch(str(EID_BIN), 0, 40)
+    finally:
+        video.wg_download.download = real
+    text = buf.getvalue()
+    return (code == 0 and "不像视频" in text and "--frames" not in text)
+
+
 # ---- 抽帧（P3）：用假 ffmpeg/ffprobe，CI 上没装也能验 ----------------------
 
 
@@ -318,7 +510,7 @@ def 子进程不开黑框():
 
 
 def main():
-    return fs.run_cases(CASES, setup=None, prefix=False)
+    return fs.run_cases(CASES, setup=build, prefix=False)
 
 
 if __name__ == "__main__":

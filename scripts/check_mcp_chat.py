@@ -2,6 +2,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -166,6 +167,49 @@ async def hot_personas_protocol(service, token, directory):
                 await call('stop_chat_session',session_id=second['session']['id'])
 
 
+def persona_sync_direct(service, directory, folder):
+    """issue #294 direct test of sync_session_persona (same thread, patch works).
+
+    Do not go through HTTP: sync_session_persona runs on the server thread, where
+    the client thread's patch.dict(os.environ) never reaches. Calling the sync
+    method directly on service.tools.chat keeps patch + cache-clear on the same thread.
+    """
+    from chatlocal import mcp_chat as _mc
+    sid='sync-test-294'; gid='g-294'; now=time.time()
+    with service.access.connect() as db:
+        db.execute('DELETE FROM chat_sessions WHERE id=?',(sid,))
+        db.execute(
+            "INSERT INTO chat_sessions(id,grant_id,conversation_id,name,persona,participation,"
+            "request_key,signature,active,created,updated,cursor,offered,note,source,"
+            "persona_preset,persona_name) VALUES(?,?,?,?,?,?,?,?,1,?,?,0,0,'','onebot','','')",
+            (sid,gid,'111:group:224','fixture','我的自定义人格','natural',
+             'req-sync','sig-sync',now,now))
+    whale=(directory/'little_whale.md').read_text('utf-8')
+    cfg=folder/'config.json'
+    # 1. config persona=little_whale -> sync refreshes, error cleared.
+    cfg.write_text(json.dumps({'groups':{'224':{'persona':'little_whale'}}},ensure_ascii=False),'utf-8')
+    with patch.dict(os.environ, {'IDLEJOT_WG_CONFIG':str(cfg)}):
+        _mc._WATER_GROUP_CONFIG_CACHE.clear()
+        out=service.tools.chat.sync_session_persona(sid,gid,service.tools.chat.row(sid))
+        assert out['persona']==whale and out['persona_preset']=='little_whale', 'config persona 未刷新'
+        assert not out.get('persona_sync_error'), '刷新成功不该带 sync 错误'
+    # 2. config persona empty -> keep snapshot (target empty, sync no-op).
+    cfg.write_text(json.dumps({'groups':{'224':{'persona':''}}},ensure_ascii=False),'utf-8')
+    with patch.dict(os.environ, {'IDLEJOT_WG_CONFIG':str(cfg)}):
+        _mc._WATER_GROUP_CONFIG_CACHE.clear()
+        out=service.tools.chat.sync_session_persona(sid,gid,service.tools.chat.row(sid))
+        assert out['persona']==whale, 'config persona 置空不应刷新快照'
+    # 3. persona card resolve raises -> sync records persona_sync_error, no silent swallow.
+    cfg.write_text(json.dumps({'groups':{'224':{'persona':'little_whale'}}},ensure_ascii=False),'utf-8')
+    with patch.dict(os.environ, {'IDLEJOT_WG_CONFIG':str(cfg)}):
+        with patch.object(prompts, 'resolve_persona_details', side_effect=ValueError('卡已损坏')):
+            _mc._WATER_GROUP_CONFIG_CACHE.clear()
+            service.tools.chat.sync_session_persona(sid,gid,service.tools.chat.row(sid))
+        err=service.tools.chat.row(sid).get('persona_sync_error','')
+        assert err, 'resolve 抛错应让 persona_sync_error 可见'
+    with service.access.connect() as db:
+        db.execute('DELETE FROM chat_sessions WHERE id=?',(sid,))
+
 def main():
     (ROOT/'.tmp').mkdir(exist_ok=True)
     events=Events()
@@ -212,6 +256,7 @@ def main():
                 assert 'react_to_chat_message' not in entries
                 hot=grant(send=True,chat=True)
                 asyncio.run(hot_personas_protocol(service,hot['token'],persona_dir))
+                persona_sync_direct(service,persona_dir,folder)
                 presets=call('list_chat_personas')['personas']
                 assert [p['id'] for p in presets]==['little_whale']
                 assert presets[0]['name']=='小鲸鱼'

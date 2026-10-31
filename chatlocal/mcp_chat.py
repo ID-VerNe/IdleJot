@@ -6,6 +6,7 @@ tool slot. Message cursors are acknowledged explicitly, not on HTTP delivery.
 from . import reply_timing as timing
 import hashlib
 import json
+import os
 from pathlib import Path
 import threading
 import time
@@ -30,14 +31,18 @@ _WATER_GROUP_CONFIG_CACHE = {'mtime': 0, 'path': None, 'data': {}}
 
 
 def load_water_group_config():
-    cfg_file = PROJECT_ROOT / 'water-group' / 'config.json'
+    # 与 daemon `wg_config.config_path()` 同一规则（issue #294）：`IDLEJOT_WG_CONFIG` /
+    # `TULPA_WG_CONFIG` 优先。否则测试/门禁用覆盖变量指夹具 config 时，这边 sync
+    # 人设读的还是仓库 config，人设刷新判定与夹具脱节。
+    _override = os.environ.get("IDLEJOT_WG_CONFIG") or os.environ.get("TULPA_WG_CONFIG")
+    cfg_file = Path(_override) if _override else (PROJECT_ROOT / 'water-group' / 'config.json')
     example_file = PROJECT_ROOT / 'water-group' / 'config.example.json'
     target = cfg_file if cfg_file.exists() else (example_file if example_file.exists() else None)
     if not target:
         return {}
     try:
         mtime = target.stat().st_mtime
-        if mtime != _WATER_GROUP_CONFIG_CACHE['mtime'] or target != _WATER_GROUP_CONFIG_CACHE['path']:
+        if mtime != _WATER_GROUP_CONFIG_CACHE.get('mtime', 0) or target != _WATER_GROUP_CONFIG_CACHE.get('path'):
             with open(target, 'r', encoding='utf-8') as f:
                 _WATER_GROUP_CONFIG_CACHE['data'] = json.load(f)
             _WATER_GROUP_CONFIG_CACHE['mtime'] = mtime
@@ -100,7 +105,9 @@ class MCPChat(ChatWaitMixin):
                                      # issue #217：mention_only 的对话窗口落库，跨 wait
                                      # 调用与进程重启存活；until 是墙钟（monotonic 不可比）。
                                      ('dialogue_until', 'REAL NOT NULL DEFAULT 0'),
-                                     ('dialogue_turns', 'INTEGER NOT NULL DEFAULT 0')]:
+                                     ('dialogue_turns', 'INTEGER NOT NULL DEFAULT 0'),
+                                     # issue #294：人设同步失败原因，供「未生效可感知」。
+                                     ('persona_sync_error', "TEXT NOT NULL DEFAULT ''")]:
                 if name not in columns:
                     db.execute(f'ALTER TABLE chat_sessions ADD COLUMN {name} {definition}')
             # Native message IDs and event sequence numbers cannot be mixed.
@@ -220,11 +227,18 @@ class MCPChat(ChatWaitMixin):
                 _resolved = prompts.resolve_persona_details(preset=_target_persona)
                 if _target_persona != row.get('persona_preset') or _resolved['prompt'] != row.get('persona'):
                     with self.access.connect() as _db:
-                        _db.execute('UPDATE chat_sessions SET persona=?, persona_preset=?, persona_name=?, updated=? WHERE id=?',
-                                    (_resolved['prompt'], _target_persona, _resolved['name'], time.time(), sid))
+                        _db.execute('UPDATE chat_sessions SET persona=?, persona_preset=?, persona_name=?, updated=?, persona_sync_error=? WHERE id=?',
+                                    (_resolved['prompt'], _target_persona, _resolved['name'], time.time(), '', sid))
                     return self.row(sid, gid)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # 不再静默吞掉（issue #294）：人设卡删了/坏了、config 读失败，Agent
+            # 要能感知「人设没生效」。把原因写进会话行，public() 带出。
+            try:
+                with self.access.connect() as _db:
+                    _db.execute('UPDATE chat_sessions SET persona_sync_error=? WHERE id=?',
+                                (f'{type(exc).__name__}: {exc}', sid))
+            except Exception:
+                pass
         return row
 
 
@@ -259,7 +273,8 @@ class MCPChat(ChatWaitMixin):
                 'turn_process':self.turns.status(row),
                 'expires_at':None, 'execution':'external_agent', 'waiting':waiting,
                 'source':'onebot_websocket', 'receiver':self.receiver.status(), 'gap_count':row['gap_count'],
-                'gap_note':'接收曾中断或缓存有缺口，不保证断线期间消息完整。' if row['gap_count'] else ''}
+                'gap_note':'接收曾中断或缓存有缺口，不保证断线期间消息完整。' if row['gap_count'] else '',
+                'persona_sync_error':row.get('persona_sync_error', '')}
 
     def touch(self, sid):
         with self.access.connect() as db:

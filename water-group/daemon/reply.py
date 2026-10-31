@@ -876,9 +876,10 @@ def main():
     # 被静默标成已回（这正是撞号的本体）。库那条的接话由追问窗口自己推游标，
     # 这里只需校验它确实存在、且属于本会话的群，再在记账时跳过它。
     also_event, also_inbox = [], []
-    for ref in args.also:
+    # 循环变量不能叫 `ref`：同名遮蔽会让 :893 `ref.describe()` 崩（issue #216/#302）。
+    for also_ref in args.also:
         try:
-            ns, no = wg_event_ref.parse(ref)
+            ns, no = wg_event_ref.parse(also_ref)
         except wg_event_ref.BadRef as exc:
             print(f"拒绝：--also {exc}")
             return 1

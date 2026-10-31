@@ -425,7 +425,7 @@
   {
    "name": "check_video_visibility.py",
    "shard": "reply",
-   "why": "视频段标记可执行：唤醒行/--list/--show 三处都带 video.py 命令、无地址与文件段误判都会说明、daemon 下载判据与服务端同值；抽帧在缺 ffmpeg / 时长未知 / 短时长/失败时都说实话（#200）"
+   "why": "视频段标记可执行：唤醒行 / reply.py --list / --show / --context 与追问行四处都带 video.py 命令且记号与行首一致（q<n> 就是 q<n>）、无地址与文件段误判都会说明、q<n> 读会话库而裸数字不猜库、重签按名字匹配不拿别的视频顶替、daemon 下载判据与服务端同值；抽帧在缺 ffmpeg / 时长未知 / 短时长/失败时都说实话且产物进缓存预算（#200）"
   },
   {
    "name": "check_reply_image.py",

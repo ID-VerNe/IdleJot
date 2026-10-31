@@ -254,7 +254,8 @@ def packet(row, recent, batch, *, event='messages', has_more=False, stickers=Non
     state = social_state(row, recent, batch)
     scope = scope or {}
     hints = [MODES.get(row['participation'], MODES['natural']), ADDRESSING,
-             '先辨认这句话对谁说，再决定接话、看图或沉默。群里只发想说的那句话；不输出你的判断过程、执行报告或例子里的动作说明。']
+             '先辨认这句话对谁说，再决定接话、看图或沉默。群里只发想说的那句话；不输出你的判断过程、执行报告或例子里的动作说明。',
+             '中文表达里引述词句优先用全角双引号“...”，不用西文 "..." 或单引号 \'...\' 包中文；需区分内层时按中文排版习惯用 ‘...’。代码片段、英文缩写与不夹中文的引号不受此限。']
     if event == 'source_unavailable':
         hints.append('实时来源断开，继续等连接恢复，暂不发言。')
     elif has_more:

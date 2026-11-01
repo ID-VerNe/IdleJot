@@ -547,10 +547,11 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 89 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
 | 90 | `reply` | `check_sixty` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
 | 91 | `reply` | `check_busboss.py` | 车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103） |
-| 92 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164）；id 撞号分节：事件流 id 与会话库 rowid 同号时 q&lt;n&gt; 只落到本群那条、裸 id 回库兜底要打出源说明（#203） |
-| 93 | `reply` | `check_trigger_mode.py` | 按群选择 natural/mention_only 触发模式：collector 请求值按 trigger_mode 取（不再硬编码 True）、natural 群普通消息 wake_reason 放行、@/关键词/is_self/指令早退不破坏、两群不同配置按群生效（#188） |
+| 92 | `reply` | `check_bilibili_subtitle.py` | B 站字幕（#339）：四类引用（短链 / 站内视频页 / 裸 BV / av）解析出 bvid 与 p=、多 P 取对应 cid 并在正文说出第几 P、四种「没有」各说各的（没链接 / 链接打不开 / 要登录 / 接口不可用）且两两不同、短链只跟一跳且 Location 与 subtitle_url 都过 host 白名单（站外 302 不做第二跳且与「没字幕」同口径）、成功进缓存而失败不进、免凭证声明真的过掉宿主要绑定的那道闸（Command.needs_credential 落到 handler.need_ck）、默认关闭时不在 #帮助也不可用 |
+| 93 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164）；id 撞号分节：事件流 id 与会话库 rowid 同号时 q&lt;n&gt; 只落到本群那条、裸 id 回库兜底要打出源说明（#203） |
+| 94 | `reply` | `check_trigger_mode.py` | 按群选择 natural/mention_only 触发模式：collector 请求值按 trigger_mode 取（不再硬编码 True）、natural 群普通消息 wake_reason 放行、@/关键词/is_self/指令早退不破坏、两群不同配置按群生效（#188） |
 
-共 93 个 CI 门禁，分 5 个分片（`static` 19、`runtime` 15、`mcp` 18、`storage` 11、`reply` 30）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
+共 94 个 CI 门禁，分 5 个分片（`static` 19、`runtime` 15、`mcp` 18、`storage` 11、`reply` 31）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
 <!-- gates:ci:end -->
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

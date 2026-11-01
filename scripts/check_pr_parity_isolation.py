@@ -200,16 +200,28 @@ def case_cleanup_not_silent(scene):
     check('孤儿目录仍被删掉', Path(path).exists(), False)
 
 
+def guarded(name, case, scene):
+    """一组用例崩了也继续跑下一组：崩在哪一组、崩成什么，都要看得见（基线对照要的是全貌）。"""
+    try:
+        case(scene)
+    except Exception as error:  # noqa: BLE001 — 门禁要报出「这一组没跑完」，不是把栈吞掉
+        FAILS.append(f'{name}：用例中断 — {type(error).__name__}: {error}')
+        print(f'FAIL {name}：用例中断 — {type(error).__name__}: {error}')
+
+
 def main():
     if os.name != 'nt':
         print('SKIP: parity 是 Windows-only（msvcrt）')
         return 0
     scene = Path(tempfile.mkdtemp(prefix='parity-348-'))
     try:
-        for case in (case_lock_is_cross_process, case_same_process_two_handles,
-                     case_lock_serializes_threads, case_registration, case_prune_spares_others,
-                     case_cleanup_not_silent):
-            case(scene)
+        for name, case in (('跨进程互斥', case_lock_is_cross_process),
+                           ('同进程重入互斥', case_same_process_two_handles),
+                           ('等锁串行化', case_lock_serializes_threads),
+                           ('只认自己那份', case_registration),
+                           ('不连坐', case_prune_spares_others),
+                           ('不静默', case_cleanup_not_silent)):
+            guarded(name, case, scene)
     finally:
         shutil.rmtree(scene, ignore_errors=True)
     if FAILS:

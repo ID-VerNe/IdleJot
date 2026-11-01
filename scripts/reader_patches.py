@@ -1,4 +1,12 @@
-"""Small reproducible adaptations to the pinned, read-only upstream modules."""
+"""Small reproducible adaptations to the pinned, read-only upstream modules.
+
+The functions below are pure `bytes -> bytes` transforms; the table at the bottom
+(`VENDORED_PATCHES`) says which file each one belongs to, and
+`scripts/apply_reader_patches.py` is the only thing that writes them to disk.
+Keeping the table here means a patch and its target can never drift apart
+(issue #337: `patch_wechat_media` existed for a whole release without any caller,
+so the vendored file was never actually patched on this machine).
+"""
 
 def patch_qq_configured_root(data):
     """Keep a per-install custom QQ source across detection, imports and restarts."""
@@ -183,3 +191,22 @@ def patch_qq_directory_tables(data):
     if data.count(before)!=1:raise ValueError('QQ directory allowlist changed')
     if b'        "profile_info_v5",' in data:return data
     return data.replace(before,after)
+
+
+# Which patched function belongs to which vendored file, relative to the repo root.
+#
+# This is the single place that says "run this on that file" (issue #337): before
+# it existed, `patch_wechat_media` had no caller anywhere in the repository and
+# `tools/wechat-reader/wechatauto/media.py` silently stayed unpatched. Adding a
+# patch for a new vendored file means adding a row here, and
+# `scripts/apply_reader_patches.py` picks it up with no further wiring.
+#
+# `reason` is what the applying driver prints when it has to explain itself, so it
+# names the symptom, not the function.
+VENDORED_PATCHES = (
+    {
+        'path': 'tools/wechat-reader/wechatauto/media.py',
+        'patch': patch_wechat_media,
+        'reason': 'wxgf→jpg 的 ffmpeg 转码会给控制台子进程开一个黑框（issue #319/#323）',
+    },
+)

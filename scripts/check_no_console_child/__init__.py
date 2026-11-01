@@ -615,6 +615,32 @@ def self_test():
         pass
     else:
         raise AssertionError('检测器自测失败：锚点漂移时 patch_wechat_media 必须抛 ValueError')
+    # issue #337: a patch nobody applies is not a fix, and the gate cannot tell that
+    # from "the patch works" -- both look identical in the self-test above. So the
+    # two tables that have to agree are reconciled here: every VENDORED_SOURCES row
+    # must name a patch that lives in reader_patches.VENDORED_PATCHES *and* carries
+    # the applying driver. A patch added to the table without a target, or a scanned
+    # vendored file whose note names a function that is not in the table, is red.
+    from reader_patches import VENDORED_PATCHES
+    applied = {row['path']: row['patch'].__name__ for row in VENDORED_PATCHES}
+    for rel, note in sorted(VENDORED_SOURCES.items()):
+        if 'patch_' not in note:
+            raise AssertionError(
+                f'检测器自测失败：{rel} 的扫描说明没有点名补丁函数，无法与补丁表对账：{note!r}')
+        note_fn = 'patch_' + note.rsplit('patch_', 1)[-1]
+        want = applied.get(rel)
+        if want is None:
+            raise AssertionError(
+                f'检测器自测失败：{rel} 在 VENDORED_SOURCES 里，但 reader_patches.VENDORED_PATCHES '
+                f'没有对应的补丁 —— 没有驱动就会像 #337 那样从未真正打过补丁')
+        if want != note_fn:
+            raise AssertionError(
+                f'检测器自测失败：{rel} 的扫描说明写着 {note_fn!r}，补丁表里却是 {want!r}，二者必须同名')
+    orphan = sorted(rel for rel in applied if rel not in VENDORED_SOURCES)
+    if orphan:
+        raise AssertionError(
+            '检测器自测失败：这些 vendored 文件有补丁却不在 VENDORED_SOURCES 里，等于没扫（issue #323）：'
+            + '、'.join(orphan))
     # 范围自检：RUNTIME_WORKERS 里每个文件都必须真的进扫描集，改名/删除即红
     # （issue #319 的病根就在这里：判据没问题，是文件没进范围）
     scanned = {p.relative_to(ROOT).as_posix() for p in iter_sources()}
@@ -635,6 +661,12 @@ def scan_vendored():
     vendored bare spawn is a red build on a machine that has the sources. Absent
     files are named in the output instead of being dropped -- the whole point of
     issue #323 is that "not scanned" used to look identical to "clean".
+
+    A violation here is not the same kind of red as a runtime violation, and the
+    report has to say so (issue #337). Vendored bytes are patched, never hand
+    edited, and the fix is to run the applying driver -- not to drop the file from
+    `VENDORED_SOURCES`, which is #323 itself. The extra line below is navigation
+    only: every violation is still a failure, and the exit code is still 1.
     """
     scanned = []
     unscanned = []
@@ -658,6 +690,13 @@ def scan_vendored():
     if violations:
         failures.append('vendored 树里这些 spawn 会给子进程开一个控制台窗口（issue #323）：')
         failures.extend(f'  {rel}:{lineno}  {line}' for rel, lineno, line, _ in violations)
+        # Which patch(es) would have prevented the violations actually seen, named
+        # from the same table the driver reads, so the two cannot disagree.
+        fixes = sorted({VENDORED_SOURCES[rel] for rel, *_ in violations})
+        failures.append('  → 这些不是本仓代码，是安装时被改写的第三方副本：#337 的修法是先跑'
+                        ' `python scripts/apply_reader_patches.py` 应用补丁（' +
+                        '；'.join(fixes) + '），'
+                        '不要把它们移出 VENDORED_SOURCES —— 那是 #323 的修复，退回去等于放行黑框')
     return scanned, unscanned, failures
 
 

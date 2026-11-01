@@ -371,7 +371,8 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
 ### 2.6 证据与验证纪律（二轮审计的流程教训）
 - **无证据不修复**：任何 finding 必须附带可直接粘贴的 `文件:行号` 证据才可进入修复；无证据一律视为虚构（曾有子代理报告整段虚构目录与常量）。
 - **完成声明以磁盘为准**：工人/子代理报告"已完成"后，lead 必须独立用 `git status`、文件存在性、门禁原始输出复核，不得采信转述。
-- **门禁默认串行，并发要显式开口**：不带参数时按清单顺序一条一条跑（`--jobs 1`），不在并发写窗口内跑；`--jobs N` 让 N 条门禁同时跑（issue #317），结果表仍按清单位置编号，标为 `EXCLUSIVE` 的门禁（目前只有 `check_listener_rehang`，它起真实 `listen.py` 并树杀）一律在并行收尾之后单独跑。红门禁先用 git worktree pristine HEAD 对照归因——归因时退回 `--jobs 1`，免得两条门禁互相污染时说不清是谁红的。
+- **门禁默认串行，并发要显式开口**：不带参数时按清单顺序一条一条跑（`--jobs 1`），不在并发写窗口内跑；`--jobs N` 让 N 条门禁同时跑（issue #317），结果表仍按清单位置编号，标为 `EXCLUSIVE` 的门禁（它起真实 `listen.py`、按 WMI 认进程并树杀，或自身在测计时）一律在并行收尾之后单独跑。红门禁先用 git worktree pristine HEAD 对照归因——归因时退回 `--jobs 1`，免得两条门禁互相污染时说不清是谁红的。
+- **一台机器同时只跑一个全量门禁实例**（issue #317）：`--jobs` 是**单实例内**的并发开关，它管不了「另一个会话在另一棵树里也在跑」。本机常年挂着十几个 `.tmp/wt-*`，每个都跑一遍全量就是十几倍叠加——那是 CPU 几何级叠乘，不是执行器参数能调的事。所以：**同时只许一个实例跑全量**，其余会话一律 `--shard <片>` 或 `--only`/`run-focused` 缩范围；要并发就把 `--jobs` 加在**那一个**实例上，别给每个会话各加一份。`--jobs` 会被钳到 CPU 数（`effective_jobs`），片头如实打印生效值——所以看到 `并行 20` 不等于「20 条真在跑」，超配那条路本来就被掐了。
 
 ### 2.7 仓库改动流程（issue → plan → worktree → PR）
 
@@ -447,7 +448,7 @@ uv run python scripts/run_gates.py --list              # 看档位计数、CI �
 uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写下面这段
 ```
 
-**`--jobs N` 的边界（issue #317）**：并行单位是**每一条门禁**，不是分片——`shard` 只决定 CI 走哪个 matrix，本机不受它约束。默认 `--jobs 1` 就是原来的逐条串行，`check_pr_parity.py` 与 pre-push 钩子看到的行为不变。标了 `EXCLUSIVE` 的门禁（`run_gates.py:EXCLUSIVE`，目前只有 `check_listener_rehang`：它起真实 `listen.py`、靠全机 WMI 认进程再 `taskkill /T /F` 树杀）**在线程池收摊之后单独跑**，不交给池子排队——排进池子等于与并发条目同池竞争，独占名存实亡。`--fail-fast` 在并行下只拦住**还没启动**的条目，在途的跑完再收摊（中途杀掉会留下半写的临时目录）。**归因一条红门禁时退回 `--jobs 1`**，别让并发把「谁红的」搅成说不清。
+**`--jobs N` 的边界（issue #317）**：并行单位是**每一条门禁**，不是分片——`shard` 只决定 CI 走哪个 matrix，本机不受它约束。默认 `--jobs 1` 就是原来的逐条串行，`check_pr_parity.py` 与 pre-push 钩子看到的行为不变。**`--jobs` 会被钳到 CPU 数**（`run_gates.effective_jobs`）：每条门禁都是一个子进程、端到端门禁自己还会再起子进程，并发度超过核数只会把调度开销吃成纯亏（`static` 19 条并发实测 73.8s，其中独占收尾 66s）。钳制不改变「显式开关」的性质，只是不让它变成超配；**实际生效值如实打进片头**（`门禁 N 条，分片 X，并行 M，…`），写 `--jobs 999` 时看到的是这台机器真能跑的数字。标了 `EXCLUSIVE` 的门禁（`run_gates.py:EXCLUSIVE`：`check_listener_rehang` 起真实 `listen.py`、靠全机 WMI 认进程再 `taskkill /T /F` 树杀；`check_run_gates_parallel` 自身在测计时）**在线程池收摊之后单独跑**，不交给池子排队——排进池子等于与并发条目同池竞争，独占名存实亡。`--fail-fast` 在并行下只拦住**还没启动**的条目，在途的跑完再收摊（中途杀掉会留下半写的临时目录）。**归因一条红门禁时退回 `--jobs 1`**，别让并发把「谁红的」搅成说不清；**同时只许一个实例跑全量**（§2.6），其余会话缩范围或在那一份上并行。
 
 **本机跑法同 §2.4**：一律 `/usr/bin/env -u PYTHONPATH .venv/Scripts/python.exe scripts/run_gates.py …`（清掉注入的 `PYTHONPATH`，并写全 `/usr/bin/env`，否则沙箱 `env` shim 会吞掉子进程输出还报 `exit 0`）。下面的 `uv run` 是 CI 等价写法。
 
@@ -464,7 +465,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 6 | `static` | `check_listen_passthrough.py` | 唤醒内容不被 listen.py 吞掉（#91） |
 | 7 | `static` | `check_listener_rehang` | 监听空窗：退出必带重挂指令、回复默认续挂、过期唤醒不静默、退出留痕且空窗可由只读入口报出（#69/#112） |
 | 8 | `static` | `check_gap_disclosure` | 停机窗口缺口披露：后端不在的那段时间漏了什么事后说得出来，up.py --status / reply.py --list / listen.py NO_WORK 三处只读入口报出窗口内漏 N 条、@ 本机 M 条，不再报告一切正常（#114）。#283：单文件 958 行 advisory 拆成 `scripts/check_gap_disclosure/` 包（_fixture/cases），入口名不变、对 gates.json 与 CI 透明 |
-| 9 | `static` | `check_run_gates_parallel.py` | 本机门禁调度（#317）：默认仍串行（`--jobs 1`）下结果表与清单同序；`--jobs N` 按条并行且结果表仍按清单位置编号；`EXCLUSIVE`（`check_listener_rehang` 靠全机 WMI 认进程并树杀）在线程池收摊之后单独跑、不与任何泳道重叠；`--fail-fast` 只拦没启动的、在飞的不被腰斩；`--shard` 子集上 --jobs 同样生效。实测子进程跑真桩树，断言落在结果表行号上、不对 stdout 交错顺序下嘴 |
+| 9 | `static` | `check_run_gates_parallel.py` | 本机门禁调度（#317）：默认仍串行（`--jobs 1`）下结果表与清单同序；`--jobs N` 按条并行且结果表仍按清单位置编号；`--jobs` 钳到 CPU 数、片头如实报生效值（写 999 看到的是本机能跑的数字，且不许把请求值回显成生效值、不许把串行放大成并行）；`EXCLUSIVE`（`check_listener_rehang` 靠全机 WMI 认进程并树杀、`check_run_gates_parallel` 自身在测计时）在线程池收摊之后单独跑、不与任何泳道重叠；`--fail-fast` 只拦没启动的、在飞的不被腰斩；`--shard` 子集上 --jobs 同样生效。实测子进程跑真桩树，断言落在结果表行号与片头捕获组上、不对 stdout 交错顺序下嘴 |
 | 10 | `static` | `check_status_napcat_line.py` | up.py --status 的 NapCat 行：括号内是 OneBot 真账号而非字段名；生产者形状与解析口径两侧各钉一条（只桩最底层 OneBot 调用），反例对照确认判据抓得住（#156/#159） |
 | 11 | `static` | `check_wg_pause.py` | 采集暂停标记（#189）：有主 + 有时限才算数，owner 退出/超 TTL/遗留哑文件都判失效并由采集器当轮清理；暂停期间照写心跳、状态行报出原因与清理人，热重载不再被哑文件永久挡住 |
 | 12 | `static` | `check_module_size.py` | 模块体量红线：文件超 1000 行或类超 800 行即 fail（#11） |

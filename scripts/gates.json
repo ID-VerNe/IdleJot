@@ -70,7 +70,7 @@
   {
    "name": "check_run_gates_parallel.py",
    "shard": "static",
-   "why": "本机门禁调度（#317）：默认仍串行（`--jobs 1`）下结果表与清单同序；`--jobs N` 按条并行且结果表仍按清单位置编号；`EXCLUSIVE`（`check_listener_rehang` 靠全机 WMI 认进程并树杀）在线程池收摊之后单独跑、不与任何泳道重叠；`--fail-fast` 只拦没启动的、在飞的不被腰斩；`--shard` 子集上 --jobs 同样生效。实测子进程跑真桩树，断言落在结果表行号上、不对 stdout 交错顺序下嘴"
+   "why": "本机门禁调度（#317）：默认仍串行（`--jobs 1`）下结果表与清单同序；`--jobs N` 按条并行且结果表仍按清单位置编号；`--jobs` 钳到 CPU 数、片头如实报生效值（写 999 看到的是本机能跑的数字，且不许把请求值回显成生效值、不许把串行放大成并行）；`EXCLUSIVE`（`check_listener_rehang` 靠全机 WMI 认进程并树杀、`check_run_gates_parallel` 自身在测计时）在线程池收摊之后单独跑、不与任何泳道重叠；`--fail-fast` 只拦没启动的、在飞的不被腰斩；`--shard` 子集上 --jobs 同样生效。实测子进程跑真桩树，断言落在结果表行号与片头捕获组上、不对 stdout 交错顺序下嘴"
   },
   {
    "name": "check_status_napcat_line.py",

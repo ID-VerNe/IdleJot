@@ -129,13 +129,23 @@ type/<issue 号>-p<字母>[-<数字>]-<slug>   # 多分节时，如 feat/41-pe4-
 - 基线是否真红（未打补丁的 base 上红，且红的签名与 issue 一致）；
 - 是否漏改文档、清单或 `ci.yml`（新门禁必须登记，改清单必须 `--write`）。
 
-机器校验由 `scripts/check_gate_change_review.py` 承担：CI 在 PR 事件读取 diff 与正文，命中门禁链却没有 `## 门禁改动` 段、或段内漏列某个被改文件，直接 fail。本机预检：
+机器校验由 `scripts/check_gate_change_review.py` 承担：CI 在 PR 事件读取 diff 与正文，命中门禁链却没有 `## 门禁改动` 段、或段内漏列某个被改文件，直接 fail。
+
+**结论行必须真的写进 `## 门禁改动` 段**（issue #324）。复核结论贴在 PR **评论**里时，机器读不到——所以结论行要落进正文那一节，两处并存：
+
+- 一行以 `独立复核` 开头，同行带 `APPROVE` / `APPROVED` / `REQUEST_CHANGES`；只写 `<PENDING>` / `待复核` / 什么都写算「还没贴」，**红**。
+- 这一行必须是段内**最后一个**有实际内容的东西（分隔线、空行不算内容）。先写结论、再补断言证据是自审的形状——红。
+- 时点：闸门自 `2026-11-02` 起生效（基线或 PR 创建早于该时刻只打 hint 不判红，早于它开的 PR 不在追责范围）。
+
+红灯的语义是「**复核还没贴**」，不是「CI 坏了」：补完结论行重跑即绿。同一批验收里 PENDING 红 / 结论行在段末绿 / 结论后面还有证据红 / `REQUEST_CHANGES` 也放行（结论已贴即通过，结论内容由人读）——四种组合由脚本入口的 `self_test()` 每次执行都复跑。
+
+本机预检：
 
 ```bash
 python scripts/check_gate_change_review.py --base origin/slim --body-file <PR 草稿>
 ```
 
-没有 PR 上下文（本机 parity、`push` 事件）时它打印 `SKIP` 并放行——校验只在有正文的 PR 上有意义。
+没有 PR 上下文（本机 parity、`push` 事件）时它打印 `SKIP` 并放行——校验只在有正文的 PR 上有意义。**但显式声明了门禁链改动时不再 SKIP**：`GATE_CHANGES=1` 或 `--gate-changes` 而没有 base，改动集不可得，脚本 fail-closed——这是留给「直接推 `slim` 绕过 PR」的口子，走了就要证明正文交代过，而拿不到 diff 就证明不了，所以请走 PR。
 
 > 平台侧强制由 `scripts/check_repo_settings.py` 钉住（`manual` 档，合并前后本机跑，`--self-test` 离线验夹具）：可合并维护者（有 push 权限的 collaborator）只有 1 人时，断言「分支保护不要求 review、`.github/CODEOWNERS` 不覆盖门禁路径」——单人下建 CODEOWNERS 等价于自己给自己放行，没要求 review 时它更不产生强制、只制造虚假安全感；此时复核靠「不同上下文的 agent + 结论贴 PR」这一条。出现第二个维护者时该门禁转红，按它打印的命令翻转：CODEOWNERS 把 `/scripts/check_*.py`、`/scripts/gates.json`、`/scripts/run_gates.py`、`/.github/workflows/ci.yml` 与 `/.githooks/`（钩子是门禁执行入口：发布门禁与每推送 sha 的 CI 等价复跑都从那里起，改钩子同样能静默削弱门禁链）归维护者，分支保护 `required_pull_request_reviews` 至少 1 人且 `require_code_owner_reviews` 为 true——少了后者 CODEOWNERS 只是装饰，任意有合并权限者都能批门禁改动。翻转后平台强制生效，两态断言随维护者数量自动切换，设置漂移即红；`--self-test` 另校验翻转模板与磁盘门禁路径零漂移、且 protection 载荷要求 code owner 审查（issue #78）。
 
@@ -147,11 +157,12 @@ python scripts/check_gate_change_review.py --base origin/slim --body-file <PR �
 4. 确认分支基于最新 `slim`，`git fetch origin slim` 后无落后。
 5. **门禁链改动先自检**：diff 触及门禁链时，先跑 `python scripts/check_gate_change_review.py --base origin/slim --body-file <PR 草稿>`，确认「段存在 + 每个被改文件都被列出」不靠 CI 提醒。
 
-## 合并条件（三条全满足才合）
+## 合并条件（四条全满足才合）
 
 1. **CI 全绿**（`ci.yml` 全部门禁）。平台侧已强制：`slim` 开了分支保护，required status check 为 `checks`，CI 没绿时 GitHub 直接把合并按钮判成 `BLOCKED`——这条不再只靠自觉（issue #58）。
 2. **无冲突**：GitHub 显示可合并；有冲突不强行合——在 worktree 里 `git merge origin/slim`（或 rebase）解决，重跑门禁后再推。
 3. 适用时有 `## 基线验证` 段。
+4. **门禁链改动必须有已贴出的独立复核结论**（issue #324）：`## 门禁改动` 段里有一行 `独立复核：APPROVE / APPROVED / REQUEST_CHANGES`，且该行排在段内证据之后。`<PENDING>` 占位不算——「复核还没贴」就不合，这正是自审合并最容易滑过去的那一刻。机器判据见上节，软性文字要求见「门禁改动与独立复核」第 2 条。
 
 分支保护同时禁了强推与删分支；合并后远端分支由 `delete_branch_on_merge=true` 自动清掉。三项设置各有复现命令，探测脚本 `scripts/check_repo_settings.py` 红时会直接打印：
 

@@ -501,6 +501,11 @@
    "name": "check_trigger_mode.py",
    "shard": "reply",
    "why": "按群选择 natural/mention_only 触发模式：collector 请求值按 trigger_mode 取（不再硬编码 True）、natural 群普通消息 wake_reason 放行、@/关键词/is_self/指令早退不破坏、两群不同配置按群生效（#188）"
+  },
+  {
+   "name": "check_wake_audit.py",
+   "shard": "reply",
+   "why": "唤醒账本 / 追问攒批 / 监听去抖（#144）：@ 与关键词按 wake_reason 分来源落账且关键词明细不落盘（字段白名单，不是查词）、追问唤醒来自 chat_inbox 也记一行且一批只记一行 batch=条数、解禁唤醒 batch=1、群号只留 12 位哈希、坏行跳过好行照读、写失败静默返回 None 不拖垮真实唤醒、--status 的「唤醒」行把「账本还没开始记」/「过去 24h 无唤醒」/按来源计数三种说法分开；追问攒批未安静够时不唤醒且不推进 consume 游标（顺序不能反）、安静够后一批一次唤醒、quiet_seconds=0 退回改前行为、参数开窗时定死；settle 把窗口内新到的并成一批、后段新到的把截止再推一个窗口（不推后必红）、从不突破等待预算（预算耗尽原地返回一秒不睡）、一直有新唤醒时不超过 DEBOUNCE_CAP 倍（deadline 留 20 个窗口，只断上限生效）、贴着 deadline 时推后撞不到 deadline（deadline 只留 2.5 个窗口，不夹取会挂死）、静默窗口不自动撑到上限、重读失败不吞唤醒、--debounce 0 不额外等待"
   }
  ],
  "manual": [

@@ -38,6 +38,7 @@ reply / watch / up 三个宿主在通用流程点派发命名事件，插件自�
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import followup
@@ -76,6 +77,9 @@ def _reply_sent(ctx: dict[str, Any]):
         after_ref=after_ref,
         max_messages=options.get("max_messages"),
         idle_seconds=options.get("idle_seconds"),
+        # 攒批窗口开窗时定死（issue #144 P2）；缺省由 followup.open() 回落
+        # followup.QUIET_SECONDS，0 = 关掉。
+        quiet_seconds=options.get("quiet_seconds"),
         not_before=ctx.get("not_before"),
     )
 
@@ -92,7 +96,8 @@ def _inbox_lookup(ref):
 
 
 def _wake_scan(ctx: dict[str, Any]):
-    if not PLUGIN.enabled(ctx.get("settings") or {}):
+    settings = ctx.get("settings") or {}
+    if not PLUGIN.enabled(settings):
         return None
     window = followup.load()
     if not window:
@@ -101,11 +106,28 @@ def _wake_scan(ctx: dict[str, Any]):
     if reason:
         followup.close()
         return {"closed": reason}
-    woke = followup.consume(
-        window,
-        followup.since(window.get("after_id"), window.get("session"),
-                       window.get("not_before")),
-    )
+    rows = followup.since(window.get("after_id"), window.get("session"),
+                          window.get("not_before"))
+    # 攒批（issue #144 P2）：群里连发几句时，以前是第一条就把窗口唤醒一次、
+    # 剩下的每条各醒一次——一次对话被切成三次往返，token 和 turn 都翻倍。
+    # 这里要求「最后一条消息之后安静了 quiet_seconds 秒」才唤醒。
+    #
+    # 顺序不能反：`consume()` 会推进 after_id 并落盘，先消费再判就会把还没等到的
+    # 那一批提前吃掉，之后 quiet 判据永远看得到空行、窗口再也不醒。
+    # 额度为 0 的行（budget 已经被前几批扣完，或 close 边界）照样按"已结束"处理：
+    # 这一批不唤醒的话 `consume()` 里的当场 close 就没机会跑，窗口会挂到 stale。
+    quiet = window.get("quiet_seconds")
+    try:
+        quiet = followup.QUIET_SECONDS if quiet is None else max(0.0, float(quiet))
+    except (TypeError, ValueError):
+        quiet = followup.QUIET_SECONDS
+    if rows and quiet > 0:
+        last = max(followup.sent_at(r) for r in rows)
+        # 消息自己说的时间戳来自 QQ 服务器，可能比本机钟快几秒：差成负数时按 0 算，
+        # 不当成"还没说够"——否则窗口会被一条时钟跑到前面的消息永久卡住。
+        if time.time() - last < quiet:
+            return None
+    woke = followup.consume(window, rows)
     if not woke:
         return None
     return {"woke": woke, "report": followup.wake_report(window, len(woke))}

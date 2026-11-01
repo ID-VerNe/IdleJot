@@ -49,6 +49,7 @@ import wg_images  # noqa: E402  (图片标记渲染，与 reply/look 同一份�
 import wg_isolation  # noqa: E402  (本会话只管一个群：状态行照实报，issue #164)
 import wg_listener_state  # noqa: E402  (监听存亡账本：「无人值守」的可读事实，issue #112)
 import wg_pause  # noqa: E402  (暂停标记：有效/失效的判定，状态行照实报，issue #189)
+import wg_wake_audit  # noqa: E402  (唤醒账本：按来源报「叫醒了几次」，issue #144)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
 from wg_daemon import read_json  # noqa: E402
 from wg_paths import logs_dir, state_dir  # noqa: E402
@@ -333,6 +334,10 @@ def report(exclude_pids=None, resident_pid=None):
         reload_line = f"状态不可读（{type(exc).__name__}: {exc}）"
     print(f"热重载    : {reload_line}")
     print(f"追问      : {follow}")
+    # issue #144 P1：以前的只读入口答不了「被叫醒了几次、其中多少次来自追问窗口」。
+    # 读 `state/wg_wakes.jsonl`，只读不写，不联网。账本不存在与「窗口内 0 次」
+    # 由 describe() 分开说——两者的后续动作完全相反。
+    print(f"唤醒      : {wg_wake_audit.describe()}")
     print(f"会话      : {read_text(STATE / 'wg_session.txt') or '（尚未建立）'}")
     print(f"游标      : {read_text(STATE / 'wg_ack.txt') or '0'}   事件 {len(rows)} 条")
     if wakes:

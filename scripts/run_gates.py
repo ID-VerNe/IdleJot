@@ -145,19 +145,25 @@ def run_one(row, printed, total):
     `printed` 是这条门禁在本次执行里的序号，**按清单顺序**编，不按完成先后——
     并行下两条同时收尾也不会打出两个相同的 `[3/92]`。
 
-    子进程走 `winconsole.run_hidden`：门禁全部是控制台程序，这个脚本又常常没有控制台，
-    裸 `subprocess.run` 会给每条门禁新开一个窗口（issue #353 用窗口钩子在真实门禁链上
-    抓到 `git.exe` 标题的 `CASCADIA_HOSTING_WINDOW_CLASS`）。`cwd=ROOT` 由 `run_hidden`
-    透传，输出仍直接落到本进程的 stdout。
+    子进程走 `winconsole.run_passthrough`：门禁全部是控制台程序，这个脚本又常常没有
+    控制台，裸 `subprocess.run` 会给每条门禁新开一个窗口（issue #353 用窗口钩子在真实
+    门禁链上抓到 `git.exe` 标题的控制台窗口）。
+
+    为什么不是 `run_hidden`：那个函数把**窗口**关掉，代价是子进程拿到的是一扇新的、
+    `CREATE_NO_WINDOW` 控制台，「继承我的 stdout」就指向那扇窗而不是本进程的管道——
+    调用方没有控制台时逐条门禁的输出全部丢掉（issue #91 的原形）。门禁的输出正是给人
+    看的（`[n/94] … 通过`、失败时的 traceback），所以这里要的是「关窗 + 直通」，
+    `run_passthrough` 就是为此存在的：两路合流进管道、UTF-8 解码、整块写回本进程 stdout。
     """
     tick = time.perf_counter()
     # 没有 helper 的夹具树里退回裸调用：那里没有运行时树，也就没有窗口问题的前提。
     if winconsole is None:
         result = subprocess.run(command_of(row), cwd=ROOT)
+        code = result.returncode
     else:
-        result = winconsole.run_hidden(command_of(row), cwd=ROOT)
+        code = winconsole.run_passthrough(command_of(row), cwd=ROOT)
     elapsed = time.perf_counter() - tick
-    status = PASSED if result.returncode == 0 else FAILED
+    status = PASSED if code == 0 else FAILED
     print(f'[{printed}/{total}] {row["name"]} {status} ({elapsed:.1f}s)', flush=True)
     return status, elapsed
 

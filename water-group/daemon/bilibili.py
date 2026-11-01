@@ -101,14 +101,36 @@ class NeedsLogin(BilibiliError):
 # --------------------------------------------------------------------------
 # HTTP
 # --------------------------------------------------------------------------
-def _opener():
-    """不走系统代理：本机装了代理时直连更稳（同 busboss / sixty）。"""
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """把 3xx 原样交回去，不跟过去（issue #349）。
+
+    ``no_redirect=True`` 原本只是「捕获 ``HTTPError`` 时读 ``Location``」——可 urllib
+    的默认处理器**会自动跟随跳转**，302 早被跟完、``resp.geturl()`` 已经是终点地址，
+    那句 except 分支根本轮不到。于是短链的「只跟一跳」只写在注释里：群友贴的
+    ``b23.tv`` 若指向站外，请求**已经发出去了**，``_allowed()`` 只是事后核对字符串。
+    这里返回 ``None`` 让处理器拒绝重定向，3xx 变成 ``HTTPError``，由 ``_get`` 交回。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _opener(no_redirect=False):
+    """不走系统代理：本机装了代理时直连更稳（同 busboss / sixty）。
+
+    ``no_redirect=True`` 时装一个不跟随跳转的处理器——出站纪律靠它，不靠调用方
+    自觉（issue #349）。**只给需要它的那次请求装**：其余接口（稿件 / 字幕清单 /
+    字幕正文）跟随时跳转是正常的，全局禁跳会把「地址搬了家」当成失败。
+    """
+    handlers = [urllib.request.ProxyHandler({})]
+    if no_redirect:
+        handlers.append(_NoRedirect())
+    return urllib.request.build_opener(*handlers)
 
 
 def _get(req, timeout, no_redirect=False):
     """GET 并读回原始字节。``no_redirect`` 时把 302 当结果交回去而不是跟过去。"""
-    opener = _opener()
+    opener = _opener(no_redirect)
     try:
         with opener.open(req, timeout=timeout) as resp:
             return resp.geturl(), resp.read()

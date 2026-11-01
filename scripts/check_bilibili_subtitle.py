@@ -20,8 +20,10 @@
     .venv/Scripts/python.exe scripts/check_bilibili_subtitle.py
 """
 import os
+import re
 import sys
 import urllib.parse
+import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
@@ -54,6 +56,8 @@ SUBTITLE_PATH = "/bfs/subtitle/10001.json"
 # 夹具里的站内域名由 main() 按实际端口回填（``patch`` 与用例字面量共用一份）。
 SITE = ""
 SHORT_LINK = ""
+# 夹具端口：SSRF 用例要造「能连通、但 Host 不在白名单」的站外地址。
+PORT = 0
 
 STATE = {"requests": [], "short_target": "", "subs": [], "need_login": False,
          "view_code": 0,
@@ -76,7 +80,10 @@ class Handler(FixtureHandler):
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
         path, query = parsed.path, urllib.parse.parse_qs(parsed.query)
+        # ``host`` 记 Host 头：站外用例靠它区分「第二跳打到哪个 host」——
+        # 只看 path 的话，站内/站外两个目标在夹具里是同一个处理器（issue #349）。
         STATE["requests"].append({"path": path, "query": query,
+                                  "host": self.headers.get("Host", ""),
                                   "ua": self.headers.get("User-Agent", "")})
         if path.startswith("/s/"):
             # 短链：302 到 STATE["short_target"]（用例决定指哪儿）。
@@ -259,25 +266,139 @@ def test_four_kinds_of_nothing():
 
 def test_ssrf_one_hop():
     print("[出站纪律]")
-    reset(short_target="https://evil.example/video/" + BVID)
+    # 302 目标必须**真的能连到夹具**，否则「没有第二跳」在任何实现下都成立
+    # （issue #349：原先指向 `evil.example`，DNS 解析不到 + `network_guard` 先拦，
+    # 把 `_allowed()` 换成恒 `True` 也照样绿）。这里用同一端口的 `localhost`：
+    # 它解析到 loopback、守卫放行，但 Host 头是 `localhost:<port>`，不是白名单项
+    # `127.0.0.1:<port>`——对 `_allowed()` 而言就是站外。
+    out_of_site = f"http://localhost:{PORT}/video/" + BVID
+    reset(short_target=out_of_site)
+    text = ""
     try:
-        bilibili.answer(SHORT_LINK, {})
-    except bilibili.BilibiliError:
-        pass
+        text = bilibili.answer(SHORT_LINK, {})
+    except bilibili.BilibiliError as exc:
+        text = str(exc)
+    # 两道闸（正则 / 白名单）任一条挡下都算对，这里只钉「确实没发第二跳」+
+    # 「说法是打不开」。**具体是哪道闸**由 test_site_whitelist_alone 单独钉。
     check("指向站外的 302 不做第二跳",
           len(STATE["requests"]) == 1, str(STATE["requests"]))
-    reset(short_target=f"http://{SITE}/video/" + BVID,
-          subs=[track("zh")])
-    STATE["subs"] = [{"lan": "zh-CN", "lan_doc": "中文",
-                      "subtitle_url": "https://evil.example/steal.json"}]
+    check("指向站外的 302 说「打不开」不说成没字幕",
+          "打不开" in text and "没有字幕" not in text, text)
+    # 对照：同一个夹具、同一台服务器，把 302 换成站内地址就**必须**走完链路。
+    # 没有这条，「零第二跳」也可能只是夹具不好使。
+    reset(short_target=f"http://{SITE}/video/" + BVID, subs=[track("zh")])
+    text = ""
     try:
-        bilibili.answer(SHORT_LINK, {})
-    except bilibili.BilibiliError:
-        pass
-    check("非 hdslb 的字幕地址不被请求",
+        text = bilibili.answer(SHORT_LINK, {})
+    except bilibili.BilibiliError as exc:
+        text = str(exc)
+    check("对照组：站内 302 真的走完了链路",
+          [item["path"] for item in STATE["requests"]][:1] == ["/s/AbCdEf"]
+          and "/x/web-interface/view" in [item["path"] for item in STATE["requests"]]
+          and "第一句字幕" in text,
+          f"{[item['path'] for item in STATE['requests']]} | {text[:80]}")
+
+    # 字幕地址白名单：站外地址一次都不许请求，也不许被当成「有字幕」进缓存。
+    reset(short_target=f"http://{SITE}/video/" + BVID, subs=[track("zh")])
+    STATE["subs"] = [{"lan": "zh-CN", "lan_doc": "中文",
+                      "subtitle_url": f"http://localhost:{PORT}/steal.json"}]
+    text = ""
+    try:
+        text = bilibili.answer(SHORT_LINK, {})
+    except bilibili.BilibiliError as exc:
+        text = str(exc)
+    check("非 hdslb 的字幕地址一次都不请求",
           not any(item["path"] == "/steal.json" for item in STATE["requests"]),
           str([item["path"] for item in STATE["requests"]]))
-    check("被丢弃的地址与「没有字幕」同口径", True)
+    # 与「没有字幕」同口径：说「没有字幕」，不说成接口坏了、也不说成要登录。
+    check("被丢弃的地址与「没有字幕」同口径",
+          "没有字幕" in text and "登录" not in text and "暂时不可用" not in text, text)
+    # 同一句结论要稳定：再问一次仍说「没有字幕」，不会因为第一次失败而变成
+    # 「接口不可用」或半截正文。字幕清单本身是成功的（拿到 tracks），缓存它是对的；
+    # 被丢弃的只是那条**地址**，它从来没被请求过，也就没有「缓存失败」这回事。
+    again = ""
+    try:
+        again = bilibili.answer(SHORT_LINK, {})
+    except bilibili.BilibiliError as exc:
+        again = str(exc)
+    check("被丢弃的地址每次都给同一句「没有字幕」",
+          again == text, f"{text!r} vs {again!r}")
+
+
+def test_site_whitelist_alone():
+    """单独把 `_allowed()` 钉在靶子上（issue #349 复核）。
+
+    `test_ssrf_one_hop` 其实测不到这道闸：`_patched()` 把 `SITE_HOST` 与
+    `VIDEO_RE` 一起换成了 `127.0.0.1:<port>`，于是 `localhost:<port>/video/BV…`
+    在**正则**那一道就被挡掉——把 `_allowed()` 换成恒 `True`，那条用例照样绿。
+    实测：`_allowed` 恒真 + `VIDEO_RE` 不认 host 时，整套门禁全绿而第二跳真的
+    发出去了（`/video/BV…` 进了夹具的请求表）。
+
+    所以这里换个 302 目标：**同样长得像视频页**（能过 `VIDEO_RE`）但 host 不在
+    白名单里。默认判据下它必须被 `_allowed()` 拦下，且在发请求之前就拦下。
+
+    为了让这条用例真的落到 `_allowed()` 上，用例期间把 `VIDEO_RE` 临时放宽成
+    「不认 host」——否则 `localhost:<port>` 又会被正则挡掉，测到的还是正则。
+    放宽只影响这条路，对照组在同一 `SITE_HOST` 下照常走完链路，证明放宽没把
+    链路弄坏。
+    """
+    print("[站内白名单]")
+    probe = f"http://localhost:{PORT}/video/" + BVID
+    lenient = re.compile(r"^(?:https?://)?(?:www\.|m\.)?" + r"[^/]+"
+                         + r"/video/(BV[A-Za-z0-9]+|av\d+)", re.I)
+    with patch.object(bilibili, "VIDEO_RE", lenient):
+        # 对照组不可省：证明「放宽后的正则」确实放行这个地址，否则下面那条
+        # 「被白名单挡下」在任何实现下都成立（又变回假绿）。
+        check("对照组：放宽正则后这个地址确实过了正则",
+              bool(bilibili.VIDEO_RE.match(probe)), probe)
+        reset(short_target=probe)
+        text = ""
+        try:
+            text = bilibili.answer(SHORT_LINK, {})
+        except bilibili.BilibiliError as exc:
+            text = str(exc)
+        check("指向站外的 302 被白名单挡下（正则已放行）",
+              "打不开" in text and "不是视频页" not in text, text)
+        check("被白名单挡下的地址一次都没被请求",
+              [item["path"] for item in STATE["requests"]] == ["/s/AbCdEf"],
+              str([item["path"] for item in STATE["requests"]]))
+    # 对照组：把同一个地址的 host 换成白名单项，就必须放行并走完链路。
+    reset(short_target=f"http://{SITE}/video/" + BVID, subs=[track("zh")])
+    passed = ""
+    try:
+        passed = bilibili.answer(SHORT_LINK, {})
+    except bilibili.BilibiliError as exc:
+        passed = str(exc)
+    check("对照组：白名单内的同形态地址放行并取到正文",
+          "/x/web-interface/view" in [i["path"] for i in STATE["requests"]]
+          and "第一句字幕" in passed,
+          f"{[i['path'] for i in STATE['requests']]} | {passed[:80]}")
+
+
+def test_redirect_guard():
+    print("[禁跳]")
+    # `no_redirect=True` 必须真的不跟：实现层靠 `_NoRedirect` 拒绝 3xx（issue #349）。
+    # 这里直接对夹具的短链发一个 `no_redirect` 请求，确认拿到的是 Location 原文、
+    # 且夹具**只收到一条**（若被跟随，第二条会打到 302 目标）。
+    reset(short_target=f"http://{SITE}/video/" + BVID)
+    req = urllib.request.Request(f"http://{SITE}/s/AbCdEf",
+                                 headers={"User-Agent": "fixture"})
+    final, raw = bilibili._get(req, 5, no_redirect=True)
+    check("no_redirect 交回 Location 而不是终点地址",
+          final == f"http://{SITE}/video/{BVID}", final)
+    check("no_redirect 时夹具只收到一条（302 没被跟随）",
+          [item["path"] for item in STATE["requests"]] == ["/s/AbCdEf"],
+          str([item["path"] for item in STATE["requests"]]))
+    # 对照组：默认情况下**必须**跟随，否则上面那条「没跟随」可能只是根本不通。
+    reset(short_target=f"http://{SITE}/video/" + BVID)
+    req = urllib.request.Request(f"http://{SITE}/s/AbCdEf",
+                                 headers={"User-Agent": "fixture"})
+    final, _raw = bilibili._get(req, 5)
+    check("对照组：默认会跟随 302",
+          final.endswith(f"/video/{BVID}")
+          and [item["path"] for item in STATE["requests"]]
+          == ["/s/AbCdEf", f"/video/{BVID}"],
+          f"{final} | {[item['path'] for item in STATE['requests']]}")
 
 
 def test_cache():
@@ -404,9 +525,10 @@ def _patched(server_port):
 
 def main():
     from contextlib import ExitStack
-    global SITE, SHORT_LINK
+    global SITE, SHORT_LINK, PORT
     with fixture_server(Handler, ports=PORTS) as server:
-        SITE = f"127.0.0.1:{server.server_port}"
+        PORT = server.server_port
+        SITE = f"127.0.0.1:{PORT}"
         SHORT_LINK = f"http://{SITE}/s/AbCdEf"
         STATE["subtitle_host"] = f"http://{SITE}"
         reset()
@@ -417,7 +539,9 @@ def main():
             stack.enter_context(patch("socket.create_connection", restrict))
             for fn in (test_parse_ref, test_happy_path, test_second_page,
                        test_language, test_four_kinds_of_nothing,
-                       test_ssrf_one_hop, test_cache, test_render_limits,
+                       test_ssrf_one_hop, test_site_whitelist_alone,
+                       test_redirect_guard, test_cache,
+                       test_render_limits,
                        test_handle_usage, test_answer_clipped):
                 _run(fn)
     return _runner.summary()

@@ -464,7 +464,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 7 | `static` | `check_listen_passthrough.py` | 唤醒内容不被 listen.py 吞掉（#91） |
 | 8 | `static` | `check_listener_rehang` | 监听空窗：退出必带重挂指令、回复默认续挂、过期唤醒不静默、退出留痕且空窗可由只读入口报出（#69/#112） |
 | 9 | `static` | `check_gap_disclosure` | 停机窗口缺口披露：后端不在的那段时间漏了什么事后说得出来，up.py --status / reply.py --list / listen.py NO_WORK 三处只读入口报出窗口内漏 N 条、@ 本机 M 条，不再报告一切正常（#114）。#283：单文件 958 行 advisory 拆成 `scripts/check_gap_disclosure/` 包（_fixture/cases），入口名不变、对 gates.json 与 CI 透明 |
-| 10 | `static` | `check_run_gates_parallel.py` | 本机门禁调度（#317）：默认仍串行（`--jobs 1`）下结果表与清单同序；`--jobs N` 按条并行且结果表仍按清单位置编号；`EXCLUSIVE`（`check_listener_rehang` 靠全机 WMI 认进程并树杀）在线程池收摊之后单独跑、不与任何泳道重叠；`--fail-fast` 只拦没启动的、在飞的不被腰斩；`--shard` 子集上 --jobs 同样生效。实测子进程跑真桩树，断言落在结果表行号上、不对 stdout 交错顺序下嘴 |
+| 10 | `static` | `check_run_gates_parallel.py` | 本机门禁调度（#317）：默认仍串行（`--jobs 1`）下结果表与清单同序；`--jobs N` 按条并行且结果表仍按清单位置编号；`--jobs` 钳到 CPU 数、片头如实报生效值（写 999 看到的是本机能跑的数字，且不许把请求值回显成生效值、不许把串行放大成并行）；`EXCLUSIVE`（`check_listener_rehang` 靠全机 WMI 认进程并树杀、`check_run_gates_parallel` 自身在测计时）在线程池收摊之后单独跑、不与任何泳道重叠；`--fail-fast` 只拦没启动的、在飞的不被腰斩；`--shard` 子集上 --jobs 同样生效。实测子进程跑真桩树，断言落在结果表行号与片头捕获组上、不对 stdout 交错顺序下嘴 |
 | 11 | `static` | `check_status_napcat_line.py` | up.py --status 的 NapCat 行：括号内是 OneBot 真账号而非字段名；生产者形状与解析口径两侧各钉一条（只桩最底层 OneBot 调用），反例对照确认判据抓得住（#156/#159） |
 | 12 | `static` | `check_wg_pause.py` | 采集暂停标记（#189）：有主 + 有时限才算数，owner 退出/超 TTL/遗留哑文件都判失效并由采集器当轮清理；暂停期间照写心跳、状态行报出原因与清理人，热重载不再被哑文件永久挡住 |
 | 13 | `static` | `check_module_size.py` | 模块体量红线：文件超 1000 行或类超 800 行即 fail（#11） |

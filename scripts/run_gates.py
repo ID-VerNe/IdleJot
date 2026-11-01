@@ -25,7 +25,11 @@ CI 与本地同一个入口：`.github/workflows/ci.yml` 只调用本脚本，�
 - **结果始终按清单顺序返回**，并行只改完成先后，不改结果表形状（`summary_text` 与
   `GITHUB_STEP_SUMMARY` 都依赖它）；`[n/总]` 的序号也按清单位置编，不按完成先后；
 - `--fail-fast` 在并行下只阻止**后续门禁启动**，已在跑的门禁跑完——中途杀掉子门禁会
-  留下半写的临时目录，让下一次归因更难。
+  留下半写的临时目录，让下一次归因更难；
+- **`--jobs` 钳到 CPU 数**（见 `effective_jobs`）。写 `--jobs 19` 不会真开 19 条：
+  每条门禁都是一个子进程（端到端门禁自己还会再起子进程），并发度超过核数只会把
+  调度开销吃成纯亏（`static` 19 条并发实测 73.8s，其中独占收尾 66s）。钳制不改变
+  「显式开关」的性质，只是不让它变成超配；实际生效值如实打进片头与 `--help`。
 
 片内默认全跑并汇总（issue #60：一次红灯要看全貌），`--fail-fast` 才提前收手。
 环境里有 `GITHUB_STEP_SUMMARY` 时把逐条结果写进 job 摘要，本机没有该变量时跳过。
@@ -137,6 +141,26 @@ def plan_parallel(rows):
     for position, row in enumerate(rows):
         (exclusive if gate_name(row) in EXCLUSIVE else lanes).append((position, row))
     return lanes, exclusive
+
+
+def effective_jobs(requested):
+    """把 `--jobs` 收进这台机器真能用的并发度：`min(requested, cpu_count)`（issue #317）。
+
+    每条门禁都是一个独立子进程，端到端门禁（`reply` 分片那一片）自己还会再起子进程，
+    所以「同时跑几条」受核数约束，超出的部分只是排队等核、外加线程池的调度开销。
+    `--jobs 19` 在 8 核机上实测 73.8s，而其中独占收尾一条就 66s——并行那部分本来就
+    薄，再超配纯亏。
+
+    边界：`requested <= 1` 原样返回（串行不开池，不在这里钳）；`cpu_count()` 拿不到
+    （极少数平台/受限容器返回 `None` 或 0）时回落 `requested`，宁可照用户说的跑，
+    也不在这里编一个核数出来。
+
+    **它不改变「显式开关」的性质**：默认仍是 1，钳制只作用于 `>= 2`。
+    """
+    if requested <= 1:
+        return requested
+    cores = os.cpu_count() or 0
+    return min(requested, cores) if cores >= 1 else requested
 
 
 def run_one(row, printed, total):
@@ -286,6 +310,7 @@ def write_summary(results, shard, elapsed):
 def run_ci(manifest, shard=None, fail_fast=False, jobs=1):
     rows = shard_rows(manifest, shard)
     label = shard or '全部分片'
+    jobs = effective_jobs(jobs)
     mode = '串行' if jobs <= 1 else f'并行 {jobs}'
     print(f'门禁 {len(rows)} 条，分片 {label}，{mode}，顺序来自 scripts/gates.json')
     results, elapsed = run_rows(rows, fail_fast, jobs)
@@ -305,7 +330,8 @@ def main():
     parser.add_argument('--fail-fast', action='store_true', help='见到第一个失败就停（默认片内全跑）')
     parser.add_argument('--list', action='store_true', help='打印档位计数、分片与 ci 顺序')
     parser.add_argument('--jobs', type=int, default=1, metavar='N',
-                        help='最多 N 条门禁同时跑（默认 1 = 串行；归因红门禁时保持 1）')
+                        help='最多 N 条门禁同时跑（默认 1 = 串行；归因红门禁时保持 1；'
+                             'N 超过本机 CPU 数时按 CPU 数跑，片头打印实际生效值）')
     args = parser.parse_args()
     if args.jobs < 1:
         print(f'FAIL: --jobs 必须 >= 1，收到 {args.jobs}')

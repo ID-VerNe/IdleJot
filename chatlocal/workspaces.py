@@ -64,8 +64,8 @@ def initialize(db):
 
 def clean_scope(value):
     if not isinstance(value,dict):raise ValueError('需要指定访问范围。')
-    platforms=value.get('platforms',['qq','wechat']);conversations=value.get('conversations',[])
-    if not isinstance(platforms,list) or not platforms or set(platforms)-{'qq','wechat'}:raise ValueError('平台范围无效。')
+    platforms=value.get('platforms',['qq']);conversations=value.get('conversations',[])
+    if not isinstance(platforms,list) or not platforms or set(platforms)-{'qq'}:raise ValueError('平台范围无效。')
     if not isinstance(conversations,list) or len(conversations)>300:raise ValueError('会话范围过多。')
     chosen=[]
     for item in conversations:

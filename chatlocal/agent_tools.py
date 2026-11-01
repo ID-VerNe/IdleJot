@@ -24,7 +24,7 @@ PAGE = dict(type='integer', minimum=1, maximum=20, default=12, description='每�
 OFFSET = dict(type='integer', minimum=0, maximum=10000, default=0, description='分页偏移，沿用next_offset；默认0')
 OVERVIEW_TERMS = ('通知','截止','提交','报名','改到','调整','变更','安排','会议','作业','课程','放假')
 FILTERS = {
-    'platform': {'type': 'string', 'enum': ['qq', 'wechat']},
+    'platform': {'type': 'string', 'enum': ['qq']},
     'conversation_id': TEXT,
     'start': dict(type='string', description='北京时间 YYYY-MM-DD 或 YYYY-MM-DD HH:MM；仅能缩小用户范围'),
     'end': dict(type='string', description='结束日期包含当天；精确时刻不含'),
@@ -34,7 +34,7 @@ FILTERS = {
     'has_voice':dict(type='boolean',description='true只查原生语音，false排除语音；语音文字仅在已转写后才能按关键词搜到'),
 }
 SCHEMAS = [
-    tool('transcribe_voice','按需理解一条 QQ/微信原生语音。音频上传到云端 ASR Worker 转写；已转写则复用结果。'
+    tool('transcribe_voice','按需理解一条 QQ 原生语音。音频上传到云端 ASR Worker 转写；已转写则复用结果。'
          '仅可处理当前用户范围内消息；返回机器转写和原始消息ID，可能有误听。关键上下文是语音时应主动调用。每轮最多3条。',
          {'message_id':NUMBER},['message_id']),
     tool('get_messages_since','按需读取某个本地消息ID之后入库的消息，含迟到的旧消息。仍受当前平台、会话、日期和快照限制。'
@@ -69,7 +69,7 @@ SCHEMAS = [
          '返回真实消息ID和正文；根据线索再search_messages/get_context查证，不要反复翻会话目录。',
          {'limit':dict(type='integer',minimum=1,maximum=40,default=32,description='默认32条，最多40条；留出补查预算'),
           'offset':OFFSET,'snapshot_max_id':dict(type='integer',minimum=0,description='翻页沿用返回值，新概览不填')}),
-    tool('search_messages', '搜索 QQ/微信文本。关键词用空格分隔，任一关键词匹配。无结果可换同义词。'
+    tool('search_messages', '搜索 QQ 文本。关键词用空格分隔，任一关键词匹配。无结果可换同义词。'
          '返回命中及有限相邻对话，hit_ids标记命中，context_windows按时间串起各命中的上下文。'
          '请结合整段理解谁在谈什么；窗口截断或指代/起因不明时get_context扩大阅读，不能仅凭命中句断言。',
          dict(FILTERS, query=dict(type='string',description='正文关键词；指定sender_id或has_media=true时可为空'),

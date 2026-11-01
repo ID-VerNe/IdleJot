@@ -207,8 +207,8 @@ print([(m.__name__,len(m._clip(s))-m.REPLY_CLIP) for m in (sixty,miyoushe,busbos
 
 **现状**：`temp_dir`/`scratch_dir` 84 caller。残留 6 文件命中 `TemporaryDirectory`/`mkdtemp`，全部合法：
 `check_fixture_support.py:32/81`（定义 `temp_dir` 自身，用 `mkdtemp` 钉夹具 home）、`antigravity_dry_replay.py:48`
-（`patch.dict(os.environ,clear=True)` 清环境模式）、`bench_napcat_qq_fixture.py:59` 与
-`snapshot_cache.py:25/90`（`dir=ROOT/'.tmp'` 仓库内 bench/recovery 目录）、`check_pr_parity.py:110`
+（`patch.dict(os.environ,clear=True)` 清环境模式）、`bench_napcat_qq_fixture.py:59`
+（`dir=ROOT/'.tmp'` 仓库内 bench 目录）、`check_pr_parity.py:110`
 （pristine worktree，在 `scripts/` 跑 run_gates 外）、`check_listener_rehang/ownership.py`
 （命中的是 `from ._common import ... temp_dir` 的 import 行，已用 `temp_dir`）。
 

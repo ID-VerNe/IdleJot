@@ -64,8 +64,11 @@ async def protocol(url, first, second, ui, service, store, folder):
         ids = await call(a, 'get_my_identity', {})
         assert 'OLD_NAME' not in json.dumps(ids)
         assert (await call(a, 'get_context', {'message_id':521})).get('error')
-        other = await call(b, 'read_conversation', {'platform':'wechat','conversation_id':'private','limit':5})
-        assert len(other['messages'])==1 and other['messages'][0]['platform']=='wechat'
+        # #350 stripped the WeChat read path, so the second grant's boundary is now
+        # "another QQ conversation" rather than "another platform". The assertion
+        # keeps its original job: B sees its own conversation and nothing of A's.
+        other = await call(b, 'read_conversation', {'platform':'qq','conversation_id':'private','limit':5})
+        assert len(other['messages'])==1 and other['messages'][0]['platform']=='qq', other
         assert not (await call(b,'search_messages', {'query':'课程设计'}))['messages']
         sql = await call(a, 'query_communication_db', {'sql':'SELECT count(*) FROM agent_messages'})
         assert sql['rows']==[[520]], sql
@@ -211,7 +214,12 @@ def main():
         rows=[dict(platform='qq',conversation_id='course',conversation='课程群',conversation_type='group',sender='老师',sender_id='teacher',source_id=str(i),timestamp='2026-10-01 10:00:00',content=f'课程设计讨论 {i}',is_self=False) for i in range(520)]
         rows[0]['content']='课程设计'+('说明'*3000)
         rows[0]['files']=[dict(filename=raw.name,size=raw.stat().st_size)]
-        rows += [dict(rows[1],platform='wechat',conversation_id='private',source_id='wx',content='FORBIDDEN 微信',files=[dict(filename=raw.name,size=raw.stat().st_size)]),
+        # The cross-platform row that used to sit here (a wechat message that a
+        # qq-scoped grant must not see) is impossible now that qq is the only
+        # platform this build imports (#350) -- there is no second platform to
+        # leak across. What remains testable is the grant-scope boundary, which
+        # the two rows below cover: another conversation, and another window.
+        rows += [dict(rows[1],conversation_id='private',source_id='dm',content='FORBIDDEN 私聊',files=[dict(filename=raw.name,size=raw.stat().st_size)]),
                  dict(rows[1],conversation_id='other',source_id='other',sender='FORBIDDEN_OTHER',content='FORBIDDEN 群'),
                  dict(rows[1],source_id='old',timestamp='2026-09-01',sender='FORBIDDEN_OLD_NAME',is_self=True,content='FORBIDDEN 日期')]
         path=folder/'messages.json';path.write_text(json.dumps(rows,ensure_ascii=False),'utf-8');store.import_file(path)
@@ -247,7 +255,11 @@ def main():
             base=dict(name='Fixture A',platforms=['qq'],conversations=[['qq','course']],start='2026-10-01',end='',media=False,prepare=False,voice=False,onebot=False)
             assert ui.post('/api/mcp/connections',json=dict(base,conversations=[]),headers=ui_headers).status_code==400
             first=ui.post('/api/mcp/connections',json=base,headers=ui_headers).json()['token']
-            second=ui.post('/api/mcp/connections',json=dict(base,name='Fixture B',platforms=['wechat'],conversations=[['wechat','private']]),headers=ui_headers).json()['token']
+            # A second grant scoped to a different conversation. It used to be a
+            # wechat grant; #350 removed the second platform, so the boundary
+            # under test here is "grants are per-conversation", which qq alone
+            # still expresses.
+            second=ui.post('/api/mcp/connections',json=dict(base,name='Fixture B',platforms=['qq'],conversations=[['qq','private']]),headers=ui_headers).json()['token']
             settings=ui.put('/api/mcp',json=dict(enabled=True,port=port),headers=ui_headers).json()
             assert settings['running'], settings
             assert logging_state()==web_logging, 'MCP startup overwrote WebUI logging'
@@ -283,15 +295,15 @@ def main():
                 assert config.read_bytes()==saved
                 # A second grant can use a separate name without replacing tulpa.
                 second_route='/api/mcp/connections/'+service.access.authorize(second)['id']+'/codex'
-                named={'token':second,'server_name':'tulpa_wechat'}
+                named={'token':second,'server_name':'tulpa_second'}
                 assert ui.post(second_route,json=named,headers=ui_headers).json()['changed']
                 assert not ui.post(second_route,json=named,headers=ui_headers).json()['changed']
                 parsed=tomllib.loads(config.read_text('utf-8'))
                 assert parsed['mcp_servers']['tulpa']['http_headers']['Authorization']=='Bearer '+first
-                assert parsed['mcp_servers']['tulpa_wechat']['http_headers']['Authorization']=='Bearer '+second
+                assert parsed['mcp_servers']['tulpa_second']['http_headers']['Authorization']=='Bearer '+second
                 saved=config.read_bytes()
-                conflict=ui.post(route,json={'token':first,'server_name':'tulpa_wechat'},headers=ui_headers)
-                assert conflict.status_code==409 and 'tulpa_wechat' in conflict.json()['detail']
+                conflict=ui.post(route,json={'token':first,'server_name':'tulpa_second'},headers=ui_headers)
+                assert conflict.status_code==409 and 'tulpa_second' in conflict.json()['detail']
                 for invalid in ('','with space','nested.name','x]\n[other',None,12,'a'*65):
                     assert ui.post(route,json={'token':first,'server_name':invalid},headers=ui_headers).status_code==409
                 assert ui.post(route,json={'token':first,'server_name':'valid','extra':True},headers=ui_headers).status_code==400

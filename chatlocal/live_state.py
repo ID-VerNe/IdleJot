@@ -14,15 +14,8 @@ def initialize(db):
         source TEXT NOT NULL,verification_state TEXT NOT NULL,
         observed_at REAL NOT NULL,ingested_at REAL NOT NULL,ui_visible_at REAL);
       CREATE TABLE IF NOT EXISTS deleted_message_keys(dedup_key TEXT PRIMARY KEY);
-      CREATE TABLE IF NOT EXISTS message_native_ids(
-        platform TEXT NOT NULL,conversation_id TEXT NOT NULL,locator TEXT NOT NULL,
-        message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-        PRIMARY KEY(platform,conversation_id,locator));
-      CREATE TABLE IF NOT EXISTS deleted_native_ids(
-        platform TEXT NOT NULL,conversation_id TEXT NOT NULL,locator TEXT NOT NULL,
-        PRIMARY KEY(platform,conversation_id,locator));
     ''')
-    for p in ('qq','wechat'): db.execute('INSERT OR IGNORE INTO live_state(platform) VALUES(?)',(p,))
+    db.execute("INSERT OR IGNORE INTO live_state(platform) VALUES('qq')")
 
 
 def commit(db, transition, added, last_id):

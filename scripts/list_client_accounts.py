@@ -7,22 +7,24 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 
+# The only platform this build reads (#350). The `wechat` branch used to import
+# `wechatauto` out of `tools/wechat-reader`, which is gone with the stripped reader.
+PLATFORMS = ('qq',)
+
 
 def discover(platform):
-    if platform == 'qq':
-        sys.path.insert(0, str(ROOT/'tools/qq-reader'))
-        from chatlog_keeper.qq_db import find_qq_data_root, find_qq_account_databases
-        root = find_qq_data_root()
-        return list(find_qq_account_databases(root)) if root else []
-    if platform == 'wechat':
-        sys.path.insert(0, str(ROOT/'tools/wechat-reader'))
-        from wechatauto.db import auto_detect_db_dir, _find_account_dirs
-        root = auto_detect_db_dir()
-        return [Path(p).name for p in _find_account_dirs(root)] if root else []
-    raise ValueError('Invalid platform')
+    if platform != 'qq':
+        raise ValueError('Invalid platform')
+    sys.path.insert(0, str(ROOT/'tools/qq-reader'))
+    from chatlog_keeper.qq_db import find_qq_data_root, find_qq_account_databases
+    root = find_qq_data_root()
+    return list(find_qq_account_databases(root)) if root else []
 
 
 if __name__ == '__main__':
+    if len(sys.argv) != 2 or sys.argv[1] not in PLATFORMS:
+        print(f'usage: {Path(__file__).name} <{"|".join(PLATFORMS)}>', file=sys.stderr)
+        raise SystemExit(2)
     with contextlib.redirect_stdout(sys.stderr):
         accounts = discover(sys.argv[1])
     print(json.dumps(accounts, ensure_ascii=False))

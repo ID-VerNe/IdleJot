@@ -73,7 +73,7 @@ def install_mcp_routes(app, store=None):
         local(request, True)
         from .mcp_qq_permissions import live_grant
         try:
-            if not isinstance(body.get('platforms'),list) or any(p not in ('qq','wechat') for p in body['platforms']):
+            if not isinstance(body.get('platforms'),list) or any(p!='qq' for p in body['platforms']):
                 raise ValueError('请选择允许访问的平台。')
             with store.connect() as db:
                 for platform in body.get('platforms',[]):
@@ -240,7 +240,7 @@ def install_mcp_routes(app, store=None):
     @app.get('/api/mcp/conversations')
     def conversations(request: Request, query: str='', offset: int=0, platform: str=''):
         local(request)
-        if len(query) > 100 or offset < 0 or platform not in ('', 'qq', 'wechat'):
+        if len(query) > 100 or offset < 0 or platform not in ('', 'qq'):
             raise HTTPException(400)
         with store.connect() as db:
             rows = [dict(r) for r in db.execute('''SELECT platform,conversation_id,max(conversation) name,count(*) count

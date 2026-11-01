@@ -9,9 +9,9 @@ import wave
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
-# tools/qq-reader is unused by locate_qq (pure stdlib), but keep it on the path
-# so locate_wechat's optional imports resolve if a future caller re-enables it.
-sys.path[:0]=[str(ROOT),str(ROOT/'tools/qq-reader'),str(ROOT/'tools/wechat-reader')]
+# locate_qq is pure stdlib, so neither reader tree is needed on the path. The
+# wechat entry point that used to need it is gone with the stripped reader (#350).
+sys.path[:0]=[str(ROOT)]
 from chatlocal.config import DATA,local_path
 
 def locate_qq(locator,source,maximum):
@@ -27,13 +27,6 @@ def locate_qq(locator,source,maximum):
         if locator.get('md5') and hashlib.md5(raw).hexdigest()!=locator['md5']:continue
         return raw,str(path)
     return None,None
-
-def locate_wechat(locator,source,maximum):
-    # Water-group slim: the water-group collector is QQ-only; locate_wechat depended
-    # on tools/wechat-reader + wechatauto + per-account media DB keys, none of which
-    # the slim build ships. Removed in Phase 2 §2.7. A wechat voice source will report
-    # missing instead of crashing the worker. Re-enable only if a wechat reader ships.
-    raise ValueError('微信语音读取不在水群精简版范围内；原消息保留。')
 
 def decode(raw,maximum_seconds):
     if raw.startswith(b'\x02#!SILK_V3') or raw.startswith(b'#!SILK_V3'):
@@ -62,7 +55,8 @@ def decode(raw,maximum_seconds):
 
 def run(request):
     source=request['source'];locator=json.loads(source['locator_json'])
-    raw,native=(locate_qq if source['platform']=='qq' else locate_wechat)(locator,source,request['max_bytes'])
+    if source['platform']!='qq':raise ValueError('语音不属于当前 QQ 账号。')
+    raw,native=locate_qq(locator,source,request['max_bytes'])
     if raw is None:return {'status':'missing'}
     if len(raw)>request['max_bytes']:raise ValueError('语音文件超过大小限制。')
     sha=hashlib.sha256(raw).hexdigest();root=local_path(request['cache']);root.mkdir(parents=True,exist_ok=True)
@@ -84,6 +78,6 @@ if __name__=='__main__':
         # Only our messages in Chinese are user-facing; third-party parser errors
         # can contain source paths. Never forward them.
         reason=str(exc)
-        result={'error':reason if reason.startswith(('语音','SILK 数据','当前','微信语音')) else '语音数据读取失败，可稍后重试。'}
+        result={'error':reason if reason.startswith(('语音','SILK 数据','当前')) else '语音数据读取失败，可稍后重试。'}
     except Exception:result={'error':'本地语音源暂不可读或读取器依赖缺失，可稍后重试。'}
     local_path(sys.argv[2]).write_text(json.dumps(result,ensure_ascii=False),'utf-8')

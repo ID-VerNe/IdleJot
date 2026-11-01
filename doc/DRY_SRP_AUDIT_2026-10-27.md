@@ -352,7 +352,7 @@ $ mcp_chat_dossier.py::query_group_notes: 75-82
 | `MemoryProfileMixin` 拆分（PF-3 收窄） | 597 span / 611 文件均在墙内，方法双向耦合紧（dossier+observe 调 `find_profile`/`_memory_view`/`_merge_memories`/`_upsert_group_memory`），拆付耦合税无体量收益；越 ADVISORY 带再单开 |
 | `scripts/` 残留 `sys.path.insert`（77 文件）/ `for x in CASES`（5 文件） | PE-1 划在范围外的特殊形态（`fixture_server` 包裹 / `(label,fn)` 元组收集 `FAILURES` / `(name,case)` 非 `@case`），逐文件核对过差异是故意的 |
 | `antigravity_dry_replay.py` 的 `ThreadingHTTPServer` + `def restrict` | WS/replay 形态特殊，是 `-19` DRY-1 收口后剩下的网络护栏持有者；迁移收益低于风险 |
-| 18 个 ADVISORY 带文件（700–1000 行） | 可见不致命，ADVISORY 的设计就是「visible, not fatal」；无一个越 1000 FAIL 线，`EXEMPTIONS` 为空。**计数按 `check_module_size.py` 实测**（issue #288）：上表说的是 19，`check_module_size.py` 当场只打 18 行 ADVISORY——`check_listener_rehang` / `check_dossier_cadence` / `check_gap_disclosure` 等拆包后，原单体文件已出带，行数口径也跟着变了 |
+| 18 个 ADVISORY 带文件（700–1000 行） | 可见不致命，ADVISORY 的设计就是「visible, not fatal」；无一个越 1000 FAIL 线，`EXEMPTIONS` 为空。**计数按 `check_module_size.py` 实测**（issue #288）：上表说的是 19，`check_module_size.py` 当场只打 18 行 ADVISORY——`check_listener_rehang` / `check_dossier_cadence` / `check_gap_disclosure` 等拆包后，原单体文件已出带，行数口径也跟着变了（#313 合入后复测为 **19**，见 §6.2 表下注） |
 
 ### 6.1 三个 advisory 带回读（issue #288，四文件结论 KEEP）
 
@@ -455,6 +455,81 @@ $ mcp_chat_dossier.py::query_group_notes: 75-82
    `:20-26` 的模块 docstring 明确写了「本文件只留传输与仲裁（前缀、冷却、去重、引用、
    凭证链路、发送），域知识一律在插件里（issue #4 PA–PC）」——**审计要给的那一刀已经
    在 #4 里切完了**，剩下的 884 行是宿主本身。
+
+### 6.2 其余 advisory 带回读（issue #320，2 SPLIT / 6 KEEP）
+
+#288 只写回了 `reply.py` / `dossier.py` / `commands.py` 三个。#320 把 `check_module_size.py`
+当场输出的**其余 15 条**再排一遍，挑出体量最大、当时一个都没读到底的那 8 个，
+逐个做 AST 顶层函数体量 + `文件:行号` 耦合清单。判据沿用 §6.1 的两条（seam 干净度 /
+门禁的 AST·模块级依赖），前置的红门禁 `check_mcp_chat_turns` 由 **#322** 修好后
+（PR #326，`7235a39`）才动基线。
+
+| 文件 | 行（code/注释/空） | 结论 | 依据 |
+|---|---|---|---|
+| `scripts/check_followup/__init__.py` | 932 → **799** | **SPLIT** | 搬走 #206 多群那族，见 §6.2.1 |
+| `scripts/check_mcp_chat_turns/__init__.py` | 964 → **926** | **SPLIT**（浅） | 搬走两族现场，见 §6.2.2 |
+| `water-group/daemon/qr_login.py` | 891（716/35/140） | KEEP | 44 个顶层函数 + 1 个 class，最大 `start_login` / `bind_uid` 各 37 行：一张「passport 双流 + DPAPI + 限流」的平铺动作表，按动词切出去后调用点仍全在本文件 |
+| `scripts/check_mcp_chat_enrichment.py` | 862（800/27/35） | KEEP | 10 函数 + 1 class，`main`（`533-859`，327 行）是唯一大块，但它是**一条线性 5 步流水线**（`wire_pages` → `wire_nested` → `nested_limits` → `wire_materials` → `concurrent_details`），每步已是独立函数；再套一层包正是 §6 上表「不能照抄结论」要防的 |
+| `scripts/check_group_memory.py` | 845（615/100/130） | KEEP | 17 个函数里 15 个 `test_*`，最大 `test_native_dossier_updates_and_consolidation` / `test_memory_cap_consistency` 各 105 行；无共享大块可提，拆开只是把 `test_*` 分到两个文件 |
+| `water-group/daemon/miyoushe.py` | 811（658/23/130） | KEEP | 42 个顶层函数 + 2 个 class，最大的类 `Client` 114 行、最大的函数 25 行：一个 API 客户端，每个端点一个薄函数，拆开只增一层 import |
+| `scripts/check_repeater/__init__.py` | 808（671/60/77） | KEEP | 已被 **#285** 按 `_fixture` 切过一刀（`906 → 808`），剩下 14 个函数里 12 个 `test_*`（最大 `test_frequency` 117 行）+ runner，无第二 seam |
+| `scripts/check_reply_send_failure/__init__.py` | 809（664/30/115） | KEEP | 41 个函数，最大的也只有 39 行（`提前解禁_禁言时刻在未来也必须复查`）：一整族「禁言文案」用例平铺，自成一个变更理由 |
+
+> 行数是 `check_module_size.py` 与 `(行, code/注释/空)` 实测口径（本轮当场复核），
+> 与 §6 上表「ADVISORY 带文件」的计数同源。#320 两个 SPLIT 落地后 `check_module_size.py`
+> 打 **19** 行 ADVISORY（#288 时是 18，其后 #313 的 `check_listener_rehang/budget.py`
+> 涨到 827 行又进带）——两个被拆的文件都还在 700–1000 带内，只是从带的高处往下降了一截，
+> 这正是本单「**不承诺**跨到 700 线以下」的原文口径。
+
+#### 6.2.1 `check_followup/__init__.py` SPLIT（PR #326）
+
+搬出去的是 #206 多群那族：它**不碰本进程的追问窗口状态**，而是另建临时库 + 另起子进程
+复现「一个会话只看一个群」，夹具名（`TMP` / `ROOT` / `scratch_dir` / `pin_state_env`）
+一律从 `._fixture` 取。留下的 23 个 `check_*` 共用同一个 runner 与同一套进程内窗口状态，
+没有第二个干净 seam——所以 `932 → 799`，不承诺进 700 带。
+
+- seam 干净度：**单向**。新模块 `scripts/check_followup/multigroup.py`（137 行）只
+  `from ._fixture import ...`，`__init__.py` 反向只 import 那一个函数；被搬走的那族不调
+  runner、不读 `main` 的窗口变量。
+- 验收三条全兑现：用例条数前后一致（`grep -c "  ok  "`）、拆后 `python -m scripts.check_followup`
+  的完整 stdout 与基线 `diff` 为空、`gates.json` 未动（入口名本来就是 `check_followup`）。
+
+#### 6.2.2 `check_mcp_chat_turns` SPLIT（浅拆一刀）
+
+原单体 `scripts/check_mcp_chat_turns.py` 964 行的唯一大块是 `main`（原 `381-961`，581 行），
+其余是 `wire` / `wire_waiting` 两个协程与本文件 20 余行 fixture 头。`main` 里
+**没有 plan 原文猜的 `after_wait` 符号**（那是猜测，原文件里不存在），真正的结构是
+`with TestClient(app) as ui:` 里一串平铺断言，共用 10 余个别名夹具
+（`call` / `stored` / `add` / `plan` / `send` / `key` / `receiver_status` / `sid`）。
+
+按「各自另开会话或另换实例、不读 `main` 游标与计划队列」切出两族：
+
+| 新模块 | 行 | 原位置 | 为什么是干净 seam |
+|---|---|---|---|
+| `scripts/check_mcp_chat_turns/dialogue_window.py` | 76 | `886-935`（`#217` 对话窗口跨 wait 与进程重启） | 自己开 `111:group:223` 的会话，只收 `call` / `tools` / `access` / `events` 四个夹具；`tools.chat` 是模块级属性，换实例改的就是 `main` 看到的那份状态 |
+| `scripts/check_mcp_chat_turns/stop_revoke.py` | 32 | `936-948`（stop / revoke 打断正在睡的发送尾巴） | `revoke` 那一轮另开会话（旧 `sid` 刚被停掉），`start()` 由调用点注入，同一个回调也负责把新 `sid` 写回 `main` |
+
+`ChatTurns.__init__`（`chatlocal/mcp_chat_turns.py:107`）用 `chat.access` 推
+`self.access`，所以两族收到的就是同一对夹具，**没有为拆而新增的反向依赖**。
+
+- 迁移形态：`runner` 留在 `scripts/check_mcp_chat_turns/__init__.py`，`__main__.py` 与
+  #283 / #285 / #247 先例逐字一致；`sys.path` 指到 `parent.parent`（`scripts/`）才能
+  import `check_fixture_support` / `fixture_server`。
+- 正文只改两处取名：`sid3=call('start_chat_session', ...)` → `sid3=ensure()`，
+  `sid=call('start_chat_session', ...)` → `sid=start()`（`start` 由 `main` 里的
+  `start_and_remember()` 提供，`nonlocal sid` 写回）。其余断言、`#` 注释一字未改。
+- **`results.append` 仍留在 `main`**，两族只做断言——这是保证 `checks` 数组顺序
+  byte-identical 的关键。
+- 验收三条全兑现：22 条 `checks` 拆前拆后**逐字符串相同且顺序一致**，`status` /
+  `original_persona_sha256` / `wire` / `mock_text_or_image_sends` / `mock_reactions` /
+  `external_connections` 六个字段相同（唯一差异是 `validation_cost` 的计时，
+  本来就是逐次浮动的）；`gates.json` 只把名字从 `check_mcp_chat_turns.py` 改成
+  `check_mcp_chat_turns`（与 #283 / #285 / #247 同形），`check_gate_manifest.py --write`
+  重写 AGENTS §5.1 生成段，`ci --shard mcp` 18 条全绿、`ci --shard static` 19 条全绿。
+
+**判据没有变**：`main` 里剩下的 500 余行是同一套夹具上的平铺断言，再切只能把参数表
+搬来搬去（`check_mcp_chat_enrichment.py` 的 KEEP 理由正是这条）。所以这一刀是「把最重的
+两块搬到有名字的模块里，让下次改动能局部验证」，**不是**「把它压进 700 带」。
 
 ---
 

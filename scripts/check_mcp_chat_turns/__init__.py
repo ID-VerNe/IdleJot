@@ -2,6 +2,15 @@
 
 Unlike adapter regression suites this exercises the mandatory plan gate, native
 adapters, durable queue, stop/revoke and service restart without a protocol seam.
+
+入口仍是本文件：`main()` 的断言顺序与 stdout 文本逐字未动。按 issue #320 §B
+搬出去的是两族自成一体的现场——它们各自另起会话 / 另换实例，不读 `main` 的
+游标与计划队列：
+  - `dialogue_window`：mention_only 对话窗口跨 wait 与进程重启（#217）；
+  - `stop_revoke`：停止 / 撤权打断正在睡的发送尾巴。
+两族只收 `main` 里现拼进 `ChatTurns` 的夹具对象（`call` / `tools` / `access` /
+`events`，`ChatTurns.__init__` 在 `chatlocal/mcp_chat_turns.py:107` 用它们推出
+`self.chat` 与 `self.access`），被留下的那半无需反向调它们。
 """
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -16,8 +25,7 @@ import threading
 import time
 from unittest.mock import patch
 
-sys.path.insert(0,str(Path(__file__).parent))
-sys.path.insert(0,str(Path(__file__).resolve().parent))
+sys.path.insert(0,str(Path(__file__).parent.parent))
 from check_fixture_support import isolated_env, network_guard, temp_dir
 from fixture_server import fixture_server
 from check_mcp_reactions import ReactionBot, Events, eventually, ROOT
@@ -33,6 +41,9 @@ from PIL import Image
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 import httpx
+
+from .dialogue_window import dialogue_window_survives_restart
+from .stop_revoke import stop_and_revoke_interrupt_sleeping_tail
 
 
 # The receiver answers source_unavailable while it re-establishes its WebSocket
@@ -883,68 +894,19 @@ def main():
                         tools.chat.recall(dict(self_id=111,group_id=222,message_id=message_id))
                         refused=send(withdrawn)
                         assert refused['error_code']=='target_expired' and 'updated_chat' not in refused,refused
-                        # issue #217：mention_only 的对话窗口要落库，跨 wait 调用与
-                        # 进程重启都存活；窗口关掉后的跳批只推游标，不许把没交付
-                        # 的行记成 delivered=1。以前窗口只在 MCPChat 的内存字典里，
-                        # 换一个实例（服务重启 / collector 重连）就全丢——单次 wait
-                        # 的用例永远看不出这件事。
-                        sid3=call('start_chat_session',conversation_id='111:group:223',persona='fixture',
-                                  idempotency_key=key())['session']['id']
-                        def stored3(mid):
-                            with access.connect() as db:
-                                r=db.execute('SELECT id,delivered FROM chat_inbox WHERE session_id=? AND message_id=?',
-                                             (sid3,str(mid))).fetchone()
-                            return (r[0],r[1]) if r else None
-                        def say3(text,mid,at_me=False,self_sent=False):
-                            uid=111 if self_sent else 444
-                            segs=([dict(type='at',data={'qq':'111'})] if at_me else [])+[dict(type='text',data={'text':text})]
-                            event=dict(post_type='message',message_type='group',self_id=111,group_id=223,message_id=mid,
-                                       message_seq=abs(mid),user_id=uid,sender={'user_id':uid},time=int(time.time()),message=segs)
-                            ReactionBot.history[str(mid)]=deepcopy(event);events.send(event)
-                            eventually(lambda:stored3(mid))
-                            return stored3(mid)[0]
-                        at_id=say3('有人吗',-901,at_me=True)
-                        first=call('wait_chat_messages',session_id=sid3,timeout_seconds=1,quiet_seconds=0,mention_only=True)
-                        assert [m['id'] for m in first['messages']]==[at_id],first
-                        # 服务重启：换一个 MCPChat 实例，内存态到这里全丢
-                        old_chat=tools.chat;old_chat.receiver.stop()
-                        tools.chat=MCPChat(access,tools.actions)
-                        tools.chat.receiver.start()
-                        eventually(lambda:tools.chat.receiver.status()['state']=='connected')
-                        chatter=[say3('哈哈哈哈',-902),say3('确实',-903)]
-                        second=call('wait_chat_messages',session_id=sid3,timeout_seconds=1,quiet_seconds=0,mention_only=True,
-                                    acknowledge_through_id=first['read_through_id'])
-                        assert [m['id'] for m in second['messages']]==chatter,(
-                            'issue #217：服务重启后，回复之后的续接闲聊没有投递',second)
-                        # 窗口关掉：整批跳过，游标推进但 delivered 保持 0
-                        with access.connect() as db:
-                            db.execute('UPDATE chat_sessions SET dialogue_until=0,dialogue_turns=0 WHERE id=?',(sid3,))
-                        skipped=say3('后来的闲聊',-904)
-                        idle=call('wait_chat_messages',session_id=sid3,timeout_seconds=1,quiet_seconds=0,mention_only=True,
-                                  acknowledge_through_id=second['read_through_id'])
-                        assert not idle['messages'],idle
-                        assert tools.chat.row(sid3)['cursor']>=skipped,'跳批没有推进游标，下一轮会重复看见'
-                        assert stored3(-904)[1]==0,'issue #217：跳批把没交付的行记成了 delivered=1'
-                        # 本机发出的回复要重新起算窗口：Agent 想得比 followup_seconds 久
-                        # 时，回复之后那几句仍然接得上
-                        with access.connect() as db:
-                            db.execute('UPDATE chat_sessions SET dialogue_until=0,dialogue_turns=0 WHERE id=?',(sid3,))
-                        say3('我在',-905,self_sent=True)
-                        call('wait_chat_messages',session_id=sid3,timeout_seconds=1,quiet_seconds=0,mention_only=True)
-                        assert tools.chat.row(sid3)['dialogue_until']>time.time(),'issue #217：回复没有重开对话窗口'
+                        # issue #320 §B：下面两族搬到 scripts/check_mcp_chat_turns/，
+                        # 断言与顺序原样；这里只负责把夹具交给它们。
+                        sid3=dialogue_window_survives_restart(call,tools,access,events,
+                            lambda:call('start_chat_session',conversation_id='111:group:223',persona='fixture',
+                                idempotency_key=key())['session']['id'])
                         results.append('mention_only dialogue window survives a process restart, skip keeps delivered=0, own reply re-anchors it')
-                        # Stop/revoke can run while queue sleeps; they cancel remaining work.
-                        for mode in ('stop','revoke'):
-                            if mode=='revoke':
-                                sid=call('start_chat_session',conversation_id='111:group:222',persona_preset='little_whale',idempotency_key=key())['session']['id']
-                            p=plan();prior=len(ReactionBot.sent)
-                            with ThreadPoolExecutor() as pool:
-                                future=pool.submit(send,p,[dict(kind='text',text='已发'),dict(kind='text',text='未发')])
-                                eventually(lambda:len(ReactionBot.sent)==prior+1)
-                                if mode=='stop':call('stop_chat_session',session_id=sid)
-                                else:access.revoke(g['id'])
-                                out=future.result(15)
-                            assert len(ReactionBot.sent)==prior+1 and out['bubbles'][1]['state']=='CANCELLED',out
+                        def start_and_remember():
+                            # revoke 那轮要换新会话（旧 sid 刚被停掉），新 sid 得写回
+                            # 本作用域的 sid——搬出去后只剩这一处回写，断言一字未改。
+                            nonlocal sid
+                            sid=call('start_chat_session',conversation_id='111:group:222',persona_preset='little_whale',idempotency_key=key())['session']['id']
+                            return sid
+                        stop_and_revoke_interrupt_sleeping_tail(call,plan,send,start_and_remember,access,g,sid)
                         results.append('stop and revoke interrupt sleeping tail; old and v2 persona snapshots selectable')
                         assert hashlib.sha256(whale.read_bytes()).hexdigest()==before
                         # 接收线程要在 patch.dict 退出前停掉：它跑在

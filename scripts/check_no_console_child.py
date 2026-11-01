@@ -9,13 +9,16 @@ the only durable defence is a static rule plus one place that spells the flag.
 This gate asserts six things:
 
 1. Every `subprocess.run/Popen/call/check_output/check_call` in the runtime tree
-   (`water-group/`, its `water_group/` bridge, `chatlocal/`, `server_wg.py`)
-   names a window-suppressing flag in `creationflags` -- `NO_WINDOW` or
-   `CREATE_NO_WINDOW`, not merely "some integer". `creationflags=0` and
-   `creationflags=CREATE_NEW_PROCESS_GROUP` fail: neither touches the console.
-   Spawn through `winconsole.run_hidden` / `popen_hidden` (daemons) or
-   `platform_process.run_hidden` / `owned_popen` (backend) and it is satisfied
-   by construction.
+   (`water-group/`, its `water_group/` bridge, `chatlocal/`, `server_wg.py`, and
+   the hand-picked `RUNTIME_WORKERS` under `scripts/` that the backend starts as
+   child processes -- issue #319) names a window-suppressing flag in
+   `creationflags` -- `NO_WINDOW` or `CREATE_NO_WINDOW`, not merely "some
+   integer". `creationflags=0` and `creationflags=CREATE_NEW_PROCESS_GROUP` fail:
+   neither touches the console. Spawn through `winconsole.run_hidden` /
+   `popen_hidden` (daemons) or `platform_process.run_hidden` / `owned_popen`
+   (backend) and it is satisfied by construction. A `subprocess.run(...)` written
+   inside a docstring is documentation, not a spawn, and is neither `flagged` nor
+   counted -- the self-test pins that.
 2. A POSIX-only branch may opt out with `# console-gate: posix-only` on the call
    or on the line above it. Exemptions are checked for staleness: a marker that
    no longer sits on an un-flagged spawn fails, so dead exemptions cannot pile up.
@@ -53,11 +56,29 @@ ROOT = Path(__file__).resolve().parent.parent
 
 SPAWNERS = frozenset({'run', 'Popen', 'call', 'check_output', 'check_call'})
 
-# Runtime spawn sites only. scripts/ is excluded on purpose: those are CI and
-# manual diagnostics, and a console window during a manual run is not a bug.
+# Runtime spawn sites only. scripts/ is excluded on purpose: the overwhelming
+# majority of it is CI and manual diagnostics, and a console window during a
+# manual run is not a bug.
 SCAN_DIRS = ('water-group', 'water_group', 'chatlocal')
 SCAN_FILES = ('server_wg.py',)
 SUFFIXES = frozenset({'.py', '.pyw'})
+
+# ...with one exception the directory rule gets wrong (issue #319): a handful of
+# scripts/ files are started *by the backend at runtime*, so they are runtime
+# code that merely lives outside the packages. Scanning the whole directory
+# would fire on dozens of deliberate diagnostic spawns; scanning none of it
+# leaves these three unguarded for the day one of them shells out to ffmpeg.
+RUNTIME_WORKERS = frozenset({
+    'scripts/parse_artifact.py',       # chatlocal/artifacts.py:294
+    'scripts/list_client_accounts.py',  # chatlocal/client_accounts.py:39
+    'scripts/voice_source.py',          # chatlocal/voice.py:189
+})
+
+# Diagnostic/manual scripts that spawn on purpose and are *not* runtime code.
+# Empty today (the whitelist above is precise enough); the table exists so that
+# widening the scan later has to name each deliberate exception instead of
+# silently losing them. Stale entries fail, so it cannot rot.
+DIAGNOSTIC_SPAWN_OWNERS = frozenset()
 
 # The only two modules allowed to name the flag; everything else goes through them.
 FLAG_OWNERS = frozenset({'water-group/daemon/winconsole.py',
@@ -80,7 +101,7 @@ def iter_sources():
         for path in sorted(base.rglob('*')):
             if path.suffix in SUFFIXES and '__pycache__' not in path.parts:
                 yield path
-    for name in SCAN_FILES:
+    for name in sorted(frozenset(SCAN_FILES) | RUNTIME_WORKERS):
         path = ROOT / name
         if path.exists():
             yield path
@@ -92,6 +113,11 @@ def spawn_calls(tree):
     Aliases are resolved from the file's own imports, so `import subprocess as sp`
     and `from subprocess import run` are caught too -- an alias is a cheap way to
     slip past a regex gate.
+
+    Matching a `Call` is what keeps docstrings out: a docstring is a string
+    `Constant`, so a `subprocess.run(...)` written inside one to explain the rule
+    is never yielded and never counted (issue #319 checked this and found the
+    existing behaviour already correct; the self-test now pins it).
     """
     modules = set()
     bare = set()
@@ -171,6 +197,42 @@ def detached_uses(tree, filename):
         elif isinstance(node, ast.Name) and 'DETACHED' in node.id:
             lines.append(node.lineno)
     return sorted(set(lines))
+
+
+def scan_scope():
+    """(missing_workers, stale_exemptions, surprising_exemptions).
+
+    Scope is the only thing this gate can silently get wrong (issue #319: the
+    check was right, the file list was not), so the scope itself is asserted:
+
+    missing_workers       -- a RUNTIME_WORKERS entry that no longer exists, i.e. a
+                             runtime path that is silently unscanned
+    stale_exemptions      -- a DIAGNOSTIC_SPAWN_OWNERS entry that is gone or has
+                             no spawn left; a dead exemption narrows the scan
+                             invisibly, exactly like check_path_hygiene.py's
+    surprising_exemptions -- an exemption for a file that is also in the scanned
+                             runtime set; the two lists contradict each other
+    """
+    scanned = {p.relative_to(ROOT).as_posix() for p in iter_sources()}
+    missing = sorted(name for name in RUNTIME_WORKERS if not (ROOT / name).exists())
+    stale = []
+    surprising = []
+    for name in sorted(DIAGNOSTIC_SPAWN_OWNERS):
+        path = ROOT / name
+        if not path.exists():
+            stale.append(name)
+            continue
+        if name in scanned:
+            surprising.append(name)
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding='utf-8'))
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            stale.append(name)
+            continue
+        if not any(True for _ in spawn_calls(tree)):
+            stale.append(name)
+    return missing, stale, surprising
 
 
 def marker_positions(lines, start, end):
@@ -455,6 +517,41 @@ def self_test():
     ):
         if len(flag_spellings(ast.parse(text))) != expected:
             raise AssertionError(f'检测器自测失败：{why} 的判定错了')
+    # 回归：docstring 是字符串 Constant，不该被当成 spawn，也不该虚增 flagged
+    # 计数（issue #319 实测既有行为已正确，这里把它钉住，防止将来改成直取 Call）
+    for text, why in (
+            ('import subprocess\n\ndef f():\n    """示例：\n    subprocess.run(["x"])\n    """\n',
+             '函数 docstring 里的示例'),
+            ('import subprocess\nclass C:\n    """subprocess.Popen(["x"])"""\n',
+             '类 docstring 里的示例'),
+    ):
+        bad, stale, flagged_n = scan_source(text)
+        if (bad, stale, flagged_n) != ([], [], 0):
+            raise AssertionError(
+                f'检测器自测失败（{why}）：docstring 不是调用，不该被扫成 spawn')
+    # issue #319 的原始写法：vendored 树里 ffmpeg 的那次调用，判据必须抓得住
+    media_snippet = (
+        'import subprocess\n'
+        'def _wxgf_to_jpg(self, data):\n'
+        '    exe = self._ffmpeg_exe()\n'
+        '    try:\n'
+        '        r = subprocess.run(\n'
+        '            [exe, "-y", "-v", "error", "-i", src, "-frames:v", "1", dst],\n'
+        '            capture_output=True, timeout=30,\n'
+        '        )\n'
+        '    except Exception:\n'
+        '        return None\n')
+    bad, _, _ = scan_source(media_snippet)
+    if len(bad) != 1:
+        raise AssertionError('检测器自测失败：tools/wechatauto/media.py 的原始写法必须被抓'
+                             '（issue #319）')
+    # 范围自检：RUNTIME_WORKERS 里每个文件都必须真的进扫描集，改名/删除即红
+    # （issue #319 的病根就在这里：判据没问题，是文件没进范围）
+    scanned = {p.relative_to(ROOT).as_posix() for p in iter_sources()}
+    absent = sorted(f'运行时 worker 不在扫描范围内：{name}'
+                    for name in RUNTIME_WORKERS if name not in scanned)
+    if absent:
+        raise AssertionError('检测器自测失败：\n  ' + '\n  '.join(absent))
     return True
 
 
@@ -499,6 +596,14 @@ def main():
     for rel, lineno, line in scan_numeric_flags():
         failures.append(f'0x08000000 就是 CREATE_NO_WINDOW，请改用 helper 的常量：'
                         f'  {rel}:{lineno}  {line}')
+
+    missing, stale_scope, surprising = scan_scope()
+    for name in missing:
+        failures.append(f'RUNTIME_WORKERS 登记的运行时 worker 不存在了（扫描范围已经漏了它）：{name}')
+    for name in stale_scope:
+        failures.append(f'DIAGNOSTIC_SPAWN_OWNERS 的豁免已经无效（文件不存在或不再 spawn），请删掉：{name}')
+    for name in surprising:
+        failures.append(f'{name} 同时在 RUNTIME_WORKERS 的扫描范围与 DIAGNOSTIC_SPAWN_OWNERS 里，二者矛盾')
 
     failures.extend(check_helpers())
     failures.extend(check_passthrough_visible())

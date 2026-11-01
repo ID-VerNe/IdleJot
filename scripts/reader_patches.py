@@ -143,6 +143,30 @@ def patch_wechat_db(data):
     return notice+data[:start]+discovery+data[end:]
 
 
+def patch_wechat_media(data):
+    """Keep ffmpeg from flashing a console window when transcoding wxgf (issue #323).
+
+    Vendored code cannot import winconsole/platform_process, so the flag is spelled
+    inline -- the same shape db.py already uses (db.py:1062, db.py:1287). Unlike
+    patch_wechat_db this one is idempotent: the installer may be re-run against an
+    already-patched tree, and a marker in the bytes is what makes that safe.
+    """
+    marker = b'# Tulpa console-window flag v1 (scripts/reader_patches.py).\n'
+    if marker in data:
+        if data.count(marker) != 1:
+            raise ValueError('Duplicate WeChat media adaptation')
+        return data
+    before = b'capture_output=True, timeout=30,\n'
+    # The downloaded upstream bytes have LF line endings.
+    if data.count(before) != 1:
+        raise ValueError('WeChat wxgf ffmpeg call changed; review console-window flag')
+    indent = data[:data.index(before)].rsplit(b'\n', 1)[-1]
+    if indent.strip():
+        raise ValueError('WeChat wxgf ffmpeg call changed; review console-window flag')
+    after = before + indent + b'creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),\n'
+    return marker + data.replace(before, after)
+
+
 def patch_qq_helper(data):
     # One pure window function used by our historical export; do not permit
     # WITH/RECURSIVE, arbitrary functions/tables, writes or extension loading.

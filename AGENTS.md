@@ -26,6 +26,7 @@
 .venv/Scripts/python.exe water-group/daemon/reply.py q<n> "<正文>"     # 首参也可以写 q<n>：会话库 rowid（追问行/--context 的写法，issue #203）
 .venv/Scripts/python.exe water-group/daemon/reply.py <id> "<正文>" --at <花名>  # 正文前 @ 人，可重复；真 @ 不是正文里的文本
 .venv/Scripts/python.exe water-group/daemon/reply.py --context 30 --around <id> # 只看这条之前的部分
+.venv/Scripts/python.exe water-group/daemon/reply.py --history      # 从我上次发言到现在群里说了什么（issue #130），表头说清窗口边界
 .venv/Scripts/python.exe water-group/daemon/reply.py --who <花名>     # 解析花名到 QQ 与归属群并给出画像卡，不发送
 .venv/Scripts/python.exe water-group/daemon/reply.py <id> "看这张" --image <图片路径>  # 发本地图片，可重复；每张独占一条气泡排在文字之后
 .venv/Scripts/python.exe water-group/daemon/look.py --event <id>       # 唤醒行图片标「可补读」时先落盘再读；--pick 看候选、--recent 看最近
@@ -528,31 +529,32 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 71 | `reply` | `check_repeater` | 复读/接龙：三人不同 QQ 才跟、接龙四种格式跟下一号、指令/敏感词/本机名字/外链/超长/带 @ 带图一律不跟、一波只尝试一次且冷却跨重启（#155）；「本机名字」闸门读配置而非夹具字面值（换名照样挡、空表照跟两条对照），夹具里不留像真实昵称的常量（#254）。#285：单文件 906 行 advisory 拆成 `scripts/check_repeater/` 包（_fixture），入口名不变、对 gates.json 与 CI 透明 |
 | 72 | `reply` | `check_pending_reply.py` | 待回时效：超时唤醒不再算待回 |
 | 73 | `reply` | `check_reply_context.py` | reply.py --context 回之前看得到群聊上下文 |
-| 74 | `reply` | `check_event_ref.py` | 事件 id 只有一个权威解析入口（#216）：字段名兼容（onebot_message_id/message_id）、列兜底（chat_sessions.conversation_id / chat_inbox.message_id）、来源顺序 wg_events 优先；两种「查不到」分开说；--context 的行能被 reply.py 解析到本群且自带 src=chat_inbox；批量读点（followup.since / wg_context.recent_chatter / wg_gap._local_state）与单条解析同一口径——payload 缺键时回查会话行、非对象 payload 不拖垮整批（#219） |
-| 75 | `reply` | `check_id_contract.py` | 输出记号 ↔ 解析写法的往返（#204）：行首记号原样抄回 parse() 必须认且归对套（id=7 → 事件流，id=q7 / qid=7 → 会话库），拒绝文案 HINT 列的写法逐个 parse 得过且 reply.py 复用同一份，撞号夹具下 id=7 与 id=q7 各回各的消息，watch 两种行 / --list / 追问状态行的行首形态与解析口径对得上；id=- / Q7 等仍拒，parse 退化成一律事件流时用例必须翻转 |
-| 76 | `reply` | `check_bubble_cap.py` | 单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131） |
-| 77 | `reply` | `check_reply_quote.py` | OneBot mention 与引用预检 |
-| 78 | `reply` | `check_reply_send_failure` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）；禁言到点必须复查，过期预测不许继续当此刻事实（#145） |
-| 79 | `reply` | `check_unmute_probe.py` | 禁言解禁要叫醒值守的监听：解禁瞬时 WAKE、仍禁言/探测失败/全员禁言静默且不冒充解禁、节流两档、只读入口口径不变、listen 转述完整（#192）；禁言期间不扫追问窗口、窗口原封不动、解禁与无账本两组对照照常 [追问] 唤醒（#197） |
-| 80 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
-| 81 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
-| 82 | `reply` | `check_video_visibility.py` | 视频段标记可执行：唤醒行 / reply.py --list / --show / --context 与追问行四处都带 video.py 命令且记号与行首一致（q<n> 就是 q<n>）、无地址与文件段误判都会说明、q<n> 读会话库而裸数字不猜库、重签按名字匹配不拿别的视频顶替、daemon 下载判据与服务端同值；抽帧在缺 ffmpeg / 时长未知 / 短时长/失败时都说实话且产物进缓存预算（#200） |
-| 83 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、四种格式都真能发、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度（超了拒、额度内照发）、不回退计划通道、发图也记账（#128） |
-| 84 | `reply` | `check_reply_also.py` | --also 连发不遮蔽外层事件 ref，--also 存在不崩、两条都进账本（#302） |
-| 85 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
-| 86 | `reply` | `check_wake_dossier.py` | 沉淀的群友画像必须到达唤醒行 / --list / --context（不是只挂在 MCP 的 chat_guidance 里）：命中才附、不串到别人身上、每人一行有硬顶且不挤正文额度、群级术语一次一块不跨群、引擎坏了照常唤醒（#163） |
-| 87 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
-| 88 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
-| 89 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
-| 90 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
-| 91 | `reply` | `check_sixty` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
-| 92 | `reply` | `check_busboss.py` | 车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103） |
-| 93 | `reply` | `check_bilibili_subtitle.py` | B 站字幕（#339）：四类引用（短链 / 站内视频页 / 裸 BV / av）解析出 bvid 与 p=、多 P 取对应 cid 并在正文说出第几 P、四种「没有」各说各的（没链接 / 链接打不开 / 要登录 / 接口不可用）且两两不同、短链只跟一跳且 Location 与 subtitle_url 都过 host 白名单（站外 302 不做第二跳且与「没字幕」同口径）、成功进缓存而失败不进、免凭证声明真的过掉宿主要绑定的那道闸（Command.needs_credential 落到 handler.need_ck）、默认关闭时不在 #帮助也不可用 |
-| 94 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164）；id 撞号分节：事件流 id 与会话库 rowid 同号时 q&lt;n&gt; 只落到本群那条、裸 id 回库兜底要打出源说明（#203） |
-| 95 | `reply` | `check_trigger_mode.py` | 按群选择 natural/mention_only 触发模式：collector 请求值按 trigger_mode 取（不再硬编码 True）、natural 群普通消息 wake_reason 放行、@/关键词/is_self/指令早退不破坏、两群不同配置按群生效（#188） |
-| 96 | `reply` | `check_wake_audit.py` | 唤醒账本 / 追问攒批 / 监听去抖（#144）：@ 与关键词按 wake_reason 分来源落账且关键词明细不落盘（字段白名单，不是查词）、追问唤醒来自 chat_inbox 也记一行且一批只记一行 batch=条数、解禁唤醒 batch=1、群号只留 12 位哈希、坏行跳过好行照读、写失败静默返回 None 不拖垮真实唤醒、--status 的「唤醒」行把「账本还没开始记」/「过去 24h 无唤醒」/按来源计数三种说法分开；追问攒批未安静够时不唤醒且不推进 consume 游标（顺序不能反）、安静够后一批一次唤醒、quiet_seconds=0 退回改前行为、参数开窗时定死；settle 把窗口内新到的并成一批、后段新到的把截止再推一个窗口（不推后必红）、从不突破等待预算（预算耗尽原地返回一秒不睡）、一直有新唤醒时不超过 DEBOUNCE_CAP 倍（deadline 留 20 个窗口，只断上限生效）、贴着 deadline 时推后撞不到 deadline（deadline 只留 2.5 个窗口，不夹取会挂死）、静默窗口不自动撑到上限、重读失败不吞唤醒、--debounce 0 不额外等待 |
+| 74 | `reply` | `check_reply_history.py` | reply.py --history 从我上次发言到现在（#130）：边界取批内**最后一条**本机发言且打印边界之后全部行、窗口里没有本机发言时全量打印并说明、--sender 把边界换成别人且按 QQ（payload.sender_id）认而不按显示名（把本机显示名改成别人的名字后仍落到别人的那条）、--since/--until/--before 收窄窗口、--until 与 --before 同时给时取更早的并说明、--limit 真砍过时才说「边界之后共 N 条只打了最近 M 条」（窗口比 limit 小是常态、不许照搬 --context 的读侧截断披露）、dropped_through 只报原值且不与「边界」撞词头、空窗口说清楚原因；parse_time 返回毫秒、不带日期按最近一次解释并说出、认不出就报错 |
+| 75 | `reply` | `check_event_ref.py` | 事件 id 只有一个权威解析入口（#216）：字段名兼容（onebot_message_id/message_id）、列兜底（chat_sessions.conversation_id / chat_inbox.message_id）、来源顺序 wg_events 优先；两种「查不到」分开说；--context 的行能被 reply.py 解析到本群且自带 src=chat_inbox；批量读点（followup.since / wg_context.recent_chatter / wg_gap._local_state）与单条解析同一口径——payload 缺键时回查会话行、非对象 payload 不拖垮整批（#219） |
+| 76 | `reply` | `check_id_contract.py` | 输出记号 ↔ 解析写法的往返（#204）：行首记号原样抄回 parse() 必须认且归对套（id=7 → 事件流，id=q7 / qid=7 → 会话库），拒绝文案 HINT 列的写法逐个 parse 得过且 reply.py 复用同一份，撞号夹具下 id=7 与 id=q7 各回各的消息，watch 两种行 / --list / 追问状态行的行首形态与解析口径对得上；id=- / Q7 等仍拒，parse 退化成一律事件流时用例必须翻转 |
+| 77 | `reply` | `check_bubble_cap.py` | 单次回复气泡上限只有一个数、超限有完整清单、计划通道提前拒绝（#131） |
+| 78 | `reply` | `check_reply_quote.py` | OneBot mention 与引用预检 |
+| 79 | `reply` | `check_reply_send_failure` | 发送失败要说真实 retcode 与禁言解禁时刻，不许再报成「@ 的锅」（#132）；禁言到点必须复查，过期预测不许继续当此刻事实（#145） |
+| 80 | `reply` | `check_unmute_probe.py` | 禁言解禁要叫醒值守的监听：解禁瞬时 WAKE、仍禁言/探测失败/全员禁言静默且不冒充解禁、节流两档、只读入口口径不变、listen 转述完整（#192）；禁言期间不扫追问窗口、窗口原封不动、解禁与无账本两组对照照常 [追问] 唤醒（#197） |
+| 81 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
+| 82 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
+| 83 | `reply` | `check_video_visibility.py` | 视频段标记可执行：唤醒行 / reply.py --list / --show / --context 与追问行四处都带 video.py 命令且记号与行首一致（q<n> 就是 q<n>）、无地址与文件段误判都会说明、q<n> 读会话库而裸数字不猜库、重签按名字匹配不拿别的视频顶替、daemon 下载判据与服务端同值；抽帧在缺 ffmpeg / 时长未知 / 短时长/失败时都说实话且产物进缓存预算（#200） |
+| 84 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、四种格式都真能发、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度（超了拒、额度内照发）、不回退计划通道、发图也记账（#128） |
+| 85 | `reply` | `check_reply_also.py` | --also 连发不遮蔽外层事件 ref，--also 存在不崩、两条都进账本（#302） |
+| 86 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
+| 87 | `reply` | `check_wake_dossier.py` | 沉淀的群友画像必须到达唤醒行 / --list / --context（不是只挂在 MCP 的 chat_guidance 里）：命中才附、不串到别人身上、每人一行有硬顶且不挤正文额度、群级术语一次一块不跨群、引擎坏了照常唤醒（#163） |
+| 88 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
+| 89 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
+| 90 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
+| 91 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
+| 92 | `reply` | `check_sixty` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
+| 93 | `reply` | `check_busboss.py` | 车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103） |
+| 94 | `reply` | `check_bilibili_subtitle.py` | B 站字幕（#339）：四类引用（短链 / 站内视频页 / 裸 BV / av）解析出 bvid 与 p=、多 P 取对应 cid 并在正文说出第几 P、四种「没有」各说各的（没链接 / 链接打不开 / 要登录 / 接口不可用）且两两不同、短链只跟一跳且 Location 与 subtitle_url 都过 host 白名单（站外 302 不做第二跳且与「没字幕」同口径）、成功进缓存而失败不进、免凭证声明真的过掉宿主要绑定的那道闸（Command.needs_credential 落到 handler.need_ck）、默认关闭时不在 #帮助也不可用 |
+| 95 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164）；id 撞号分节：事件流 id 与会话库 rowid 同号时 q&lt;n&gt; 只落到本群那条、裸 id 回库兜底要打出源说明（#203） |
+| 96 | `reply` | `check_trigger_mode.py` | 按群选择 natural/mention_only 触发模式：collector 请求值按 trigger_mode 取（不再硬编码 True）、natural 群普通消息 wake_reason 放行、@/关键词/is_self/指令早退不破坏、两群不同配置按群生效（#188） |
+| 97 | `reply` | `check_wake_audit.py` | 唤醒账本 / 追问攒批 / 监听去抖（#144）：@ 与关键词按 wake_reason 分来源落账且关键词明细不落盘（字段白名单，不是查词）、追问唤醒来自 chat_inbox 也记一行且一批只记一行 batch=条数、解禁唤醒 batch=1、群号只留 12 位哈希、坏行跳过好行照读、写失败静默返回 None 不拖垮真实唤醒、--status 的「唤醒」行把「账本还没开始记」/「过去 24h 无唤醒」/按来源计数三种说法分开；追问攒批未安静够时不唤醒且不推进 consume 游标（顺序不能反）、安静够后一批一次唤醒、quiet_seconds=0 退回改前行为、参数开窗时定死；settle 把窗口内新到的并成一批、后段新到的把截止再推一个窗口（不推后必红）、从不突破等待预算（预算耗尽原地返回一秒不睡）、一直有新唤醒时不超过 DEBOUNCE_CAP 倍（deadline 留 20 个窗口，只断上限生效）、贴着 deadline 时推后撞不到 deadline（deadline 只留 2.5 个窗口，不夹取会挂死）、静默窗口不自动撑到上限、重读失败不吞唤醒、--debounce 0 不额外等待 |
 
-共 96 个 CI 门禁，分 5 个分片（`static` 20、`runtime` 15、`mcp` 18、`storage` 11、`reply` 32）；`manual` 16、`stale` 0、`dead` 0、`support` 3 见 `scripts/gates.json` 的对应档位（理由写在那里）。
+共 97 个 CI 门禁，分 5 个分片（`static` 20、`runtime` 15、`mcp` 18、`storage` 11、`reply` 33）；`manual` 16、`stale` 0、`dead` 0、`support` 3 见 `scripts/gates.json` 的对应档位（理由写在那里）。
 <!-- gates:ci:end -->
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

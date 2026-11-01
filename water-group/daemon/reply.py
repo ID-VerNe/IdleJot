@@ -59,9 +59,10 @@ import mcp_client  # noqa: E402
 import plugins  # noqa: E402  (事件型能力派发口：追问窗口，issue #4 PD2a)
 import wg_bubbles  # noqa: E402  (气泡上限与拆句的唯一出口，issue #131)
 import wg_budget  # noqa: E402  (等待预算的唯一出口，issue #79/#83)
-# --context 的读链（会话 id / 闲聊 / 上下文行）已拆到 wg_context（issue #163）：
-# 本文件撞了 1000 行红线。这里再导出，门禁与 `--context` 入口照旧按 reply.* 调。
-from wg_context import recent_chatter, show_context  # noqa: E402,F401
+# --context / --history 的读链已拆到 wg_context（issue #163/#130，本文件撞 1000 行红线）。
+import wg_context  # noqa: E402
+from wg_context import (CONTEXT_SCAN, latest_group_id, read_events,  # noqa: E402,F401
+                        recent_chatter, show_context, show_history)
 import wg_dossiers  # noqa: E402  (群友画像 / 群级术语，issue #163)
 import wg_gap  # noqa: E402  (停机窗口缺口账本，issue #114)
 import winconsole  # noqa: E402
@@ -81,7 +82,6 @@ from wg_paths import state_dir
 STATE = state_dir()
 SID_FILE = STATE / "wg_session.txt"
 STATE_FILE = STATE / "wg_state.json"
-EVENTS = STATE / "wg_events.jsonl"
 REPLIED = STATE / "wg_replied.jsonl"
 # 会话库的只读路径在 wg_context 里（`--context` 与 `--show` 的读链都归它），
 # 这里不再留一份同义常量：两份路径会各自漂移（issue #163 拆分时清掉）。
@@ -114,21 +114,6 @@ def batch_id():
     except (OSError, ValueError):
         return ""
     return (data.get("input_batch") or {}).get("id") or ""
-
-
-def read_events():
-    rows = []
-    try:
-        for line in EVENTS.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line:
-                try:
-                    rows.append(json.loads(line))
-                except ValueError:
-                    continue
-    except OSError:
-        pass
-    return rows
 
 
 def record(event_ids, text):
@@ -467,16 +452,6 @@ def onebot_send_bubbles(group_id, bubble_segments, message_id=None, failure=None
     return len(bubble_segments)
 
 
-def latest_group_id():
-    for row in reversed(read_events()):
-        gid = wg_event_ref.group_of(row.get("conversation_id"))
-        if gid:
-            return gid
-    # 一条唤醒都没有的时候（追问窗口里的闲聊不会进 wg_events），退回全量库问。
-    # 同上：DB 兜底不过三态开关（issue #4 PD2a）。
-    return plugins.emit("active_group") or ""
-
-
 def unanswered(answered):
     """Every wake still owed a reply, minus the ones this reply already covers.
 
@@ -778,6 +753,21 @@ def _build_parser():
     parser.add_argument("--around", metavar="ID",
                         help="配合 --context：只看这条之前的部分（编号同上下文行；"
                              "上下文行是会话库的 q<n>，写成 q<n> 或 <n> 都行）")
+    parser.add_argument("--history", action="store_true",
+                        help="只读：从我上次发言到现在，群里都说了什么（含闲聊）；"
+                             "边界行与截断情况都会打在表头")
+    parser.add_argument("--sender", metavar="花名|QQ",
+                        help="配合 --history：把「上次发言」的边界换成这个人（不筛选行，"
+                             "打出来的仍是所有人说的话）")
+    parser.add_argument("--since", metavar="时间",
+                        help="配合 --history：下界，HH:MM[:SS] 或 YYYY-MM-DD HH:MM[:SS]；"
+                             "不带日期按最近一次出现解释（表头会写出来）")
+    parser.add_argument("--until", metavar="时间",
+                        help="配合 --history：上界，写法同 --since（与 --before 并存时取更早的）")
+    parser.add_argument("--before", metavar="ID",
+                        help="配合 --history：上界行号，编号同上下文行（q<n> / <n>）")
+    parser.add_argument("--limit", type=int, metavar="N",
+                        help=f"配合 --history：最多往回扫 N 条（默认 {CONTEXT_SCAN}）")
     parser.add_argument("--show", dest="show", metavar="ID",
                         help="按 id 读这条消息的全文（唤醒行/上下文行截断后的补救，issue #32）："
                              "<n> 读事件流，q<n> 读会话库")
@@ -785,7 +775,11 @@ def _build_parser():
 
 
 def _run_readonly(args, parser):
-    """只读分支（--context / --show / --list / --who）：有命中就返回退出码，否则 None。"""
+    """只读分支（--history / --context / --show / --list / --who）：有命中就返回退出码，否则 None。"""
+    if args.history:
+        # 参数翻译与取数在 wg_context 里（reply.py 顶着 1000 行红线）。
+        # latest_group_id 反向注入：它依赖事件流与插件派发，逆着 import 会成环。
+        return wg_context.run_history(args, parser, latest_group_id)
     if args.context is not None:
         around = None
         if args.around is not None:

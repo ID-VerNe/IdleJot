@@ -37,11 +37,22 @@ vendored 代码不能 import 本仓的 helper，这就是它唯一的正确写�
 | 状态 | 什么时候 | 输出 | 退出码 |
 |---|---|---|---|
 | 已扫-干净 | 文件在，且每个 spawn 都带抑制标志 | `✓ vendored 树已扫（同一套判据）：<路径>` | 0 |
-| 已扫-违规 | 文件在，有裸 spawn | 逐条列出 `路径:行号  代码行` | 1 |
+| 已扫-违规 | 文件在，有裸 spawn | 逐条列出 `路径:行号  代码行`，随后一行 `→ …先跑 python scripts/apply_reader_patches.py…` | 1 |
 | **未扫** | 文件不在（CI、干净 worktree、没装 reader） | `· vendored 树未扫：<路径>（<打它的补丁>）—— 本机没有这份第三方源码……不是「已检查干净」` | 0 |
 
 第三行是这个 issue 的核心：**"没扫"必须说出来，不能表现得像"扫过且干净"**。
 #323 的病根就是门禁对 `tools/` 从来没有意见，而"没有意见"在输出里和"干净"长得一模一样。
+
+**第二行的违规和本仓代码的违规不是同一种红（issue #337）**。vendored 字节只能被补丁改写，
+不能手改；正确的修法是跑驱动把补丁打上去，**不是**把那行从 `VENDORED_SOURCES` 里删掉——
+那是撤销 #323。所以违规块末尾会追加一行指引，把该跑的命令和"别移出清单"一起说清。
+指引行只是导航，判据和退出码都没变：仍然是红的，仍然是 1。
+
+> #337 的来历：`patch_wechat_media` 存在了整个版本周期却**没有任何调用方**（唯一的 import
+> 在门禁自测里），`scripts/install_readers.py` 又从未提交过，于是本机的 `media.py` 一直是裸
+> `subprocess.run`。门禁报红是对的，红得却像"我们自己的运行时代码坏了"，而唯一的正解是打补丁。
+> 现在补丁表 `reader_patches.VENDORED_PATCHES` 同时被驱动和门禁自测读取（§4），
+> "有补丁没人打"与"要扫的文件没进清单"都会让自测直接红。
 
 ## 4. vendored 代码为什么就地拼 `getattr`，而不走 helper
 
@@ -57,12 +68,34 @@ vendored 代码不能 import 本仓的 helper，这就是它唯一的正确写�
 `# Tulpa console-window flag v1 (scripts/reader_patches.py).` 作幂等哨兵
 （重复安装不会重复插入；锚点漂移则抛 `ValueError`，不猜）。
 
+### 4.1 打补丁用驱动，不要手改（issue #337）
+
+补丁与它要改的文件之间的对应关系只写在一处：`reader_patches.py` 底部的 `VENDORED_PATCHES`
+（每行 `path` / `patch` / `reason`）。驱动从这张表读，门禁自测也读它做双向对账，
+所以加一份新的 vendored 补丁只需在表里加一行：
+
+```bash
+# 报告本机 vendored 副本的状态（退出码：有文件需要补丁 = 1，全好或没装 = 0）
+uv run python scripts/apply_reader_patches.py --check
+
+# 真的打上去：幂等，原文件备份到 <file>.tulpa-bak（已存在则不覆盖）
+uv run python scripts/apply_reader_patches.py
+```
+
+驱动不会下载任何东西、不会创建 `tools/`，也不猜漂移的锚点——锚点对不上就以非零退出、
+文件逐字节保持原样。**本机有 `tools/` 时，门禁红了先跑 `--check`**：它区分"需要补丁"
+（跑驱动即可解决）与"锚点漂移"（要人工对照上游 diff 复核补丁），两者退出码都是 1 但
+说法不同。补完后再跑一次门禁，应当从"已扫-违规"变成"已扫-干净"。
+
 ## 5. 已知未覆盖的边界
 
 - **`tools/qq-reader` 的 spawn 不判**：`qq_db.py`、`_snapshot.py`、`_macos.py` 里的未加固 spawn
   都在 Linux / macOS 上游路径上，Windows 走不到。强行判定会给将来真正的 POSIX 移植制造假红；
   真要判，应当在那条路径真正启用时用 `# console-gate: posix-only` 之外的方式单独处理。
 - **`VENDORED_SOURCES` 是显式清单，不扫目录**（与 `RUNTIME_WORKERS` 不同：#329 之后后者由 AST
-  派生并双向对账，这里没有等价的机器判据）。新增 vendored 文件需要手工登记一行；漏登记的表现是
+  派生并双向对账）。新增 vendored 文件仍需要手工登记一行；漏登记的表现是
   "未扫"里**没有**它（等于又回到 #323 之前的状态），因此登记新第三方树时请同时确认它在不在清单里。
+  自 #337 起，两张表之间**已经**有机器判据：`VENDORED_SOURCES` 里每一行都必须在
+  `reader_patches.VENDORED_PATCHES` 里有同名补丁，补丁表里也不许有清单外的孤儿——任一边漏登记，
+  门禁自测直接红。机器管不到的是最后一步："`tools/` 里真的装了这棵树，所以它才该进清单"。
 - **只扫 `.py` / `.pyw`**：vendored 的二进制、批处理不在此列。

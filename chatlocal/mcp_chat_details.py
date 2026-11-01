@@ -8,9 +8,24 @@ from .mcp_chat_media import image_ref
 from .onebot import OneBotError
 from .onebot_segments import at as at_segment, card_text, kind_of, link_fields, render_content, reply as reply_segment, unsupported
 from .onebot_segments import UNSUPPORTED_TOTAL_CHARS
+from .text_limits import clip
 
 MAX_NODES=100  # QQ 单条合并转发的上限，实测 get_forward_msg 一次全量返回（issue #8）
 MAX_TEXT=12000
+# 嵌套转发展开到第几层（issue #351）。**条数与字符数才是主防线**（两者跨层共享
+# 预算），深度只是「不许无界递归」的最后一环——外面一层套一层，结构本身就可以
+# 无限长，条数预算却要等到真的读到节点才递减。
+MAX_FORWARD_DEPTH=3
+# 嵌套层单节点文本额度：一条 25 条的嵌套转发最多吃掉 MAX_TEXT // 25 × 25 ≈ 12000
+# 字——与原来「所有节点共用一个 MAX_TEXT」同一量级，不会因为多了递归就把整条消息
+# 的文本预算翻几倍。逐节点 480 而非再细分，是因为「百来字」的节点在省流场景里常常
+# 正好被切在半句上。
+NESTED_TEXT_CHARS=MAX_TEXT//MAX_NODES
+# 转发占位里正文的可见字数（issue #351）：群友 @ 机器人要「省流」时，Agent 拿到的
+# 不能只有一句 `[合并转发]`。每个子节点留一句，深度/条数/字符三条预算照旧兜底。
+NESTED_PREVIEW_CHARS=120
+# 一条消息里所有转发占位正文的合计上限，防止几十条「[转发:…]」把 content 顶爆。
+NESTED_PREVIEW_TOTAL=2000
 
 
 def forward_nodes(value):
@@ -23,9 +38,121 @@ def forward_nodes(value):
     return None
 
 
-def sanitize_nodes(value,depth=0,budget=None):
-    """Whitelist only meaningful message fields before persisting adapter data."""
+def forward_children(ref):
+    """一个转发段下面「已经落盘」的子节点（issue #351）。
+
+    两种形态都要认：外层引用把子节点挂在 `nodes`（历史行同款），节点内的嵌套转发
+    段同样用 `nodes`——但 `get_forward_msg` 返回的原始段是 `{type:'forward',data:…}`，
+    `forward_nodes()` 不认外面这层 `data`。以前 `sanitize_nodes` 里各写一份判断、
+    `ChatDetails.forward()` 里再写一份 `'nodes' in ref`，三处对「有没有子节点」的口径
+    不一致时，同一批数据在入库 / 交付两条路径上会给出两个答案。
+    """
+    if not isinstance(ref,dict):return None
+    for key in ('nodes','children'):
+        if isinstance(ref.get(key),list):return ref[key]
+    return None
+
+
+def _forward_ref(kind_data,children,truncated,reason=None):
+    """嵌套转发的落盘形态与它的截断理由（issue #351）。
+
+    ``reason`` 写在 ``limit_reason`` 上就够渲染侧认出来，但**不能**只有渲染侧认得：
+    同一段落库后被 `mcp_chat.reply()`、`unresolved_refs()` 原样交出去时没人补这一栏，
+    读者拿到的就是一句 `truncated=True` 却说不出为什么。``state`` 与 ``limit_reason``
+    一起写，两种读者（渲染路径 / 直接透传路径）看到的是同一句话。
+    """
+    ref=dict(type='forward',truncated=bool(truncated))
+    if reason:ref.update(state='limit_reached',limit_reason=reason)
+    if children is not None:ref['nodes']=children
+    if kind_data.get('id'):ref['id']=str(kind_data['id'])[:200]
+    return ref
+
+
+def _node_text(node,depth=0):
+    """一个转发子节点里「能读的那几段」（issue #351）。
+
+    同一个「子节点」在两条路上形态不同：`render_nodes()` 产出的是
+    ``{'sender','content'}``（content 已经是渲染好的字符串），`sanitize_nodes()`
+    落盘的是 ``{'sender','segments'}``（段列表）。只看 ``content`` 的话，入库侧
+    永远拿到空串，`forward_preview()` 会退化成一句纯 ``[转发]``——「能展但不吭声」，
+    比完全不展开更难发现（#106 那种排除型假绿的同一个坑）。
+
+    节点里如果还套了转发，往里再走一层：占位是**给省流看的**，只写
+    「外层说了一句话」而把整段嵌套内容藏起来，读者照样得再调一次工具。
+    """
+    if isinstance(node.get('content'),str):
+        return node['content']
+    pieces=[]
+    for seg in node.get('segments') or []:
+        if not isinstance(seg,dict):continue
+        kind=seg.get('type')
+        if kind=='text':pieces.append(str(seg.get('text') or ''))
+        elif kind=='image':pieces.append('[图片]')
+        elif kind=='at':pieces.append('@'+str(seg.get('name') or seg.get('qq') or ''))
+        elif kind=='unsupported':pieces.append('['+str(seg.get('kind') or '非文本')+']')
+        elif kind=='forward':
+            inner=' '.join(filter(None,(_node_text(child,depth+1) for child in seg.get('nodes') or [] if isinstance(child,dict))))
+            if inner:pieces.append(inner)
+    return ' '.join(pieces)
+
+
+def forward_preview(ref,limit=NESTED_PREVIEW_CHARS):
+    """转发段在 content 里的那一句：``[转发: 甲: … / 乙: [图片]]``（issue #351）。
+
+    ``ref`` 既可以是已经渲染过的节点列表（``{'nodes':[{'sender','content'}]}``），
+    也可以是 `sanitize_nodes()` 落盘的节点（``{'nodes':[{'sender','segments'}]}``），
+    还可以是节点内的嵌套转发段——两种节点形态由 `_node_text()` 抹平。
+    没有可读子节点时回一句纯占位，绝不返回空串——「这条消息里有个转发」本身就是
+    要传达的信息，空串会让它凭空消失。
+
+    内层占位里的方括号换成空格：唤醒行的 `strip_placeholders` 按
+    ``\\[[^\\]]*\\]`` 剥占位，``[转发: 甲: [图片]]`` 会在第一个 ``]`` 处停下，
+    把后半截留在正文里占额度（同 #165 卡片摘要的处理）。
+    """
+    nodes=forward_children(ref) or []
+    pieces=[]
+    for node in nodes:
+        if not isinstance(node,dict):continue
+        body=' '.join(_node_text(node).split())
+        if not body:continue
+        body=' '.join(body.replace('[',' ').replace(']',' ').split())
+        if not body:continue
+        sender=' '.join(str(node.get('sender') or '').replace('[',' ').replace(']',' ').split())
+        pieces.append((sender or '无名')+': '+clip(body,limit).text)
+    return '[转发: '+' / '.join(pieces)+']' if pieces else '[转发]'
+
+
+def sanitize_nodes(value,depth=0,budget=None,forward_depth=0,item=None):
+    """Whitelist only meaningful message fields before persisting adapter data.
+
+    ``depth`` 是**数据本身的嵌套层数**（`content` / `messages` 再套 `content`），
+    上限 1 层：一个节点里的消息段不该再是「一组节点」。
+
+    ``forward_depth`` 是**转发套转发**的层数（issue #351）。以前这里只有
+    ``if depth>=2:return []`` 一条线，而 `content` 为空的嵌套转发恰好也会走进这条
+    递归（``forward_nodes([])`` 返回 ``[]``，``[] or []`` 仍递归），所以**只有空**的
+    嵌套转发才能被收下——内联了节点的内层转发一律只剩一个带 id 的段，子消息全部
+    消失。NapCat 的 `parseMultMsg` 打开时正好把内层整包内联进来，于是「部署建议开启」
+    的那条路径反而看不到内容。
+
+    三条上限跨层共享：节点数（``budget['nodes']``）、节点文本（``budget['text']``）、
+    嵌套层文本（``budget['nested_text']``）。后两条是**两笔账**：
+    ``budget['text']`` 是「这一层能写多少字」，进每一层时收窄到
+    ``NESTED_TEXT_CHARS``、出层还原（每层各自封顶）；``nested_text`` 才是整条消息的
+    总账，只按实际花掉的字数递减。混成一笔的话，一条 25 条转发的节点会把整条消息
+    的文本额度吃光，并列的第二条转发连一句都展不出来——深度上限就成了摆设。
+
+    ``item`` 是**一个节点能拿到的文本额度**（默认 ``budget['text']``）。它存在的
+    唯一理由是「转发里套转发」：外层节点的正文（`sender` 昵称、说明文字）如果能把
+    整份额度吃干净，内层转发即便还剩预算也展不出来。收窄后正文与嵌套转发各自
+    有把握的额度，谁也不会把谁饿死。
+
+    任一上限耗尽都在**耗尽位置**写 ``state='limit_reached'`` + ``limit_reason``，
+    不静默少东西——「被截断」与「本来就只有这些」是两件事，读者要能分开。
+    """
     budget=budget if budget is not None else dict(nodes=MAX_NODES,text=MAX_TEXT)
+    budget.setdefault('nested_text',MAX_TEXT)
+    item=budget['text'] if item is None else item
     result=[]
     if depth>=2:return result
     source=forward_nodes(value) or []
@@ -37,26 +164,49 @@ def sanitize_nodes(value,depth=0,budget=None):
         content=node.get('message',node.get('content',[]))  # event / inline node
         if isinstance(content,str):content=[dict(type='text',data=dict(text=content))]
         segments=[];truncated=isinstance(content,list) and len(content)>100
+        # 这个节点自己的文本额度（issue #351）。共享的 `budget['text']` 按实际花掉的
+        # 字数递减，出节点还原成层额度。
+        #
+        # 正文与内层转发**分账**，不按先后到者得：这个节点里只要还套着转发，正文最多
+        # 吃 `item` 的一半，另一半留给转发。以前是正文先吃 `share`、剩下的才轮到
+        # 转发，于是一条「引用一段长文 + 转发原帖」的节点里，长文把额度吃干净后
+        # 内层转发只剩 `share=0`——`item` 收了窄却什么也没保住，读者看到的仍是一句
+        # 空占位。没有嵌套转发时（最常见的情况）正文独占整份，一个字都不少。
+        share=min(item,budget['text'])
+        nested_share=share//2 if any(isinstance(s,dict) and s.get('type')=='forward'
+                                     for s in (content if isinstance(content,list) else [])) else 0
+        share-=nested_share
         for seg in content[:100] if isinstance(content,list) else []:
             if not isinstance(seg,dict):continue
-            kind=seg.get('type');d=seg.get('data',{})
-            if not isinstance(d,dict):continue
+            kind=seg.get('type')
+            # 段体内联的嵌套转发在节点里用的是 `raw`（与 `unsupported` 段同款键名），
+            # `data` 是 OneBot 原生形态——两种都认，否则同一棵内联树在「入库时还在」
+            # 与「补读时没了」之间来回切换（issue #351）。
+            d=seg.get('data') if isinstance(seg.get('data'),dict) else seg.get('raw')
+            if not isinstance(d,dict):
+                if kind=='text' and isinstance(seg.get('text'),str):
+                    # 已落盘的文本段是扁平的 `{type:'text',text:…}`，再读回节点树时
+                    # 它没有 `data`——不认这一形态，二次读取会把正文整段丢掉。
+                    d=dict(text=seg['text'])
+                elif kind not in ('forward',):continue
+                else:d={}
             if kind=='text':
-                original=str(d.get('text',''));text=original[:max(0,budget['text'])];budget['text']-=len(text)
+                original=str(d.get('text',''));text=original[:max(0,share)]
+                share-=len(text);budget['text']-=len(text)
                 truncated=truncated or len(text)<len(original)
                 segments.append(dict(type='text',text=text))
             elif kind in ('image','mface'):segments.append(dict(type='image',image=image_ref(d)))
             elif kind=='reply':segments.append(reply_segment(d.get('id')))
             elif kind=='at':segments.append(at_segment(d.get('qq'),d.get('name')))
             elif kind=='forward':
-                children=sanitize_nodes(d,depth+1,budget);raw_children=forward_nodes(d)
-                ref=dict(type='forward',truncated=depth+1>=2 or raw_children is None or len(children)<len(raw_children))
-                if raw_children is not None:ref['nodes']=children
-                if d.get('id'):ref['id']=str(d['id'])[:200]
-                segments.append(ref)
+                # 预留给正文的那半份，转发的实际开销由 `_nested_forward` 记进总账，
+                # 这里把本节点用不掉的那部分还回去（`share += nested_share` 在下面
+                # 与节点还原一起做，不会让同一个字被算两次）。
+                segments.append(_nested_forward(d,budget,forward_depth,share+nested_share))
             # issue #165：白名单外的段不再只留一个中文标签当 type。节点内同样
             # 保真降级（kind + 受限长度 raw），渲染侧才说得出「这是什么」。
             else:segments.append(unsupported(kind,d,budget))
+        budget['text']+=share+nested_share
         result.append(dict(sender_id=str(sender.get('user_id',node.get('user_id','')))[:30],
                            sender=str(sender.get('card') or sender.get('nickname') or '')[:200],
                            # 节点自己的 message_id 是真实可用的（实测同一批节点各不相同），
@@ -66,6 +216,44 @@ def sanitize_nodes(value,depth=0,budget=None):
                            segments=segments,truncated=truncated))
     if result and len(result)<len(source):result[-1]['truncated']=True
     return result
+
+
+def _nested_forward(data,budget,forward_depth,item=None):
+    """节点内的一个嵌套转发段（issue #351）：能展开就展开，展不开说清为什么。
+
+    三种「展不开」必须分开说，否则 Agent 会对着一条已经到手的转发反复重读：
+
+    * ``depth``：层数到了 ``MAX_FORWARD_DEPTH``，再深就是无界递归；
+    * ``node_limit`` / ``content_limit``：跨层共享预算用光了，``read_chat_forward``
+      换个位置重读也不会多出来（同一批节点）；
+    * 没有可展开的内联节点、也没有资源 id：真拿不到（``unavailable``）。
+
+    ``item`` 是外层节点给内层留的文本额度（见 `sanitize_nodes`）；同时还要受
+    ``NESTED_TEXT_CHARS`` 封顶——内层的每个节点同样不该比同一个包里的节点拿到更多。
+    """
+    raw=forward_nodes(data)
+    budget['nested_text']=budget.get('nested_text',MAX_TEXT)
+    if raw is not None:
+        if forward_depth+1>=MAX_FORWARD_DEPTH:return _forward_ref(data,None,True,'depth')
+        if budget['nested_text']<=0 or budget['text']<=0:return _forward_ref(data,None,True,'content_limit')
+        allowance=min(x for x in (NESTED_TEXT_CHARS,budget['text'],budget['nested_text'],
+                                  budget['text'] if item is None else item) if x>=0)
+        before=budget['text'];before_allowance=allowance
+        try:children=sanitize_nodes(raw,budget=budget,forward_depth=forward_depth+1,item=allowance)
+        finally:
+            spent=before-budget['text'];budget['text']=before
+            budget['nested_text']=max(0,budget['nested_text']-spent)
+        # 内层自己的正文被额度砍过（`spent` 顶到 `allowance`）也算一次截断：
+        # 只看 `len(children)<len(raw)` 时，额度小到只够写半句的情况会「节点都在、
+        # 字数却少了」却一句理由都不给——读者会以为这就是原文。
+        exhausted=before_allowance>0 and spent>=before_allowance
+        if len(children)<len(raw) or exhausted:
+            # 究竟是「条数用光」还是「嵌套文本用光」，按收缩的那一项点名，不一律
+            # 记成同一个理由——读者据此决定要不要换个位置重读。
+            return _forward_ref(data,children,True,'node_limit' if budget['nodes']<=0 else 'content_limit')
+        return _forward_ref(data,children,False)
+    ref=_forward_ref(data,None,True,'unavailable' if not data.get('id') else None)
+    return ref
 
 
 def reference_refs(segments,stored):
@@ -188,8 +376,16 @@ class ChatDetails:
         memo=memo if memo is not None else {};ident=ref.get('id')
         if cancel.is_set():return dict(state='cancelled',nodes=[],truncated=False)
         if ident and ident in ancestors:return dict(state='cycle',nodes=[],truncated=True)
-        if depth>=2 or budget['nodes']<=0 or budget['text']<=0:
-            return dict(state='limit_reached',nodes=[],truncated=True)
+        if depth>=MAX_FORWARD_DEPTH:
+            # 第 4 个深度闸门（issue #351）：`sanitize_nodes` 的数据侧与
+            # `render_forward` 的渲染侧都按 MAX_FORWARD_DEPTH 收敛，这里是**补读**
+            # 那一侧——以前写死 `depth>=2`，于是一棵已经展开到第 3 层的树在 enrich
+            # 路上被砍回 2 层，`processing_limit` 又没有 `limit_reason`，读者只看到
+            # 「被截断」却问不出为什么。三处闸门同一常量、同一理由名。
+            return dict(state='limit_reached',nodes=[],truncated=True,limit_reason='depth')
+        if budget['nodes']<=0 or budget['text']<=0:
+            return dict(state='limit_reached',nodes=[],truncated=True,
+                        limit_reason='node_limit' if budget['nodes']<=0 else 'content_limit')
         if 'nodes' in ref and (ref['nodes'] or not ref.get('truncated')):
             answer=dict(state='available',nodes=ref['nodes'],truncated=ref.get('truncated',False))
         elif not isinstance(ident,str) or not ident.strip() or len(ident)>200:
@@ -227,14 +423,23 @@ class ChatDetails:
             nodes.append(dict(node,segments=segments,truncated=cut))
         return dict(answer,nodes=nodes,truncated=clipped)
 
-    def render_forward(self,forward,media,stamp,allow_images,quote_message_id,location=None,read=None):
-        nodes=self.render_nodes(forward.get('nodes',[]),media,stamp,allow_images,quote_message_id)
+    def render_forward(self,forward,media,stamp,allow_images,quote_message_id,location=None,read=None,_depth=0):
+        # issue #351：`_depth` 是**渲染时**的嵌套层数。数据侧（`sanitize_nodes`）已经
+        # 按 MAX_FORWARD_DEPTH 收敛过，这里再判一次是因为历史行与 adapter 直接喂进来
+        # 的节点树没有经过 sanitize——渲染是无界递归的最后一个入口。
+        if _depth>=MAX_FORWARD_DEPTH:
+            return dict(type='forward',state='limit_reached',nodes=[],total_nodes=0,truncated=True,
+                        unrecoverable_truncation=True,limit_reason='depth',continuation_supported=False)
+        nodes=self.render_nodes(forward.get('nodes',[]),media,stamp,allow_images,quote_message_id,_depth=_depth)
         selected=read and location and all(read.get(k)==location.get(k) for k in ('forward_index','reply_index'))
         offset,limit=(read['offset'],read['limit']) if selected else (0,MAX_NODES)
         page=nodes[offset:offset+limit];more=offset+len(page)<len(nodes)
         # Pagination only promises retained nodes; hard sanitization limits
         # cannot be recovered by repeatedly asking for the same empty page.
         def limits(value):
+            # issue #351：以前「内容被砍」一律记成 `processing_limit`，读者分不出是
+            # 文本用光、条数用光还是层数到顶——三者的补救动作完全不同（补读 / 换
+            # 位置 / 都没有）。耗尽的层自己写清了 limit_reason，这里只补外层的总账。
             reasons=({value['limit_reason']} if value.get('limit_reason') else
                      {'cycle'} if value.get('state')=='cycle' else {'processing_limit'} if value.get('truncated') else set())
             for k in ('nodes','segments'):
@@ -257,12 +462,15 @@ class ChatDetails:
             if len(reasons)>1:detail['incomplete_reasons']=sorted(reasons)
         return detail
 
-    def render(self,segments,media,stamp,allow_images=True,quote_message_id=None,location=None,read=None):
+    def render(self,segments,media,stamp,allow_images=True,quote_message_id=None,location=None,read=None,_depth=0,_budget=None):
         result=[];parts=[]
         # 一条消息共享的链接预算（issue #311）：入库侧由 `receive` 的 raw_budget 管，
         # 引用/转发节点在这里自成一条消息——不给预算的话，三十张卡片的老行回填能
         # 把 content 顶过 MAX_TEXT，占位被硬切在半路（`]` 都没了，唤醒行剥不掉）。
         link_budget={}
+        # 转发占位正文的共享额度（issue #351）：每个节点都要看得见，但不许几条转发
+        # 就把整条 content 撑满。
+        _budget=_budget if _budget is not None else dict(preview=NESTED_PREVIEW_TOTAL)
         for index,seg in enumerate(segments):
             # Old persisted forward nodes used OneBot-shaped segments.
             if 'data' in seg:
@@ -282,7 +490,14 @@ class ChatDetails:
                 parts.append('[图片]');result.append(dict(type='image',image_index=index))
             elif kind=='forward':
                 target=dict(location,forward_index=index) if location else None
-                parts.append('[嵌套转发]');result.append(self.render_forward(seg,media,stamp,allow_images,quote_message_id,target,read))
+                rendered=self.render_forward(seg,media,stamp,allow_images,quote_message_id,target,read,_depth=_depth)
+                # issue #351：以前无论节点有没有展开都只写「[嵌套转发]」四个字，
+                # 群友 @ 机器人要「省流」时 Agent 手里就是一句占位。现在有内容就
+                # 摆出来（共享额度内），没内容才回纯占位——`forward_preview()` 的
+                # 唯一构造点，入库侧（mcp_chat.receive）共用。
+                parts.append(forward_preview(rendered,min(NESTED_PREVIEW_CHARS,max(0,_budget['preview']))))
+                _budget['preview']=max(0,_budget['preview']-len(parts[-1]))
+                result.append(rendered)
             elif kind=='at':
                 # issue #52: the @-ed member's display name survives into the
                 # rendered forward node; only name-less legacy segments fall
@@ -313,10 +528,14 @@ class ChatDetails:
         content,kept=render_content(parts,result,MAX_TEXT)
         return dict(content=content,segments=kept)
 
-    def render_nodes(self,nodes,media,stamp,allow_images=True,quote_message_id=None):
+    def render_nodes(self,nodes,media,stamp,allow_images=True,quote_message_id=None,_depth=0,_budget=None):
         # message_id 一起透出：Agent 可以拿它对该条再 get_msg（issue #8）。
+        # issue #351：同一页节点共享一份占位额度（`_budget`），每个节点的嵌套层数
+        # 在 `_depth` 上逐层加一——渲染侧的深度上限就靠它。
+        _budget=_budget if _budget is not None else dict(preview=NESTED_PREVIEW_TOTAL)
         return [dict({k:n[k] for k in ('sender_id','sender','message_id','timestamp','truncated') if k in n},
-                     **self.render(n['segments'],media,n['timestamp']*1000 if n.get('timestamp') else stamp,allow_images,quote_message_id)) for n in nodes]
+                     **self.render(n['segments'],media,n['timestamp']*1000 if n.get('timestamp') else stamp,allow_images,quote_message_id,
+                                   _depth=_depth+1,_budget=_budget)) for n in nodes]
 
     @timing.stage('chat.details.enrich')
     def enrich(self,grant,row,items,cancel=None,read=None):

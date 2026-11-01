@@ -551,7 +551,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 93 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164）；id 撞号分节：事件流 id 与会话库 rowid 同号时 q&lt;n&gt; 只落到本群那条、裸 id 回库兜底要打出源说明（#203） |
 | 94 | `reply` | `check_trigger_mode.py` | 按群选择 natural/mention_only 触发模式：collector 请求值按 trigger_mode 取（不再硬编码 True）、natural 群普通消息 wake_reason 放行、@/关键词/is_self/指令早退不破坏、两群不同配置按群生效（#188） |
 
-共 94 个 CI 门禁，分 5 个分片（`static` 19、`runtime` 15、`mcp` 18、`storage` 11、`reply` 31）；`manual` 16、`stale` 0、`dead` 0、`support` 2 见 `scripts/gates.json` 的对应档位（理由写在那里）。
+共 94 个 CI 门禁，分 5 个分片（`static` 19、`runtime` 15、`mcp` 18、`storage` 11、`reply` 31）；`manual` 16、`stale` 0、`dead` 0、`support` 3 见 `scripts/gates.json` 的对应档位（理由写在那里）。
 <!-- gates:ci:end -->
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

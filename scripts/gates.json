@@ -572,6 +572,10 @@
    "why": "共享夹具模块（无 main）：隔离环境、临时目录、网络护栏，被多个门禁 import"
   },
   {
+   "name": "check_forward_recursion",
+   "why": "issue #351 用例包（无独立入口）：合并转发递归展开的 9 组维度用例，夹具由 check_mcp_chat_enrichment 注入；拆出来只为过 check_module_size 的 1000 行硬上限"
+  },
+  {
    "name": "check_pr_parity_lock.py",
    "why": "共享模块（带 --self-test，无门禁入口）：parity 的跨进程互斥锁，被 check_pr_parity.py import，#348"
   }

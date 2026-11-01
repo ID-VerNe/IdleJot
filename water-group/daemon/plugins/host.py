@@ -100,6 +100,3 @@ class CommandsHost:
         """@ + 文本的形状只写这一处（旧 ``commands.notify_login`` 的落点）。"""
         self.send(group_id, [{"type": "at", "data": {"qq": str(qq)}},
                              {"type": "text", "data": {"text": " " + str(text)}}])
-
-    def store(self, plugin: str, name: str) -> Any:
-        raise NotImplementedError("commands 宿主不提供独立存储")

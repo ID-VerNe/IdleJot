@@ -352,7 +352,7 @@ $ mcp_chat_dossier.py::query_group_notes: 75-82
 | `MemoryProfileMixin` 拆分（PF-3 收窄） | 597 span / 611 文件均在墙内，方法双向耦合紧（dossier+observe 调 `find_profile`/`_memory_view`/`_merge_memories`/`_upsert_group_memory`），拆付耦合税无体量收益；越 ADVISORY 带再单开 |
 | `scripts/` 残留 `sys.path.insert`（77 文件）/ `for x in CASES`（5 文件） | PE-1 划在范围外的特殊形态（`fixture_server` 包裹 / `(label,fn)` 元组收集 `FAILURES` / `(name,case)` 非 `@case`），逐文件核对过差异是故意的 |
 | `antigravity_dry_replay.py` 的 `ThreadingHTTPServer` + `def restrict` | WS/replay 形态特殊，是 `-19` DRY-1 收口后剩下的网络护栏持有者；迁移收益低于风险 |
-| 18 个 ADVISORY 带文件（700–1000 行） | 可见不致命，ADVISORY 的设计就是「visible, not fatal」；无一个越 1000 FAIL 线，`EXEMPTIONS` 为空。**计数按 `check_module_size.py` 实测**（issue #288）：上表说的是 19，`check_module_size.py` 当场只打 18 行 ADVISORY——`check_listener_rehang` / `check_dossier_cadence` / `check_gap_disclosure` 等拆包后，原单体文件已出带，行数口径也跟着变了 |
+| 18 个 ADVISORY 带文件（700–1000 行） | 可见不致命，ADVISORY 的设计就是「visible, not fatal」；无一个越 1000 FAIL 线，`EXEMPTIONS` 为空。**计数按 `check_module_size.py` 实测**（issue #288）：上表说的是 19，`check_module_size.py` 当场只打 18 行 ADVISORY——`check_listener_rehang` / `check_dossier_cadence` / `check_gap_disclosure` 等拆包后，原单体文件已出带，行数口径也跟着变了（#313 合入后复测为 **19**，见 §6.2 表下注） |
 
 ### 6.1 三个 advisory 带回读（issue #288，四文件结论 KEEP）
 
@@ -473,11 +473,12 @@ $ mcp_chat_dossier.py::query_group_notes: 75-82
 | `scripts/check_group_memory.py` | 845（615/100/130） | KEEP | 17 个函数里 15 个 `test_*`，最大 `test_native_dossier_updates_and_consolidation` / `test_memory_cap_consistency` 各 105 行；无共享大块可提，拆开只是把 `test_*` 分到两个文件 |
 | `water-group/daemon/miyoushe.py` | 811（658/23/130） | KEEP | 42 个顶层函数 + 2 个 class，最大的类 `Client` 114 行、最大的函数 25 行：一个 API 客户端，每个端点一个薄函数，拆开只增一层 import |
 | `scripts/check_repeater/__init__.py` | 808（671/60/77） | KEEP | 已被 **#285** 按 `_fixture` 切过一刀（`906 → 808`），剩下 14 个函数里 12 个 `test_*`（最大 `test_frequency` 117 行）+ runner，无第二 seam |
-| `scripts/check_reply_send_failure/__init__.py` | 802（663/24/115） | KEEP | 41 个函数，最大的也只有 39 行（`提前解禁_禁言时刻在未来也必须复查`）：一整族「禁言文案」用例平铺，自成一个变更理由 |
+| `scripts/check_reply_send_failure/__init__.py` | 809（664/30/115） | KEEP | 41 个函数，最大的也只有 39 行（`提前解禁_禁言时刻在未来也必须复查`）：一整族「禁言文案」用例平铺，自成一个变更理由 |
 
 > 行数是 `check_module_size.py` 与 `(行, code/注释/空)` 实测口径（本轮当场复核），
-> 与 §6 上表「18 个 ADVISORY」的计数同源。#320 两个 SPLIT 落地后 `check_module_size.py`
-> 仍打 **18** 行 ADVISORY——两个文件都还在 700–1000 带内，只是从带的高处往下降了一截，
+> 与 §6 上表「ADVISORY 带文件」的计数同源。#320 两个 SPLIT 落地后 `check_module_size.py`
+> 打 **19** 行 ADVISORY（#288 时是 18，其后 #313 的 `check_listener_rehang/budget.py`
+> 涨到 827 行又进带）——两个被拆的文件都还在 700–1000 带内，只是从带的高处往下降了一截，
 > 这正是本单「**不承诺**跨到 700 线以下」的原文口径。
 
 #### 6.2.1 `check_followup/__init__.py` SPLIT（PR #326）

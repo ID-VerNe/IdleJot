@@ -52,9 +52,17 @@ import tempfile
 import time
 
 try:
+    import ctypes
+except ImportError:  # pragma: no cover - Windows-only 工具，这里只防静态检查
+    ctypes = None
+
+try:
     import msvcrt
 except ImportError:  # 非 Windows：parity 本身 Windows-only，这里明确报错而不是静默降级
     msvcrt = None
+
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+STILL_ACTIVE = 259
 
 HOME_ENV = 'IDLEJOT_PARITY_HOME'
 LOCK_ENV = 'IDLEJOT_PARITY_LOCK'
@@ -107,6 +115,13 @@ class Holder:
 
 
 def _pid_alive(pid):
+    """进程还活着吗——已退出但句柄没关的僵尸也算死。
+
+    `os.kill(pid, 0)` 在 Windows 上对**残留的僵尸句柄**照样返回成功，
+    于是「刚被别人 `Popen` 起来又退出的 pid」会被当成活着，死记录永远清不掉
+    （issue #348 复核时自检第 4 项实测到）。这里再问一次 Win32：
+    句柄开不出来是死；开得出来但退出码已是 `STILL_ACTIVE` 以外则也是死。
+    """
     if pid <= 0:
         return False
     try:
@@ -117,7 +132,19 @@ def _pid_alive(pid):
         return True
     except OSError:
         return False
-    return True
+    kernel32 = getattr(ctypes, 'windll', None) if ctypes is not None else None
+    if kernel32 is None:
+        return True
+    handle = kernel32.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        if not kernel32.kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True
+        return code.value == STILL_ACTIVE
+    finally:
+        kernel32.kernel32.CloseHandle(handle)
 
 
 def recorded_holder():
@@ -193,8 +220,16 @@ def release(fd, path=None):
         pass
     finally:
         os.close(fd)
+    # 记录是本进程写的；只删自己那条，免得误删刚接手等待者的记录（advisory，真伪仍以字节锁为准）。
+    record = Path(path or lock_path()).with_name(HOLDER_NAME)
     try:
-        Path(path or lock_path()).with_name(HOLDER_NAME).unlink()
+        holder = Holder(json.loads(record.read_text(encoding='utf-8')))
+    except (OSError, ValueError, TypeError):
+        return
+    if holder.pid != os.getpid():
+        return
+    try:
+        record.unlink()
     except OSError:
         pass
 
@@ -251,7 +286,8 @@ def main(argv=None):
     group.add_argument('--hold', action='store_true',
                        help='拿住锁直到本进程被杀（给门禁/排查当持锁夹具；不是钩子路径）')
     group.add_argument('--serialize', action='store_true',
-                       help='只确认锁现在空闲（拿得到即返回 0，拿不到打印持有者并返回 1）')
+                       help='只确认锁现在空闲（拿得到即返回 0，拿不到打印持有者并返回 1；'
+                            '默认 --timeout 0 = 立即判定，要排队请显式给 --timeout）')
     group.add_argument('--probe', action='store_true', help='只读：有人拿着返回 1，否则 0')
     group.add_argument('--self-test', action='store_true', help='逐项自检')
     parser.add_argument('--timeout', type=float, default=0.0,
@@ -271,6 +307,7 @@ def main(argv=None):
             print(f'held：{lock_path()}·{holder.describe() if holder else "持有者未知"}')
             return 1
         release(fd)
+        recorded_holder()  # 顺手清掉死记录：probe 说 free 时别留一条假的「有人在用」
         print(f'free：{lock_path()}')
         return 0
     if args.serialize:
@@ -358,7 +395,6 @@ def self_test():
         expect('被占着时 serialize rc', blocked.returncode, 1)
         expect('被占着时 serialize 说出持有者', 'deadbeef' in blocked.stderr, True)
         release(fd, lock)
-
         # 3. 释放之后：serialize 0；持有者记录不会被留下来（下一次没人拿着）
         free = cli('--serialize')
         expect('释放后 serialize rc', free.returncode, 0)

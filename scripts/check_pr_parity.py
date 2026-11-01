@@ -254,6 +254,11 @@ def main():
     path = lock.lock_path()
     fd = lock.acquire(path, blocking=True,
                       on_wait=lambda holder: print(lock.describe_wait(holder), file=sys.stderr))
+    if fd is None:
+        # 等满没拿到：宁可报失败也不无锁开跑——无锁跑正是 #348 要消灭的东西。
+        print('FAIL: 拿不到 parity 锁（等满仍未空出）；若持有者已被硬杀，'
+              f'清掉 {path.with_name(lock.HOLDER_NAME)} 里的死记录后重试')
+        return 2
     try:
         lock.write_holder(args.ref if args.ref != 'HEAD' else sha)
         return _parity(args, sha)

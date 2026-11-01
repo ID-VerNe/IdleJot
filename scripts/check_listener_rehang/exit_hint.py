@@ -10,7 +10,7 @@ import time
 from ._common import (
     case, ROOT, DAEMON, fs, temp_dir,
     run_script, fixture_home, write_events, event, lines, index_of,
-    listen, reply,
+    listen, reply, child_budget,
 )
 
 # ---------- listen.py：退出时给出可粘贴的下一步 ----------
@@ -51,9 +51,12 @@ def 重挂命令可原样粘贴且回到常驻周期():
     # 短等待 1s 是 reply --wait 的临时边界，重挂必须回到常驻周期；
     # --cycles / --no-digest 同样不该透传。周期值读常量而不是写死 300（issue #83）：
     # 与 #79 的 `"默认 240s"` 同一种耦合，断言存在性时不该顺手锁死数值。
-    return (hint.endswith(f"--timeout {listen.DEFAULT_TIMEOUT}") and "listen.py" in hint
+    # 对照的是**子进程**的常驻周期，不是父进程的：`child_env()` 剥掉了
+    # `WG_AGENT_TOOL_TIMEOUT`，子进程永远用默认预算（issue #313）。
+    _, periodic = child_budget()
+    return (hint.endswith(f"--timeout {periodic}") and "listen.py" in hint
             and "--no-digest" not in hint and "--cycles" not in hint
-            and listen.DEFAULT_TIMEOUT > 0)
+            and periodic > 0)
 
 
 # ---------- watch.py：过期未回唤醒不再静默 ----------

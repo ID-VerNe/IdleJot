@@ -88,16 +88,12 @@ REPLIED = STATE / "wg_replied.jsonl"
 
 RETRY_SLEEP = 3
 SOURCE_WAIT = 30
-# 预算（宿主超时 / 发送余量 / 单次调用最多能等多久）只写在 wg_budget.py 里，
-# listen.py 也用同一套口径（issue #83）。这三个名字在这里重新导出，门禁与调用点
-# 照旧读 reply.AGENT_TOOL_TIMEOUT / reply.SEND_BUDGET（issue #79）。
+# 预算三数只写在 wg_budget.py（issue #79/#83），这里重新导出给门禁与调用点。
+# 打印与判断一律现读 `wg_budget.X`：快照只在 import 期求值，随环境变量变（#313）。
 AGENT_TOOL_TIMEOUT = wg_budget.AGENT_TOOL_TIMEOUT
 SEND_BUDGET = wg_budget.SEND_BUDGET
-# 发送成功后原地续挂监听的默认时长（issue #69）。监听只活一轮，回完消息到
-# 下一次挂上之间的空窗正是 @ 丢失的地方；把它做成默认值而不是可选项。
-# 取值由宿主超时减去预算算出（issue #79）：默认调用必须在调用方失去耐心之前
-# 自己返回并打印 NO_WORK，否则「消除几十秒空窗」会以「无限长空窗」收场——
-# 被截断时子监听和父进程一起死，而这条路径上不会留下任何提示。
+# 回完后原地续挂的默认时长（issue #69）：默认调用必须在调用方失去耐心前自己
+# 返回并打印 NO_WORK，否则「消除几十秒空窗」会以「无限长空窗」收场（#79）。
 DEFAULT_WAIT = wg_budget.WAIT_BUDGET
 # 多条气泡之间的间隔、单次能发几条，都收在 wg_bubbles 里（issue #131）。这两个
 # 名字在这里重新导出：调用点与既有门禁照旧读 reply.BUBBLE_GAP / reply.MAX_BUBBLES。
@@ -715,18 +711,20 @@ def wait_for_next(seconds):
     # 输出写回来，所以那条路径上「被杀了」和「还在等」在 Agent 眼里长得一模一样。
     # 秒数、合计值和两个出口写在眼前，是这里唯一来得及说的话。
     # 逃生口必须真的更短（issue #97）：按实际等待值折半，且永远小于等待预算；
-    # 折半后不足一秒时只留 --no-wait，不推荐 --wait 0（那等于 --no-wait）。
-    shorter = min(wait // 2, wg_budget.WAIT_BUDGET - 1)
-    shorter_hint = f"要更短：--wait {shorter}；" if shorter > 0 else ""
-    print(f"本次调用合计约 {wait + SEND_BUDGET}s（发送 + 等待）；你自己的工具超时"
+    # 折半后不足一秒时只留 --no-wait，不推荐 --wait 0（那等于 --no-wait）；
+    # 折半后不小于实际等待值时同样不留（issue #313：预算被覆盖到极窄时，
+    # 「要更短：--wait 1」与「最多 2s」同义，是句废话）。
+    shorter = wg_budget.shorter_wait(wait)
+    shorter_hint = f"要更短：--wait {shorter}；" if shorter else ""
+    print(f"本次调用合计约 {wait + wg_budget.SEND_BUDGET}s（发送 + 等待）；你自己的工具超时"
           f"短于此值，子监听会跟着被杀且不留提示"
           f"（{shorter_hint}立即返回：--no-wait）", flush=True)
     if wg_budget.over_budget(seconds):
         # 与 listen.py 同一句口径（issue #97）：取值会被压回预算，所以**不会**
         # 因此被截断；照旧写「很可能被截断」就是一句假话，而输出里的假话比没有
         # 输出更坏（#88 的教训）。
-        print(f"WARN: --wait {seconds}s 加上发送余量 {SEND_BUDGET}s 已超过常见工具调用"
-              f"超时 {AGENT_TOOL_TIMEOUT}s；本次已压回等待预算 {wait}s（issue #88），"
+        print(f"WARN: --wait {seconds}s 加上发送余量 {wg_budget.SEND_BUDGET}s 已超过常见工具调用"
+              f"超时 {wg_budget.AGENT_TOOL_TIMEOUT}s；本次已压回等待预算 {wait}s（issue #88），"
               f"不会因此被截断", flush=True)
 
     cmd = [sys.executable, str(HERE / "listen.py"), "--timeout", str(wait),

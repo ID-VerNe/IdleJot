@@ -8,9 +8,9 @@ import sys
 import time
 
 from ._common import (
-    case, ROOT, DAEMON, fs, temp_dir,
+    case, ROOT, DAEMON, fs, temp_dir, isolated_env,
     run_script, fixture_home, write_events, event, lines, index_of,
-    child_env, status_listener_line,
+    child_env, status_listener_line, child_budget,
     DOC_SAMPLES, DAEMON_SOURCES,
     listen, reply, up, watch, wg_budget, wg_up_probe,
 )
@@ -40,6 +40,11 @@ def _arg_default(rel, flag):
 
     只断言模块常量不够：把 `default=240` 直接写死、常量仍留 90 时，「常量 ≤ 预算」
     那条照样绿（变异实测）。所以解析 argparse 自己的 default，再要求它与常量一致。
+
+    解出来的常量值一律与**本进程里的真实取值**对账（issue #313）：`X = wg_budget.WAIT_BUDGET`
+    这种写法在环境变量放宽预算后不再是 90，AST 里那个名字必须指回同一个数，
+    否则「常量 ≤ 预算」测的是另一份快照。`X = wg_budget.WAIT_BUDGET - 10` 这类
+    带字面量的推导也按真实值解，同样对账。
     """
     tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
     consts = {}
@@ -49,9 +54,10 @@ def _arg_default(rel, flag):
             value = node.value
             if isinstance(value, ast.Constant) and isinstance(value.value, int):
                 consts[node.targets[0].id] = value.value
-            elif (isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name)
-                    and value.value.id == "wg_budget" and hasattr(wg_budget, value.attr)):
+            elif (_is_budget_ref(value) and hasattr(wg_budget, value.attr)):
                 consts[node.targets[0].id] = getattr(wg_budget, value.attr)
+            elif _is_budget_arith(value):
+                consts[node.targets[0].id] = _budget_arith(value)
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "add_argument"):
@@ -67,7 +73,30 @@ def _arg_default(rel, flag):
                 return kw.value.value
             if isinstance(kw.value, ast.Name):
                 return consts.get(kw.value.id)
+            if _is_budget_arith(kw.value):
+                return _budget_arith(kw.value)
     return None
+
+
+def _is_budget_ref(node):
+    """`wg_budget.<名字>` 这种引用（issue #313：取值随环境变量变，必须现算）。"""
+    return (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+            and node.value.id == "wg_budget")
+
+
+def _is_budget_arith(node):
+    """`wg_budget.<名字> (+|-|*) <整数常量>`，只支持这一种形状（多一层就自己加）。"""
+    return (isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult))
+            and _is_budget_ref(node.left)
+            and isinstance(node.right, ast.Constant) and isinstance(node.right.value, int))
+
+
+def _budget_arith(node):
+    """按**本进程**的真实预算解上面那种形状，不去推源码里的字面量。"""
+    base = getattr(wg_budget, node.left.attr)
+    return {ast.Add: base + node.right.value,
+            ast.Sub: base - node.right.value,
+            ast.Mult: base * node.right.value}[type(node.op)]
 
 
 def _quoted_timeouts(rel):
@@ -509,6 +538,118 @@ def 超预算的取值不写进重挂命令():
 
 
 @case
+def 环境变量能放宽等待预算():
+    """宿主工具超时比 120s 宽时，预算必须能按宿主放宽（issue #313）。
+
+    四条一起钉，缺一条就只剩假绿：
+
+    1. **默认不变**：`WG_AGENT_TOOL_TIMEOUT` 未设时仍是 120/90；
+    2. **穿透到默认值**：`reply.py:94/101`、`listen.py:63`、`watch.py:104` 都是
+       import 期快照——只让运行时 `--wait` 生效、`DEFAULT_WAIT` 不动的话，不传参
+       永远拿不到大窗口，而门禁照样全绿（plan §1.2 实测过）；所以断言的是
+       **argparse 里的 default**，不是常量本身；
+    3. **非法值不静默**：`abc` / 越界 / 非数字都必须回落 120 **且** stderr 有 WARN
+       ——「我配了 300」被悄悄读成 120，下一个故障就是「为什么还是 90s」；
+    4. **反例对照**：把 `_env_seconds` 换成「永远返回默认」的坏实现，第 2 组必须
+       红。没有这一组，第 2 组红不红只取决于子进程起没起来。
+
+    子进程 env 只用 `isolated_env()` 那套白名单再补一条 `WG_*`：开发机设了这个
+    变量时，门禁不该跟着漂。判定在子进程里做、只回一行真值，不在这儿 mock 源码。
+    """
+    probe = (
+        "import sys; from pathlib import Path\n"
+        "sys.path.insert(0, 'water-group/daemon')\n"
+        "import wg_budget, reply, listen, watch\n"
+        "consts = (wg_budget.AGENT_TOOL_TIMEOUT, wg_budget.WAIT_BUDGET)\n"
+        "defaults = (reply.DEFAULT_WAIT, listen.DEFAULT_TIMEOUT, watch.DEFAULT_TIMEOUT)\n"
+        # `python -c` 下 sys.argv[0] 是 `-c`，参数从 [1] 起：用 `> 1` 判分支，
+        # 写成 `> 2` 会让反例组静默走「无桩」路径、恒读到 300（#313 实测踩过）。
+        "if 'stub' in sys.argv[1:]:\n"
+        "    src = Path('water-group/daemon/wg_budget.py').read_text(encoding='utf-8')\n"
+        # 整段替换 `def _env_seconds` 到 `WAIT_BUDGET = …` 之间的两块常量定义，
+        # 换成「永远返回默认」的坏实现；**按函数定义与常量行定位**，别按裸
+        # `AGENT_TOOL_TIMEOUT = `——模块 docstring 与注释里都有这串字（#313 实测）。
+        "    head = src[:src.index('def _env_seconds(')]\n"
+        "    tail = src[src.index('WAIT_BUDGET = AGENT_TOOL_TIMEOUT'):]\n"
+        "    stub = 'def _env_seconds(*a, default=120, **k):' + chr(10) + "
+        "'    return default' + chr(10)\n"
+        "    consts = ('AGENT_TOOL_TIMEOUT = _env_seconds()' + chr(10) + "
+        "'WAIT_BUDGET = AGENT_TOOL_TIMEOUT - SEND_BUDGET' + chr(10))\n"
+        "    src = head + stub + consts + tail\n"
+        # 三个入口都是 `import wg_budget`：只 exec 进 `wg_budget.__dict__` 不动
+        # `sys.modules` 的话，reload 它们拿到的仍是真正那份（反例永不翻转，#313）。
+        "    exec(compile(src, 'wg_budget-stub', 'exec'), wg_budget.__dict__)\n"
+        "    sys.modules['wg_budget'] = wg_budget\n"
+        "    importlib = __import__('importlib'); importlib.reload(reply)\n"
+        "    importlib.reload(listen); importlib.reload(watch)\n"
+        "    consts = (wg_budget.AGENT_TOOL_TIMEOUT, wg_budget.WAIT_BUDGET)\n"
+        "    defaults = (reply.DEFAULT_WAIT, listen.DEFAULT_TIMEOUT, watch.DEFAULT_TIMEOUT)\n"
+        "cli = reply._build_parser().parse_args([]).wait\n"
+        "print(consts[0], consts[1], *defaults, cli)\n"
+    )
+    with temp_dir(prefix="wg-budget-") as home:
+        env = isolated_env(home)
+
+        def run(value, stub=False):
+            child = dict(env)
+            if value is not None:
+                child["WG_AGENT_TOOL_TIMEOUT"] = value
+            args = [sys.executable, "-c", probe] + (["stub"] if stub else [])
+            return subprocess.run(args, cwd=str(ROOT), env=child, capture_output=True,
+                                  text=True, encoding="utf-8", errors="replace",
+                                  timeout=120)
+
+        default = run(None)
+        wide = run("300")
+        bad = run("abc")
+        stub = run("300", stub=True)
+
+    def numbers(result):
+        return [int(v) for v in result.stdout.split()] if result.returncode == 0 else None
+
+    base, wide_n, bad_n, stub_n = (numbers(r) for r in (default, wide, bad, stub))
+    default_ok = base == [120, 90, 90, 90, 90, 90]
+    wide_ok = wide_n == [300, 270, 270, 270, 270, 270]
+    # 非法值：回落 120，WARN 必须在 stderr 点名变量与回落后的值（stdout 不掺噪音）
+    bad_ok = (bad_n == [120, 90, 90, 90, 90, 90]
+              and "WARN" in bad.stderr and "WG_AGENT_TOOL_TIMEOUT" in bad.stderr
+              and "120" in bad.stderr and "WARN" not in bad.stdout)
+    # 反例：坏实现下放宽**不起作用**（常量与三个默认值全停在 120/90）——
+    # 若仍然读到 270，说明这套探针根本没在测 `_env_seconds`。
+    counter_ok = stub_n is not None and stub_n[0] == 120 and stub_n[1] == 90
+    if not (default_ok and wide_ok and bad_ok and counter_ok):
+        print(f"  默认={base} 放宽={wide_n} 非法={bad_n} 反例={stub_n}；"
+              f"wide.stderr={wide.stderr.strip()[:200]}"
+              f" stub.stderr={stub.stderr.strip()[-300:]}")
+    return default_ok and wide_ok and bad_ok and counter_ok
+
+
+@case
+def 预算缩到极窄时逃生口不留废话():
+    """预算被覆盖到比请求值还窄时，提示不能自相矛盾，也不许替没做过的夹断作保。
+
+    预算 32（等待额度 2s）时，`clamp_wait(12)` 若仍回 12（旧写法
+    `min(int(timeout), ceil(remaining))` 就是个空夹），`reply.py` 会把请求值打印成
+    「已压回 12s」而子进程那边是 2s——正是 #88 要灭的那种假话（issue #313 才让它
+    现形：默认 90、`--wait 60` 时夹断从不触发）。同时 `shorter_wait` 在这么窄的
+    预算下不该给 `--wait 1` 这种与「最多 Ns」同义的假出口，只剩 `--no-wait`；
+    正常预算下那行照旧在（对照组，防「一律不给出口」的坏实现）。
+    """
+    originals = (wg_budget.AGENT_TOOL_TIMEOUT, wg_budget.WAIT_BUDGET)
+    try:
+        wg_budget.AGENT_TOOL_TIMEOUT, wg_budget.WAIT_BUDGET = 32, 2
+        clamped = wg_budget.clamp_wait(12)
+        narrow, _ = capture_wait(12)
+        wg_budget.AGENT_TOOL_TIMEOUT, wg_budget.WAIT_BUDGET = originals
+        normal, _ = capture_wait(60)
+    finally:
+        wg_budget.AGENT_TOOL_TIMEOUT, wg_budget.WAIT_BUDGET = originals
+    return (clamped == 2 and "最多 2s" in narrow and "要更短" not in narrow
+            and "--no-wait" in narrow
+            and "要更短：--wait 30" in normal)
+
+
+@case
 def 看护默认超时也在预算内():
     """裸跑 `watch.py` 的等待上限同样不能超预算（issue #83）。
 
@@ -533,13 +674,26 @@ def 示例命令不超预算():
     注释）：注释里写「300s 会怎样」是解释，不是推荐值，按原文扫会把解释也判红。
 
     仓外那份私有 SOP 口径不同，由第 26 条单扫（见「私有SOP示例不超预算」）。
+
+    显式抬预算的示例（issue #313：`WG_AGENT_TOOL_TIMEOUT=300 … --timeout 300`）不算
+    超预算——它的前提就写在同一条命令里。判据不是「出现 300 就放行」：同一行必须同时
+    带 `WG_AGENT_TOOL_TIMEOUT=<n>`，且 `n` 装得下那个取值。写漏变量、或变量比取值小，
+    照样红。
+
+    抬预算时的上限是 `AGENT_TOOL_TIMEOUT` 本身，**不是** `WAIT_BUDGET`：`--timeout`
+    和 `--wait` 是两回事。`--wait` 是「sleep 完还要发送」的额度，所以默认 90 = 120 - 30；
+    `--timeout` 只是这一轮守到多久，300s 的工具调用里挂 300s 的监听是正解，压到 270
+    白白少吃 30s。错把发送余量也扣掉，这条示例永远差 30 秒、怎么写都是红的。
     """
     over = []
     for rel in DOC_SAMPLES:
         text = (ROOT / rel).read_text(encoding="utf-8")
-        over += [f"{rel}: --timeout {value}"
-                 for value in re.findall(r"--timeout[ =](\d+)", text)
-                 if int(value) > wg_budget.WAIT_BUDGET]
+        for line in text.splitlines():
+            cap = re.search(r"WG_AGENT_TOOL_TIMEOUT=(\d+)", line)
+            limit = int(cap.group(1)) if cap else wg_budget.WAIT_BUDGET
+            over += [f"{rel}: --timeout {value}"
+                     for value in re.findall(r"--timeout[ =](\d+)", line)
+                     if int(value) > limit]
     for rel in DAEMON_SOURCES:
         over += [f"{rel}: --timeout {value}"
                  for value in _quoted_timeouts(rel)
@@ -601,8 +755,14 @@ def 显式超预算的监听自己告警():
     WARN 必须在**等待开始之前**（独立复核建议）：被宿主截断的路径上一个字都不
     会再打印，把 WARN 挪到 `run("watch.py")` 之后它一次都不会输出，而只查
     「stdout 里有没有 WARN」的断言照样绿（变异 M6b 实测）——症状原样复活。
+
+    超预算/预算内的取值按**子进程**的预算派生（`child_budget`，issue #313）：
+    `child_env` 剥掉了 `WG_AGENT_TOOL_TIMEOUT`，子进程永远按默认预算判超没超，
+    拿父进程放大后的常量来算，在长超时宿主里 `--timeout 270` 会被子进程当成
+    「预算内」而这条对照组断言落空。
     """
-    over = wg_budget.AGENT_TOOL_TIMEOUT * 2
+    agent, wait = child_budget()
+    over = agent * 2
     with temp_dir(prefix="wg-rehang-") as home:
         fixture_home(home)
         write_events(home, [event(1, 5, "@机器人 在吗")])
@@ -612,7 +772,7 @@ def 显式超预算的监听自己告警():
         fixture_home(home)
         write_events(home, [event(2, 5, "@机器人 在吗")])
         quiet = run_script(home, "listen.py", "--cycles", "1", "--timeout",
-                           str(wg_budget.WAIT_BUDGET), "--no-digest", "--probe")
+                           str(wait), "--no-digest", "--probe")
     warn_at = index_of(loud.stdout, "WARN")
     wait_at = index_of(loud.stdout, "等最多")
     return (loud.returncode == 0 and "WARN" in loud.stdout

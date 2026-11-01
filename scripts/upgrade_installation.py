@@ -124,6 +124,10 @@ def running_in(roots):
 
 
 def state_files(root):
+    # `wechat-snapshot-info.json` is still listed even though this build writes
+    # only the qq one (#350): upgrade verification snapshots whatever an older
+    # install left behind, and silently dropping an existing file from the
+    # comparison would make "the upgrade touched it" unobservable.
     names = ['.env', 'data/chats.sqlite3', 'data/chats.sqlite3-wal',
              'data/mcp-access.sqlite3', 'data/mcp-access.sqlite3-wal', 'data/desktop-preferences.json',
              'data/qq-snapshot-info.json', 'data/wechat-snapshot-info.json']

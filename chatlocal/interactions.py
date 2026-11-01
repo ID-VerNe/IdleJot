@@ -56,7 +56,7 @@ def extract(store,where,params,participants,*,mode='strict',conversation_ids=(),
                     detail='原生引用ID精确匹配同会话消息' if basis=='reply' else '原生引用全文在可见同会话中唯一精确匹配；并非原生目标ID'))
             for account in ids-{m['sender_id']}:
                 if re.search(r'@'+re.escape(account)+r'(?![\w])',m['content']):
-                    # A numeric/wxid textual address is explicit, but not a native mention field.
+                    # A numeric textual address is explicit, but not a native mention field.
                     edges.append(dict(ids=[m['id']],positions=[i],basis='mention',target=account,
                         detail='正文明确@稳定账号；导出未保留原生@目标字段，仍需核对'))
         if mode=='contextual':

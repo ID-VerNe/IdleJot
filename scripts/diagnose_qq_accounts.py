@@ -24,7 +24,7 @@ import time
 import traceback
 
 FORMAT = 'tulpa-qq-account-diagnostic-v1'
-SOURCE_FILES = ('scripts/list_client_accounts.py', 'chatlocal/client_accounts.py',
+SOURCE_FILES = ('scripts/list_client_accounts.py',
                 'tools/qq-reader/chatlog_keeper/qq_db.py',
                 'tools/qq-reader/chatlog_keeper/core/_paths.py')
 LAYOUTS = ('nt_qq/nt_db/nt_msg.db', 'nt_db/nt_msg.db', 'nt_qq/global/nt_db/nt_msg.db')

@@ -318,7 +318,7 @@ def archive_check(path):
             if hashlib.sha256(z.read('Tulpa/' + name)).hexdigest() != sha:
                 errors.append('upgrade hash mismatch: ' + name)
         for required in ('Tulpa.exe', 'Tulpa.Support.exe', 'LICENSE', 'doc/THIRD_PARTY.md', 'doc/assets/title.png', 'web/tulpa-logo.png',
-                         'tools/qq-reader/LICENSE', 'tools/wechat-reader/LICENSE'):
+                         'tools/qq-reader/LICENSE'):
             if 'Tulpa/' + required not in expected:
                 errors.append('missing package file: ' + required)
         for name in names:

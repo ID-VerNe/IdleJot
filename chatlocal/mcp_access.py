@@ -7,7 +7,6 @@ import uuid
 from contextlib import contextmanager
 
 from .app_plugins import SCOPE_FLAGS
-from .client_accounts import bound_account
 from .retrieval import Plan, date_bound
 from .mcp_qq_permissions import QQ_FLAGS, MEDIA_FLAGS as ATTACHMENT_FLAGS, live_grant
 from .sqlite_util import connect as sqlite_connect
@@ -20,6 +19,49 @@ PERMISSION_FLAGS = ('media', 'prepare', 'voice', 'onebot', 'send', 'manage', 'ch
 CHAT_MEDIA_TOOLS = ('read_chat_image','import_chat_image','list_chat_stickers','read_chat_sticker','note_chat_sticker','send_chat_sticker','collect_chat_sticker')
 
 DEFAULT_PORT = 18777
+
+# The only platform this build reads. Every scope/platform check below is narrowed
+# to it (#350: the wechat path is gone, so accepting the value would authorize a
+# source that can never be bound).
+PLATFORM = 'qq'
+
+
+def account_id(value):
+    """A detected local account name -- never a path, never a traversal."""
+    if not isinstance(value, str) or not value or len(value) > 200 or value in ('.', '..'):
+        raise ValueError('请选择有效的本机账号')
+    if any(ord(c) < 32 or c in '/\\:<>"|?*' for c in value) or value.endswith((' ', '.')):
+        raise ValueError('账号必须是检测到的本机账号名称，不能是路径')
+    return value
+
+
+def bound_account(store, platform):
+    """Never reuse another account's cursors, even if metadata is lost.
+
+    Moved here from the deleted `chatlocal/client_accounts.py` (#350): grants are
+    its only consumer, and it read a module whose remaining job was spawning an
+    account probe for the platform this change removes. The snapshot file name
+    stays platform-derived rather than hardcoded: point the same code at another
+    platform and it looks for that platform's snapshot, which is what the
+    caller asked for.
+    """
+    values = set()
+    metadata = store.path.parent/f'{platform}-snapshot-info.json'
+    if metadata.exists():
+        try:
+            values.add(account_id(json.loads(metadata.read_text('utf-8-sig'))['account']))
+        except (OSError, ValueError, KeyError):
+            raise ValueError('已有账号来源记录无法读取，请保留数据并检查本机诊断；不会自动选择其他账号。') from None
+    with store.connect() as db:
+        for table in ('sync_state', 'live_state'):
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                continue
+            row = db.execute(f'SELECT checkpoint FROM {table} WHERE platform=?', (platform,)).fetchone()
+            if row and (account := json.loads(row[0]).get('account')):
+                values.add(account_id(account))
+    if len(values) > 1:
+        raise ValueError('已有来源与同步进度的账号不一致，请保留数据并检查；未启动读取。')
+    return next(iter(values), None)
 
 
 class AccessDenied(ValueError):
@@ -92,7 +134,7 @@ class MCPAccess:
         if not isinstance(name, str) or not name.strip() or len(name) > 60 or any(ord(c) < 32 for c in name):
             raise ValueError('请填写不超过 60 字的连接名称。')
         platforms = body.get('platforms')
-        if not isinstance(platforms, list) or not platforms or any(p not in ('qq', 'wechat') for p in platforms):
+        if not isinstance(platforms, list) or not platforms or any(p != PLATFORM for p in platforms):
             raise ValueError('请选择允许访问的平台。')
         conversations = body.get('conversations', [])
         if not isinstance(conversations,list) or len(conversations)>500:

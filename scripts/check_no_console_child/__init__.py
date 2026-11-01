@@ -42,11 +42,12 @@ This gate asserts eight things:
    the child's stdout points at its new console, so inheriting it drops whatever
    the child printed (issue #91 -- `listen.py` reported a bare `WAKE` four times
    in a row).
-7. The vendored trees in `VENDORED_SOURCES` are scanned with the same rules when
-   they are present. They are gitignored and patched at install time, so CI does
-   not have them: an absent file is reported as `未扫`, which is not the same
-   statement as "clean" (issue #323 -- the gate used to have no opinion about
-   `tools/` at all, and said so by saying nothing).
+7. There is no vendored-tree scope any more (#350). The `VENDORED_SOURCES`
+   table existed for exactly one file -- the WeChat reader's `wechatauto/media.py`
+   -- and that reader is no longer vendored, installed or supported. The table,
+   `scan_vendored()` and the `patch_wechat_media` self-test all went with it. Rule
+   7 is consequently retired rather than empty: an absent table cannot report
+   `未扫`, so nothing here claims to have looked at `tools/`.
 8. The runtime-worker scope is derived from the runtime tree, not hand-maintained
    (issue #329). Every spawn in `chatlocal/` / `server_wg.py` that passes a
    `scripts/<name>.py` path is collected as a *derived* worker and must be listed
@@ -85,15 +86,6 @@ SCAN_DIRS = ('water-group', 'water_group', 'chatlocal')
 SCAN_FILES = ('server_wg.py',)
 SUFFIXES = frozenset({'.py', '.pyw'})
 
-
-# Third-party source we vendor into tools/ and patch at install time (issue #323).
-# tools/ is gitignored, so it is absent in CI and in check_pr_parity.py's clean
-# worktree: a missing file is reported as 未扫, never as a silent skip and never as
-# a failure. A file that *is* present is scanned with the same rules as runtime code.
-VENDORED_SOURCES = {
-    'tools/wechat-reader/wechatauto/media.py':  # ffmpeg transcode of wxgf images
-        'scripts/reader_patches.py: patch_wechat_media',
-}
 
 # Diagnostic/manual scripts that spawn on purpose and are *not* runtime code.
 # Empty today (the whitelist above is precise enough); the table exists so that
@@ -639,7 +631,9 @@ def self_test():
         if (bad, stale, flagged_n) != ([], [], 0):
             raise AssertionError(
                 f'检测器自测失败（{why}）：docstring 不是调用，不该被扫成 spawn')
-    # issue #319 的原始写法：vendored 树里 ffmpeg 的那次调用，判据必须抓得住
+    # issue #319 的原始写法（微信 reader 的 wxgf→jpg ffmpeg 调用）仍然是「未加固的
+    # spawn 必被抓住」的正例：判据不随那个 vendored 文件一起退休，它抓的是形状
+    # （`subprocess.run(...)` 没写窗口标志），不是某个具体文件（#350 删除该文件时保留）。
     media_snippet = (
         'import subprocess\n'
         'def _wxgf_to_jpg(self, data):\n'
@@ -653,53 +647,7 @@ def self_test():
         '        return None\n')
     bad, _, _ = scan_source(media_snippet)
     if len(bad) != 1:
-        raise AssertionError('检测器自测失败：tools/wechatauto/media.py 的原始写法必须被抓'
-                             '（issue #319）')
-    # issue #323: the same file, patched by reader_patches.patch_wechat_media, must
-    # come out clean through the very scanner that failed it above -- otherwise the
-    # vendored scope would be red forever on any machine that has tools/.
-    sys.path.insert(0, str(ROOT / 'scripts'))
-    from reader_patches import patch_wechat_media
-    patched_media = patch_wechat_media(media_snippet.encode('utf-8')).decode('utf-8')
-    bad, stale, _ = scan_source(patched_media)
-    if (bad, stale) != ([], []):
-        raise AssertionError('检测器自测失败：patch_wechat_media 之后 media.py 必须零违规（issue #323）')
-    if patch_wechat_media(patched_media.encode('utf-8')).decode('utf-8') != patched_media:
-        raise AssertionError('检测器自测失败：patch_wechat_media 必须幂等（重复安装不能重复插入）')
-    if 'CREATE_NO_WINDOW' not in patched_media.split('creationflags=', 1)[-1]:
-        raise AssertionError('检测器自测失败：patch_wechat_media 没有补上窗口抑制标志')
-    try:
-        patch_wechat_media(media_snippet.replace('timeout=30', 'timeout=60').encode('utf-8'))
-    except ValueError:
-        pass
-    else:
-        raise AssertionError('检测器自测失败：锚点漂移时 patch_wechat_media 必须抛 ValueError')
-    # issue #337: a patch nobody applies is not a fix, and the gate cannot tell that
-    # from "the patch works" -- both look identical in the self-test above. So the
-    # two tables that have to agree are reconciled here: every VENDORED_SOURCES row
-    # must name a patch that lives in reader_patches.VENDORED_PATCHES *and* carries
-    # the applying driver. A patch added to the table without a target, or a scanned
-    # vendored file whose note names a function that is not in the table, is red.
-    from reader_patches import VENDORED_PATCHES
-    applied = {row['path']: row['patch'].__name__ for row in VENDORED_PATCHES}
-    for rel, note in sorted(VENDORED_SOURCES.items()):
-        if 'patch_' not in note:
-            raise AssertionError(
-                f'检测器自测失败：{rel} 的扫描说明没有点名补丁函数，无法与补丁表对账：{note!r}')
-        note_fn = 'patch_' + note.rsplit('patch_', 1)[-1]
-        want = applied.get(rel)
-        if want is None:
-            raise AssertionError(
-                f'检测器自测失败：{rel} 在 VENDORED_SOURCES 里，但 reader_patches.VENDORED_PATCHES '
-                f'没有对应的补丁 —— 没有驱动就会像 #337 那样从未真正打过补丁')
-        if want != note_fn:
-            raise AssertionError(
-                f'检测器自测失败：{rel} 的扫描说明写着 {note_fn!r}，补丁表里却是 {want!r}，二者必须同名')
-    orphan = sorted(rel for rel in applied if rel not in VENDORED_SOURCES)
-    if orphan:
-        raise AssertionError(
-            '检测器自测失败：这些 vendored 文件有补丁却不在 VENDORED_SOURCES 里，等于没扫（issue #323）：'
-            + '、'.join(orphan))
+        raise AssertionError('检测器自测失败：无窗口标志的 subprocess.run 必须被抓（issue #319）')
     # 范围自检：RUNTIME_WORKERS 里每个文件都必须真的进扫描集，改名/删除即红
     # （issue #319 的病根就在这里：判据没问题，是文件没进范围）
     scanned = {p.relative_to(ROOT).as_posix() for p in iter_sources()}
@@ -711,52 +659,6 @@ def self_test():
     # `_workers` 不自己再走一遍目录，免得两处口径悄悄分叉
     self_test_worker_scope(read_runtime_sources())
     return True
-
-
-def scan_vendored():
-    """(scanned, unscanned, failures) for the VENDORED_SOURCES table.
-
-    Present files go through `scan_source` exactly like runtime code, so a
-    vendored bare spawn is a red build on a machine that has the sources. Absent
-    files are named in the output instead of being dropped -- the whole point of
-    issue #323 is that "not scanned" used to look identical to "clean".
-
-    A violation here is not the same kind of red as a runtime violation, and the
-    report has to say so (issue #337). Vendored bytes are patched, never hand
-    edited, and the fix is to run the applying driver -- not to drop the file from
-    `VENDORED_SOURCES`, which is #323 itself. The extra line below is navigation
-    only: every violation is still a failure, and the exit code is still 1.
-    """
-    scanned = []
-    unscanned = []
-    failures = []
-    violations = []
-    for rel, note in sorted(VENDORED_SOURCES.items()):
-        path = ROOT / rel
-        if not path.exists():
-            unscanned.append(f'{rel}（{note}）')
-            continue
-        try:
-            text = path.read_text(encoding='utf-8')
-            bad, dead, _ = scan_source(text, rel)
-        except (OSError, SyntaxError, UnicodeDecodeError) as exc:
-            failures.append(f'{rel}: 无法读取（{exc}）')
-            continue
-        violations.extend((rel, *item) for item in bad)
-        failures.extend(f'{rel}:{lineno} 白名单注释已经不对应任何未加固的 spawn  {line}'
-                        for lineno, line in dead)
-        scanned.append(rel)
-    if violations:
-        failures.append('vendored 树里这些 spawn 会给子进程开一个控制台窗口（issue #323）：')
-        failures.extend(f'  {rel}:{lineno}  {line}' for rel, lineno, line, _ in violations)
-        # Which patch(es) would have prevented the violations actually seen, named
-        # from the same table the driver reads, so the two cannot disagree.
-        fixes = sorted({VENDORED_SOURCES[rel] for rel, *_ in violations})
-        failures.append('  → 这些不是本仓代码，是安装时被改写的第三方副本：#337 的修法是先跑'
-                        ' `python scripts/apply_reader_patches.py` 应用补丁（' +
-                        '；'.join(fixes) + '），'
-                        '不要把它们移出 VENDORED_SOURCES —— 那是 #323 的修复，退回去等于放行黑框')
-    return scanned, unscanned, failures
 
 
 def read_runtime_sources():
@@ -851,9 +753,6 @@ def main():
     failures.extend(check_helpers())
     failures.extend(check_passthrough_visible())
 
-    vendored_scanned, vendored_unscanned, vendored_failures = scan_vendored()
-    failures.extend(vendored_failures)
-
     if failures:
         print('FAIL: 控制台开窗门禁未通过\n')
         for line in failures:
@@ -870,11 +769,6 @@ def main():
     print(f'✓ 运行时树 {flagged} 处 spawn 已收口（flag 或显式 POSIX 白名单）')
     print('✓ 运行时树里没有 DETACHED_PROCESS（它不是窗口抑制器）')
     print('✓ CREATE_NO_WINDOW 只在 winconsole / platform_process 里拼写，也没有 0x08000000 旁路')
-    for rel in vendored_scanned:
-        print(f'✓ vendored 树已扫（同一套判据）：{rel}')
-    for rel in vendored_unscanned:
-        print(f'· vendored 树未扫：{rel} —— 本机没有这份第三方源码（tools/ 受 .gitignore 保护），'
-              f'不是「已检查干净」')
     print('✓ run_hidden / popen_hidden / owned_popen 实跑正常')
     print('✓ run_passthrough 在无控制台父进程下仍能把子进程输出交给调用方（issue #91）')
     print('✓ 运行时 worker 范围由运行树派生，与 RUNTIME_WORKERS 双向一致（issue #329）')

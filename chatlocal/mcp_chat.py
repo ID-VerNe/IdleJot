@@ -473,9 +473,11 @@ class MCPChat(ChatWaitMixin):
                     # `unsupported`，kind 与受限长度的 raw 都留下来，能解析的卡片
                     # 另外把标题/摘要拼进 content（PB）。
                     # issue #311：卡片的跳转地址也进 content（`[卡片：标题 → 链接]`），
-                    # 占位写法与引用/转发节点共用 card_text()，不在两处各拼一份。
-                    parts.append(card_text(kind,data))
-                    segments.append(unsupported(kind,data,raw_budget))
+                    # 占位写法与引用/转发节点共用 card_text()，不在两处各拼一份；
+                    # 先建段再把段交给 card_text，链接预算只扣一次、两处长度必然一致。
+                    segment=unsupported(kind,data,raw_budget)
+                    segments.append(segment)
+                    parts.append(card_text(kind,data,segment))
         else:return
         content=''.join(parts)
         # issue #39: the upstream card/nickname can be QQ quote-bubble UI text

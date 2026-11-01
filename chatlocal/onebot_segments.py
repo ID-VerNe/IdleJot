@@ -43,6 +43,12 @@ LINK_LIMIT = 400         # 卡片跳转地址：够装下带一串参数的分�
 UNSUPPORTED_TOTAL_CHARS = 4000
 UNSUPPORTED_RAW_CHARS = READ_PREVIEW_CHARS  # 单段：与「交给 Agent 的一段正文」同额
 
+# 一条消息里所有段链接字段的合计上限（独立复核指出）：单段 400 而不合计的话，
+# 二十张卡片就能把 payload 顶过 `mcp_chat.receive` 末尾的 20000 字封顶，
+# `segments` 被整个清空——那正是 #165 PA 用 raw 预算防住的「修一个丢字段的 bug
+# 换一个丢整条消息的 bug」。400 × 5 张卡片，够真实消息用。
+LINK_TOTAL_CHARS = 2000
+
 # content 里给人看的标签。**不进** segments[].type（issue #165 的病根）。
 LABELS = {
     'image': '图片', 'record': '语音', 'video': '视频', 'file': '文件',
@@ -76,7 +82,10 @@ _LINK_RE = re.compile(r'https?://\S+$', re.I)
 # 卡片是外部输入，不给自己开一条无界递归。
 _LINK_DEPTH = 8
 _XML_URL_TAG_RE = r'<url>(.*?)</url>'
-_XML_URL_ATTR_RE = r'url\s*=\s*["\']([^"\']*)["\']'
+# 属性名单独捕获再比对（独立复核指出）：只写 `url\s*=` 没有左边界，
+# `thumburl='http://…/封面.jpg'` 里的 `url=` 同样命中，而 finditer 取最左——
+# 一张带缩略图的卡片会把封面图当成跳转地址，且它本身是 http(s)，能穿过全部过滤。
+_XML_ATTR_RE = r'([\w-]+)\s*=\s*["\']([^"\']*)["\']'
 # 链接里出现这些字符就没法安全嵌进 `[卡片：…]` 占位（`]` 会让唤醒行的占位剥离
 # 正则停在半路，把后半截 URL 留在正文里占额度），一律当解析失败。
 _LINK_BAD_CHARS = '[]<>\n\t '
@@ -139,7 +148,7 @@ def unsupported(raw_kind, raw_data=None, budget=None):
     空的」是两件事，读者要能分开。
     """
     segment = dict(type='unsupported', kind=kind_of(raw_kind))
-    segment.update(link_fields(raw_kind, raw_data))
+    segment.update(link_fields(raw_kind, raw_data, budget))
     body = _raw_body(raw_data)
     if not body:
         return segment
@@ -196,30 +205,46 @@ def card_link(raw_data):
     return _link_from(raw_data, 0)
 
 
-def link_fields(raw_kind, raw_data):
+def link_fields(raw_kind, raw_data, budget=None):
     """段上的链接字段（issue #311）：``{'url': …[, 'url_truncated': True]}`` 或 ``{}``。
 
     ``unsupported()`` 与历史行回填共用这一处，限额与截断标记因此只有一份——
     否则两条渲染路径迟早给出两个长度。
+
+    ``budget`` 是**一条消息**共享的 ``{'link': 剩余字符数}``（与 ``raw`` 预算同一个
+    dict 走），预算耗尽就不再挂链接：链接仍能在 ``raw`` 原文里找到，而 payload
+    顶过封顶会把整条消息的 ``segments`` 清空，那比丢一个字段更糟。
     """
     if kind_of(raw_kind) not in CARD_KINDS:
         return {}
     link = card_link(raw_data)
     if not link:
         return {}
-    kept = clip(link, LINK_LIMIT)
+    allowance = LINK_LIMIT
+    if isinstance(budget, dict):
+        if 'link' not in budget:
+            budget['link'] = LINK_TOTAL_CHARS
+        allowance = max(0, min(LINK_LIMIT, int(budget['link'])))
+        if allowance <= 0:
+            return {}
+    kept = clip(link, allowance)
     fields = {'url': kept.text}
     if kept.truncated:
         fields['url_truncated'] = True
+    if isinstance(budget, dict):
+        budget['link'] = max(0, int(budget['link']) - len(kept.text))
     return fields
 
 
-def card_text(raw_kind, raw_data):
+def card_text(raw_kind, raw_data, segment=None):
     """content 里那段占位：``[卡片：标题 → https://…]``（issue #311）。
 
     入库侧（``mcp_chat.receive``）与引用/转发节点渲染（``mcp_chat_details.render``）
     都调这里，标题、链接、方括号的写法只有一份——#165 的教训是两条路径各写一份
     「拼 content」，改一处漏一处。
+
+    传了 ``segment`` 就用段上**已经算好**的链接（预算已扣、截断已标），不传才现算：
+    content 说「有链接」而段上没有、或两处长度不同，都是比缺链接更难查的漂移。
 
     链接放在标题后面而不是另起一段：content 是给人扫的一行，读者要能连着读成
     「这条卡片是什么、指向哪里」。唤醒行里整段仍被 `strip_placeholders` 剥成
@@ -229,8 +254,9 @@ def card_text(raw_kind, raw_data):
     body = card_summary(raw_data)
     if body:
         text += '：' + body
-    fields = link_fields(raw_kind, raw_data)
-    if fields:
+    fields = (link_fields(raw_kind, raw_data) if segment is None
+              else {key: segment[key] for key in ('url', 'url_truncated') if segment.get(key)})
+    if fields.get('url'):
         text += ' → ' + fields['url'] + ('…' if fields.get('url_truncated') else '')
     return '[' + text + ']'
 
@@ -339,12 +365,27 @@ def _link_from(value, depth):
 
 
 def _xml_link(text):
-    """XML 卡片：先认 ``<url>…</url>``，再认根节点上的 ``url="…"`` 属性。"""
-    for pattern in (_XML_URL_TAG_RE, _XML_URL_ATTR_RE):
-        for match in re.finditer(pattern, text, re.S | re.I):
-            found = _clean_link(match.group(1))
-            if found:
-                return found
+    """XML 卡片：先认 ``<url>…</url>``，再认链接属性（`url=` / `qqdocurl=` …）。
+
+    属性必须**按名字白名单**取，不能只匹配 ``url=`` 子串：XML 卡片的属性名里
+    ``thumburl`` / ``dataurl`` / ``coverurl`` 都带 ``url`` 结尾，取最左的那个会把
+    封面图当成卡片指向的地址。取到之后按 ``_LINK_KEYS`` 的优先级挑，与 JSON 侧
+    同一套口径。
+    """
+    for match in re.finditer(_XML_URL_TAG_RE, text, re.S | re.I):
+        found = _clean_link(match.group(1))
+        if found:
+            return found
+    found = {}
+    for match in re.finditer(_XML_ATTR_RE, text, re.S | re.I):
+        name = match.group(1).strip().lower()
+        if name in _LINK_KEYS and name not in found:
+            link = _clean_link(match.group(2))
+            if link:
+                found[name] = link
+    for key in _LINK_KEYS:
+        if key in found:
+            return found[key]
     return ''
 
 

@@ -295,13 +295,14 @@ class ChatDetails:
                 # 否则「修好之后的新卡片有链接、老卡片没有」，同一个入口两种答案。
                 degraded=kind=='unsupported'
                 source=seg.get('raw') if degraded else None
-                parts.append(card_text(seg.get('kind') if degraded else kind,source))
                 if degraded:
                     stored=dict(seg)
                     if not stored.get('url'):
                         stored.update(link_fields(stored.get('kind'),source))
+                    parts.append(card_text(stored.get('kind'),source,stored))
                     result.append(stored)
                 else:
+                    parts.append(card_text(kind,source))
                     result.append(dict(type='unsupported',kind=kind_of(kind)))
         return dict(content=''.join(parts)[:MAX_TEXT],segments=result)
 

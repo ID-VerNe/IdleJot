@@ -204,6 +204,17 @@ def case_card_link_contract():
     assert card_link({"data": CARD_XML_LINK}) == "https://b23.tv/item?from=qq", card_link({"data": CARD_XML_LINK})
     attr_only = "<msg serviceID='1' url='https://b23.tv/only'><item><title>甲</title></item></msg>"
     assert card_link({"data": attr_only}) == "https://b23.tv/only", card_link({"data": attr_only})
+    # 独立复核发现的那一类：`thumburl` / `dataurl` 只是**以 url 结尾**的属性，
+    # 取最左会把封面图当跳转地址（而且它本身是 http(s)，能穿过全部过滤）。
+    for noise in ("thumburl", "dataurl", "coverurl"):
+        card = ("<msg serviceID='1' %s='http://gchat.qpic.cn/cover.jpg' "
+                "url='https://b23.tv/real'><item><title>甲</title></item></msg>" % noise)
+        assert card_link({"data": card}) == "https://b23.tv/real", \
+            f"{noise} 被当成了跳转地址：{card_link({'data': card})}"
+    # 链接属性同样按优先级挑：qqdocurl 在前、url 在后时取 qqdocurl。
+    both = ("<msg qqdocurl='https://b23.tv/preferred' url='https://b23.tv/secondary'>"
+            "<item><title>甲</title></item></msg>")
+    assert card_link({"data": both}) == "https://b23.tv/preferred", card_link({"data": both})
 
     # share 段直接给 url；转义形态要还原成能打开的地址。
     assert card_link({"url": SHARE_LINK}) == SHARE_LINK
@@ -240,7 +251,21 @@ def case_link_fields_limits():
     # content 占位与段字段同一个长度：两处各算一遍迟早给出两个答案。
     text = onebot_segments.card_text("share", {"url": long_url, "title": "长链接"})
     assert kept["url"] in text and text.endswith("]"), text
-    print(f"✓ 4c. link_fields：{onebot_segments.LINK_LIMIT} 字上限 + url_truncated，视频段不掺和")
+    # 段上已经算好的链接（预算已扣）必须被 card_text 沿用，不许自己再算一遍。
+    pinned = dict(type="unsupported", kind="share", url="https://b23.tv/pinned")
+    assert "https://b23.tv/pinned" in onebot_segments.card_text("share", {"url": long_url}, pinned)
+    # 合计预算：一条消息的链接字段总量封顶，用尽之后不再挂链接（raw 仍在）。
+    fat = json.dumps({"meta": {"detail_1": {"qqdocurl": "https://b23.tv/" + "y" * 600}}})
+    budget = {}
+    total = 0
+    for _ in range(10):
+        total += len(link_fields("json", {"data": fat}, budget).get("url", ""))
+    assert total <= onebot_segments.LINK_TOTAL_CHARS, f"链接合计 {total} 超过总预算"
+    assert total >= onebot_segments.LINK_TOTAL_CHARS - onebot_segments.LINK_LIMIT, total
+    assert budget.get("link") == 0, budget
+    assert link_fields("json", {"data": fat}, budget) == {}, "预算用尽还继续挂链接"
+    print(f"✓ 4c. link_fields：单段 {onebot_segments.LINK_LIMIT} 字 + 合计 {onebot_segments.LINK_TOTAL_CHARS} 字，"
+          f"视频段不掺和")
 
 
 # --------------------------------------------------------- 2. 入库侧真实路径
@@ -333,7 +358,18 @@ def case_ingest_card_link():
     first = (share_payload.get("segments") or [{}])[0]
     assert first.get("url") == SHARE_LINK, first
     assert SHARE_LINK in (share_payload.get("content") or ""), share_payload.get("content")
-    print(f"✓ 5b. 入库卡片段带 url，content={content!r}")
+
+    # 一条消息里二十张带长链接的卡片：链接字段合计封顶，payload 不许被顶过 20000
+    # 字封顶（那会把 segments 整个清空，等于修一个丢字段换一个丢整条消息）。
+    fat = json.dumps({"prompt": "卡片", "meta": {"detail_1": {"qqdocurl": "https://b23.tv/" + "z" * 600}}})
+    many = receive(chat, [dict(type="json", data=dict(data=fat)) for _ in range(20)], 4114)
+    segments = many.get("segments") or []
+    assert len(segments) == 20, f"段清单被挤掉了 {20 - len(segments)} 条"
+    linked = sum(len(s.get("url") or "") for s in segments)
+    assert linked <= onebot_segments.LINK_TOTAL_CHARS, f"链接字段合计 {linked} 超过总预算"
+    assert linked, "封顶不该把链接全丢了"
+    assert len(json.dumps(many, ensure_ascii=False)) < 20000, "payload 仍要装得下"
+    print(f"✓ 5b. 入库卡片段带 url（合计 {linked} 字），content={content!r}")
 
 
 def case_ingest_xml_and_unknown():
@@ -478,9 +514,10 @@ def case_wake_line_keeps_budget():
     assert wg_text.strip_placeholders("[非文本消息]正文")[0] == "[非文本]正文"
     assert wg_text.strip_placeholders("[表情]正文")[0] == "[非文本]正文"
     # #311：占位里带上了最长 400 字的跳转地址，每一种卡片形态都必须剥干净——
-    # 漏一种，那张卡片的 URL 就把 80 字的唤醒行吃光。
-    for kind, head in (("json", "卡片"), ("share", "分享"), ("music", "音乐"), ("markdown", "Markdown")):
-        with_link = onebot_segments.card_text(kind, {"title": "标题", "url": "https://b23.tv/" + "x" * 300})
+    # 漏一种，那张卡片的 URL 就把 80 字的唤醒行吃光。这里手写占位而不调
+    # `card_text()`：本项钉的是**占位表**，不该因为新 API 缺失而红。
+    for head in ("卡片", "分享", "音乐", "Markdown"):
+        with_link = "[" + head + "：标题 → https://b23.tv/" + "x" * 300 + "]"
         stripped, original = wg_text.strip_placeholders(with_link + "正文")
         assert stripped == "[卡片]正文", f"{head} 占位的链接漏进了唤醒行：{stripped!r}"
         assert original == len(with_link) + 2, (head, original)

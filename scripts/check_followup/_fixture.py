@@ -56,6 +56,17 @@ os.environ["IDLEJOT_WG_DB"] = str(DB)
 # state 两腿钉合走 pin_state_env（#281）：IDLEJOT 先于 TULPA，两腿都钉堵穿透，
 # 外部残留的 IDLEJOT_WG_STATE 不会再落回实机状态、删掉真实窗口文件。
 pin_state_env(TMP)
+# 会话钉死本群（issue #322）：#206 之后 `followup.active_session_id()` 按
+# `wg_isolation.resolve()` 过滤 `chat_sessions`，而 resolve 的第三档是「config 里
+# 唯一 enabled 的群」——本进程从未设 IDLEJOT_WG_CONFIG（那只对 run_watch() 的子进程
+# 生效），于是在**装过 config 的机器上**它读真实 config.json，得到
+# <本机账号>:group:<本机唯一群>，与下面 build() 插的 `111:group:123` 永不等，
+# 过滤 0 行、窗口 session 变成空串。干净 checkout 没有 config.json，第三档本来就
+# 落到空（未钉死），门禁因此只在开发机上红——「本机红、CI 绿」的假分歧。
+# 钉 env（第一档）比引一份夹具 config 直白：本文件已有五处用例直接桩 config，
+# 再多一份会互相打架；被测的仍是 resolve → 过滤这条链路，只是输入变成确定的。
+# （字面量与下面 GROUP 同值；不能引用 GROUP——它在文件更靠后的位置定义。）
+os.environ["IDLEJOT_WG_CONVERSATION"] = "111:group:123"
 
 sys.path.insert(0, str(ROOT / "water-group" / "daemon"))
 

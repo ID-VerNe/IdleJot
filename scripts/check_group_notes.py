@@ -110,8 +110,14 @@ def test_mcp_tool_wiring():
     """Property 6: the read path is a declared MCP tool, not a DB session."""
     assert "query_group_notes" in CHAT_TOOLS, "query_group_notes must be in CHAT_TOOLS"
     from chatlocal.agent_tools import tool
+    # issue #4 PD2c：这四行已搬进 app 侧插件（chatlocal/app_plugins/dossier.py），
+    # 宿主的 chat_schemas 不再持有；按插件注册表取。CHAT_TOOLS 仍是最终可见面
+    # （它由 APP_TOOL_NAMES 带出），所以上面那条断言照旧钉住「工具真的露出去了」。
+    from chatlocal.app_plugins import dossier as dossier_plugin
 
-    rows = chat_schemas(tool)
+    rows = dossier_plugin.schemas(tool)
+    assert not any(s["name"] == "query_group_notes" for s in chat_schemas(tool)), (
+        "the host must not keep a second copy of the dossier schemas")
     tool_row = next((s for s in rows if s["name"] == "query_group_notes"), None)
     assert tool_row is not None, "query_group_notes schema must exist"
     props = tool_row["parameters"]["properties"]

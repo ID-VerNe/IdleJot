@@ -22,11 +22,18 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import sqlite3
-import subprocess
+import sys
 import tarfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'water-group' / 'daemon'))
+
+# `git.exe` 是控制台程序：本门禁跑在无控制台父进程下时（`pythonw`、门禁链，issue #353），
+# 裸 `subprocess.check_output(['git', ...])` 会在桌面上开一个 Windows Terminal 窗口。
+# 抑制标志只在一处拼写，所以走运行时树的 helper。
+import winconsole  # noqa: E402  -- 位置依赖上面这行 sys.path
+
 PRIVATE_ROOTS = {'.git', '.venv', '.tmp', 'data', 'imports', 'exports', 'reports', 'release', 'build', 'instances'}
 SECRET = re.compile(r'(?:sk-[A-Za-z0-9]{24,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)')
 PERSONAL_PATH = re.compile(r'[A-Za-z]:[\\/]Users[\\/](?!Public(?:[\\/]|\b)|Default(?:[\\/]|\b))[^\\/\s<>]+', re.I)
@@ -213,7 +220,8 @@ def source_check(private=None, require_private=False):
         raise RuntimeError('private store not found: pass --private-home or set WATER_GROUP_HOME')
     tokens = private_tokens(home) if home else set()
     personal = personal_pattern(tokens)
-    names = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).decode('utf-8').split('\0')
+    names = winconsole.check_output_hidden(
+        ['git', 'ls-files', '-z'], cwd=ROOT).decode('utf-8').split('\0')
     errors = []
     count = 0
     for name in filter(None, names):
@@ -255,7 +263,7 @@ def source_check(private=None, require_private=False):
 def history_check(personal=None):
     """Scan commit identities and messages: publishing history publishes them too."""
     errors = []
-    raw = subprocess.check_output(
+    raw = winconsole.check_output_hidden(
         ['git', 'log', 'HEAD', '--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B%x1e'], cwd=ROOT)
     for record in raw.decode('utf-8', 'replace').split('\x1e'):
         if not record.strip():
@@ -300,7 +308,7 @@ def archive_check(path):
             errors.append('archive does not match build allowlist')
         if manifest.get('product') != 'Tulpa' or manifest.get('working_tree_overlay'):
             errors.append('unexpected product / working-tree overlay')
-        head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+        head = winconsole.check_output_hidden(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
         if manifest.get('checkpoint') != head:
             errors.append('archive was not built from current source commit')
         hashes = manifest.get('file_sha256', {})
@@ -346,7 +354,7 @@ def linux_archive_check(path):
         if len(names) != len(set(names)) or any(not m.isfile() or not m.name.startswith('Tulpa/') for m in members):
             raise RuntimeError('Unexpected Linux archive root, link or duplicate entry')
         manifest = json.load(archive.extractfile('Tulpa/build-manifest.json'))
-        head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+        head = winconsole.check_output_hidden(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
         expected = {'Tulpa/'+name for name in manifest['files']} | {'Tulpa/build-manifest.json'}
         if set(names) != expected or set(manifest['file_sha256']) != set(manifest['files']):
             errors.append('Linux archive does not match integrity manifest')

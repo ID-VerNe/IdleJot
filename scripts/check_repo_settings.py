@@ -42,11 +42,13 @@ import argparse
 import fnmatch
 import json
 import re
-import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'water-group' / 'daemon'))
+import winconsole  # noqa: E402  -- 位置依赖上面这行 sys.path；见 run()
+
 REQUIRED_CONTEXT = 'checks'
 HOOKS_DIR = '.githooks'
 CODEOWNERS_FILE = '.github/CODEOWNERS'
@@ -86,8 +88,13 @@ TEAM_CODEOWNERS_FIX = (
 
 
 def run(command):
-    """跑一条只读命令，返回 CompletedProcess（文本模式，UTF-8）。"""
-    return subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding='utf-8')
+    """跑一条只读命令，返回 CompletedProcess（文本模式，UTF-8）。
+
+    走 `winconsole.run_hidden`：`git` / `gh` 都是控制台程序，本门禁在无控制台父进程下
+    （`pythonw`、门禁链）裸跑会给它们开一个窗口（issue #353）。`cwd` 仍钉在 `ROOT`。
+    """
+    return winconsole.run_hidden(command, cwd=ROOT, capture_output=True, text=True,
+                                 encoding='utf-8')
 
 
 def gh_api(path):

@@ -68,6 +68,26 @@ import wg_budget  # noqa: E402
 import wg_clock  # noqa: E402  (断言里的退出时刻按同一份渲染口径比)
 import wg_listener_state  # noqa: E402  (监听存亡账本，issue #112)
 import wg_up_probe  # noqa: E402  (issue #94 新用例轮询原始匹配行要用 _match_rows)
+import winconsole  # noqa: E402  (无窗起控制台程序，issue #353)
+
+
+def kill_tree(pid, timeout=60):
+    """`taskkill /T /F` 把一棵进程树收掉，并且不在桌面上开窗。
+
+    这是本包唯一收进程树的地方：原来五个用例各自写一遍
+    `subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True)`。
+    `taskkill` 是控制台程序，而门禁链常在**无控制台**的父进程下跑，裸调会给它
+    新分配一个控制台——桌面上的那扇黑框（issue #353；实测裸调 2 次 SHOW 事件、
+    走 `run_hidden` 0 次）。同类还有 `git worktree`，见 `git_hidden`。
+    """
+    return winconsole.run_hidden(["taskkill", "/T", "/F", "/PID", str(pid)],
+                                 capture_output=True, timeout=timeout)
+
+
+def git_hidden(args, **kwargs):
+    """跑一条 `git` 子命令，同样不开窗（理由见 `kill_tree`）。"""
+    return winconsole.run_hidden(["git", *args], capture_output=True, **kwargs)
+
 
 # 外部测试变量会把 state 又指回实机，这里必须清掉，只留临时数据根。
 ISOLATING_VARS = ("IDLEJOT_WG_STATE", "TULPA_WG_STATE", "IDLEJOT_WG_DB",

@@ -402,6 +402,58 @@ def scan_numeric_flags():
     return hits
 
 
+def check_hidden_show_state(merge, label):
+    """Both halves of the suppression are present, and the caller's struct survives.
+
+    issue #319: `creationflags=CREATE_NO_WINDOW` answers "does the child allocate a
+    console window", which is not the question the desktop asks. What is missing
+    from a flag-only helper is the show-state, and it is invisible to every rule
+    that reads `creationflags` -- the sanity cases in `check_console_window.py`
+    pass with or without it on this box (measured 2026-11-01). So the merge is
+    called directly and its result inspected.
+
+    Four assertions, one of them a control group: adding the show-state must not
+    cost the caller anything it had set. A helper that returns a fresh struct
+    every time would pass "hidden" and silently drop a caller's `dwFlags`, so
+    dropping is red here, not a style note.
+
+    The last assertion needs a sentinel rather than "did the caller's
+    `wShowWindow` change": a caller's struct already reads 0 (the field
+    default), so a helper that edited it in place would look identical to one
+    that copied it. `SW_SHOWMINNOACTIVE` is a value no caller in this tree sets,
+    and nothing but an in-place write can put it back into the caller's object.
+    """
+    failures = []
+    merged = merge({})
+    info = merged.get('startupinfo')
+    if info is None:
+        return [f'{label} 只给了 creationflags，没有 startupinfo(SW_HIDE)：'
+                '「分配不分配控制台」与「显示不显示控制台」是两件事（issue #319）']
+    if not info.dwFlags & subprocess.STARTF_USESHOWWINDOW:
+        failures.append(f'{label} 的 startupinfo 没有 STARTF_USESHOWWINDOW，SW_HIDE 不生效')
+    if info.wShowWindow != 0:
+        failures.append(f'{label} 的 startupinfo.wShowWindow 不是 SW_HIDE（{info.wShowWindow}）')
+
+    sentinel = 7  # SW_SHOWMINNOACTIVE
+    caller = subprocess.STARTUPINFO()
+    caller.dwFlags |= subprocess.STARTF_USESTDHANDLES
+    caller.lpDesktop = 'winsta0\\default'
+    caller.wShowWindow = sentinel
+    kept = merge({'startupinfo': caller})['startupinfo']
+    if not kept.dwFlags & subprocess.STARTF_USESTDHANDLES:
+        failures.append(f'{label} 覆盖了调用方的 startupinfo，丢了它自己的 dwFlags')
+    if kept.lpDesktop != 'winsta0\\default':
+        failures.append(f'{label} 覆盖了调用方的 startupinfo，丢了它的桌面名')
+    if kept.wShowWindow != 0:
+        failures.append(f'{label} 没把调用方 struct 的显示状态改成 SW_HIDE'
+                        f'（{kept.wShowWindow}）——复制出来的那份才是要用的')
+    if caller.wShowWindow != sentinel:
+        # Control group for "copy, do not share": sharing one struct across two
+        # spawns is how a later call silently inherits an earlier call's state.
+        failures.append(f'{label} 直接改写了调用方的 startupinfo，而不是复制（issue #319）')
+    return failures
+
+
 def check_helpers():
     """Run both helpers for real; a helper that cannot start a child is no fix."""
     failures = []
@@ -435,17 +487,24 @@ def check_helpers():
                             'NO_WINDOW 与它同用时会被 Windows 忽略')
         if not detached & winconsole.NO_WINDOW:
             failures.append('winconsole._with_no_window 没把 DETACHED_PROCESS 换成 NO_WINDOW')
+        # issue #319: the flag governs allocation, the show-state governs display.
+        # A helper that only supplies the flag leaves "will a window appear" to
+        # whichever console program the call site happens to start.
+        failures.extend(check_hidden_show_state(no_window, 'winconsole._with_no_window'))
 
     process = winconsole.popen_hidden([sys.executable, '-c', 'import sys; sys.exit(3)'])
     if process.wait(timeout=60) != 3:
         failures.append('winconsole.popen_hidden 的子进程退出码没有保留')
 
     sys.path.insert(0, str(ROOT))
-    from chatlocal.platform_process import owned_popen, run_hidden
+    from chatlocal import platform_process
+    owned_popen, run_hidden = platform_process.owned_popen, platform_process.run_hidden
     result = run_hidden([sys.executable, '-c', 'print("ok")'],
                         capture_output=True, text=True, timeout=60)
     if result.returncode != 0 or result.stdout.strip() != 'ok':
         failures.append('chatlocal.platform_process.run_hidden 未能正常跑完子进程')
+    failures.extend(check_hidden_show_state(platform_process._hidden_kwargs,
+                                            'chatlocal.platform_process'))
     process = owned_popen([sys.executable, '-c', 'import sys; sys.exit(4)'],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if process.wait(timeout=60) != 4:

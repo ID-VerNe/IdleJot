@@ -20,6 +20,12 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 PRIVATE = {'data', 'imports', 'reports', 'exports', '.tmp', '.git', '.env'}
 
+# 本脚本常在无控制台的父进程下跑，`powershell.exe` 是控制台程序：只给
+# `CREATE_NO_WINDOW` 管分配、不管显示，两个半都要才真不闪窗（issue #353，
+# 见 `water-group/daemon/winconsole.py` docstring 的第四个 quirk）。
+sys.path.insert(0, str(ROOT / 'water-group' / 'daemon'))
+import winconsole  # noqa: E402  -- 位置依赖上面这行 sys.path
+
 
 class UpgradeError(ValueError):
     pass
@@ -85,9 +91,9 @@ def running_in(roots):
         raise UpgradeError('升级工具仅支持 Windows。')
     try:
         command = '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); Get-CimInstance Win32_Process | Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress'
-        result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', command],
-                                capture_output=True, encoding='utf-8', errors='replace', timeout=30,
-                                creationflags=subprocess.CREATE_NO_WINDOW, check=True)
+        result = winconsole.run_hidden(
+            ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', command],
+            capture_output=True, encoding='utf-8', errors='replace', timeout=30, check=True)
         rows = json.loads(result.stdout)
     except (OSError, ValueError, subprocess.SubprocessError):
         raise UpgradeError('无法检查正在运行的程序，未执行升级。') from None

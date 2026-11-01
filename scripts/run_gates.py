@@ -20,9 +20,8 @@ CI 与本地同一个入口：`.github/workflows/ci.yml` 只调用本脚本，�
 - **并发单位是一条门禁，不是 CI 分片**。分片是给多机 matrix 摊时间用的：`gates.json`
   里一个分片 11–30 条，本机单进程按分片并发等于串行（`--jobs 10` 跑 `reply` 分片
   实测 162s vs 串行 156s）。CI 的「同片串行、片间并行」只属于 CI matrix，本机不照搬；
-- **`EXCLUSIVE` 单独收尾**：会起真实本树进程、靠全机 WMI 认进程的门禁，以及**自己就在
-  测量时间**的门禁（`check_run_gates_parallel`：并发环境会改写它的测量结果），在所有
-  并发门禁跑完之后独占跑，不与任何门禁重叠；
+- **`EXCLUSIVE` 单独收尾**：会起真实本树进程、靠全机 WMI 认进程的门禁（目前只有
+  `check_listener_rehang`）在所有并发门禁跑完之后独占跑，不与任何门禁重叠；
 - **结果始终按清单顺序返回**，并行只改完成先后，不改结果表形状（`summary_text` 与
   `GITHUB_STEP_SUMMARY` 都依赖它）；`[n/总]` 的序号也按清单位置编，不按完成先后；
 - `--fail-fast` 在并行下只阻止**后续门禁启动**，已在跑的门禁跑完——中途杀掉子门禁会
@@ -46,24 +45,29 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / 'scripts' / 'gates.json'
+
+# 本脚本常在无控制台的父进程下跑（`pythonw`、编辑器内的任务、CI 的作业包装），而它拉起的
+# 每条门禁都是控制台程序——这正是"桌面闪一下黑框"的形状（issue #353，承接 #39 / #319）。
+# 抑制只在一个地方拼写，所以这里 import 运行时树里的 helper，而不是本地再抄一份标志。
+#
+# 但**不能硬依赖**它：`check_run_gates_parallel` 会在临时目录里搭一棵只含 `scripts/` 的
+# 假树来跑本文件（夹具刻意不带运行时树），硬 import 会让那个门禁当场 `ModuleNotFoundError`。
+# 跑门禁是本职，抑制是加固——拿不到 helper 就照常跑（那种情形下没有窗口要抑制也无妨），
+# 而不是拒绝启动。
+sys.path.insert(0, str(ROOT / 'water-group' / 'daemon'))
+try:
+    import winconsole  # noqa: E402  -- 位置依赖上面这行 sys.path
+except ImportError:  # 夹具树/裁剪安装里没有运行时树：退回「直接跑」，不假装加固
+    winconsole = None
 BUCKETS = ('ci', 'manual', 'stale', 'dead', 'support')
 PASSED, FAILED, SKIPPED = '通过', '失败', '未执行'
 
-# 并行档里必须独占跑的门禁（issue #317）。
-#
-# * `check_listener_rehang`：会起**真实的**本树 `listen.py` 子进程，再靠全机 WMI
-#   （`Get-CimInstance Win32_Process`）按命令行认出它、最后 `taskkill /T /F`
-#   收树（`check_listener_rehang/budget.py:640-667`、`ownership.py:303-345`、
-#   `water-group/daemon/wg_up_probe.py:99-138`）。WMI 查询是全机的，另一条门禁同时起/杀
-#   本树进程会让它的「前提不成立」断言假红。
-# * `check_run_gates_parallel`（issue #347）：它测的就是「并行有没有真的省时间」——
-#   丢进线程池里跑，泳道被别的门禁占着，桩门禁的起跑时刻和墙钟都跟着变，量出来的是
-#   调度环境而不是被测实现。与 `check_listener_rehang` 同一类：**并发环境本身会改变
-#   测量结果**。它也起真 `run_gates.py` 子进程（自己的临时树），跑的期间会让同池门禁
-#   的时间读数整体偏移。
-#
-# 认名不认档：清单里改个 shard 不该悄悄放开。
-EXCLUSIVE = frozenset({'check_listener_rehang', 'check_run_gates_parallel'})
+# 并行档里必须独占跑的门禁（issue #317）。它们会起**真实的**本树 `listen.py` 子进程，
+# 再靠全机 WMI（`Get-CimInstance Win32_Process`）按命令行认出它、最后 `taskkill /T /F`
+# 收树（`check_listener_rehang/budget.py:640-667`、`ownership.py:303-345`、
+# `water-group/daemon/wg_up_probe.py:99-138`）。WMI 查询是全机的，另一条门禁同时起/杀
+# 本树进程会让它的「前提不成立」断言假红。认名不认档：清单里改个 shard 不该悄悄放开。
+EXCLUSIVE = frozenset({'check_listener_rehang'})
 
 
 def load_manifest():
@@ -140,9 +144,18 @@ def run_one(row, printed, total):
 
     `printed` 是这条门禁在本次执行里的序号，**按清单顺序**编，不按完成先后——
     并行下两条同时收尾也不会打出两个相同的 `[3/92]`。
+
+    子进程走 `winconsole.run_hidden`：门禁全部是控制台程序，这个脚本又常常没有控制台，
+    裸 `subprocess.run` 会给每条门禁新开一个窗口（issue #353 用窗口钩子在真实门禁链上
+    抓到 `git.exe` 标题的 `CASCADIA_HOSTING_WINDOW_CLASS`）。`cwd=ROOT` 由 `run_hidden`
+    透传，输出仍直接落到本进程的 stdout。
     """
     tick = time.perf_counter()
-    result = subprocess.run(command_of(row), cwd=ROOT)
+    # 没有 helper 的夹具树里退回裸调用：那里没有运行时树，也就没有窗口问题的前提。
+    if winconsole is None:
+        result = subprocess.run(command_of(row), cwd=ROOT)
+    else:
+        result = winconsole.run_hidden(command_of(row), cwd=ROOT)
     elapsed = time.perf_counter() - tick
     status = PASSED if result.returncode == 0 else FAILED
     print(f'[{printed}/{total}] {row["name"]} {status} ({elapsed:.1f}s)', flush=True)

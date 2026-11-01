@@ -362,7 +362,7 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
 | 引用原文渲染（唤醒行 / `--context` / 追问行） | `water-group/daemon/wg_quotes.py`（`render_event` 读 wg_events 的 `referenced_messages`，`render_payload` 按 `message_id` 本地反查；「没有原文」必须由状态说出来，issue #94） |
 | 控制台代码页 + stdout 编码 | `water-group/daemon/winconsole.py`（`ensure_utf8_stdio`，入口禁止再手写 `sys.stdout.reconfigure`） |
 | 长文本截断与截断标记 | `chatlocal/text_limits.py`（`clip()` 返回 `text/truncated/original_length`；上限按用途命名：`READ_PREVIEW_CHARS` 读聊天预览、`EVENT_TEXT_CHARS` 记忆事件单字段。**禁止在调用点再写裸切片**，静默腰斩是 issue #90） |
-| 子进程开窗抑制（防黑框闪） | daemon 侧 `water-group/daemon/winconsole.py`（`run_hidden` / `popen_hidden`，会 OR 进调用方自带的 `creationflags`，并**把 `DETACHED_PROCESS` 换成 `CREATE_NO_WINDOW`**——前者不是窗口抑制器，孙代进程反而会开窗）；后端侧 `chatlocal/platform_process.py`（`run_hidden` / `owned_popen`）。禁止任何地方再手写 `getattr(subprocess, "CREATE_NO_WINDOW", 0)`，`check_no_console_child.py` 门禁 |
+| 子进程开窗抑制（防黑框闪） | daemon 侧 `water-group/daemon/winconsole.py`（`run_hidden` / `popen_hidden` / `check_output_hidden`，会 OR 进调用方自带的 `creationflags`，并**把 `DETACHED_PROCESS` 换成 `CREATE_NO_WINDOW`**——前者不是窗口抑制器，孙代进程反而会开窗）；后端侧 `chatlocal/platform_process.py`（`run_hidden` / `owned_popen`）。#319 起抑制是**两半**：`CREATE_NO_WINDOW` 管「子进程要不要分配控制台」，`STARTUPINFO` 的 `STARTF_USESHOWWINDOW` + `SW_HIDE` 管「已有的控制台要不要显示」，两个 helper 都给全。禁止任何地方再手写 `getattr(subprocess, "CREATE_NO_WINDOW", 0)`，`check_no_console_child.py` 门禁。#353 起判据收窄为**裸调外部控制台程序**（`git` / `taskkill` / `powershell` / `cmd` / `gh` …；实测 `sys.executable` 子进程本来就不开窗），门禁链自身（`run_gates.py` 与各门禁直调的 `git` / `gh` / `taskkill`）同样不再豁免，边界见 [`doc/CONSOLE_WINDOW_GATE.md`](doc/CONSOLE_WINDOW_GATE.md) §2.1 / §2.2 |
 | 数据根路径 | `water-group/daemon/wg_paths.py`（daemon flat import）；`chatlocal/config.py` 与 `water-group/memory_store.py` 复述同一规则，禁止再从 `ROOT` 推导 `data/`、`diagnostics/`、`logs/`、`state/`（`check_path_hygiene.py` 门禁） |
 | `#` 指令守护单实例锁 | `water-group/daemon/commands.py`（`LOCK` / `pid_alive` / `acquire_lock` / `clear_stale_lock`）；`up.py` 停止时只调用 `clear_stale_lock()`，禁止在别处复制锁路径或存活性判断 |
 
@@ -559,6 +559,11 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 `--self-test` 是 4 组 A/B 对照（会故意闪两次黑框，属正常）：`visible` / `detached-cmd`
 两组必须命中，用来证明探针没瞎、并且这台机器还能复现 DETACHED 的 bug；`hidden` /
 `nowindow-grandchild` 两组必须 0 命中。只跑后两组等于没做对照 —— 一个 0 命中什么都证明不了。
+
+钩子抓到的窗口要**连祖先链一起看**再定凶手：`CASCADIA_HOSTING_WINDOW_CLASS` 常常是 Windows
+Terminal 宿主在自己换标题（不是新开的控制台），只有 `ConsoleWindowClass` 才是那扇黑框；而
+事后 `QueryFullProcessImageNameW` 对已退出的 pid 一律返回 `<no handle>`，祖先链必须在采样
+线程里当场存下来。门禁链整体归零的验法见 [`doc/CONSOLE_WINDOW_GATE.md`](doc/CONSOLE_WINDOW_GATE.md) §2.2。
 
 ### 5.2 不在 CI 跑的门禁（档位说明）
 

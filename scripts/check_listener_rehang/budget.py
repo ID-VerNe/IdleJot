@@ -13,6 +13,7 @@ from ._common import (
     child_env, status_listener_line, child_budget,
     DOC_SAMPLES, DAEMON_SOURCES,
     listen, reply, up, watch, wg_budget, wg_up_probe,
+    kill_tree,
 )
 
 
@@ -821,7 +822,6 @@ def 探针从真实监听读出超时():
                 time.sleep(1)
         finally:
             # 收树：venv 的 python.exe 是个转发器，真解释器是它的子进程。
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                           capture_output=True)
+            kill_tree(proc.pid)
     mine = [cmdline for pid, cmdline in rows if str(pid) == str(proc.pid)]
     return bool(mine) and wg_up_probe.parse_timeout(mine[0]) == over

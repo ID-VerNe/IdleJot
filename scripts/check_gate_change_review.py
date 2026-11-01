@@ -55,7 +55,6 @@ import fnmatch
 import json
 import os
 import re
-import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -63,6 +62,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'water-group' / 'daemon'))
+
+# `git.exe` 是控制台程序：本门禁跑在无控制台父进程下时（`pythonw`、门禁链，issue #353），
+# 裸 `subprocess.run(['git', ...])` 会在桌面上开一个 Windows Terminal 窗口——实测抓到的
+# 那一波窗口标题就是 `C:\Program Files\Git\mingw64\bin\git.exe`。抑制标志只在一处拼写。
+import winconsole  # noqa: E402  -- 位置依赖上面这行 sys.path
+
 SECTION_NAME = '门禁改动'
 PATTERNS = (
     'scripts/check_*.py',
@@ -89,7 +95,7 @@ FOOTER_LINE = re.compile(r'^\s*(?:Refs|Closes|Fixes)\b', re.IGNORECASE)
 
 def changed_files(base):
     """`base...HEAD`（三点，按 merge-base）改动的文件列表；git 失败时抛 RuntimeError。"""
-    result = subprocess.run(
+    result = winconsole.run_hidden(
         ['git', 'diff', '--name-only', f'{base}...HEAD'],
         cwd=ROOT,
         capture_output=True,

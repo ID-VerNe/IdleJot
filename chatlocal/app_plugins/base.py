@@ -10,7 +10,8 @@ Three rules keep this honest:
 
 1. **A hook exists only when something uses it this round.** No reserved
    methods for a feature that has not migrated yet; an unused hook is a
-   promise nobody keeps (see the ``Host.store()`` debt on issue #4).
+   promise nobody keeps (this is why the daemon host's ``store()`` was
+   removed in issue #4 PD2c rather than kept for later).
 2. **Plugin methods forward.** Business logic stays in the feature module.
    ``ChatReactions.policy/guard/execute/...`` are untouched so the end-to-end
    gates keep asserting the same behaviour.
@@ -103,6 +104,24 @@ class AppPlugin:
 
     def decorate(self, packet: dict, data: Mapping) -> None:
         """Write this plugin's batch fields. The plugin owns the field names."""
+
+    def enrich(self, packet: dict, grant: Mapping, row: Mapping, items: Sequence) -> None:
+        """Late packet fields that need the final batch, after ``decorate``.
+
+        Runs on every packet, not only when ``batch()`` produced data: the
+        feature may derive its fields from the stored rows rather than from
+        its own batch. Mutating the packet after every plugin's ``decorate``
+        is the point -- a plugin that writes the same field in ``decorate``
+        would clobber it.
+        """
+
+    def idle(self, after: Any) -> int:
+        """Work done only when a wait call found nothing to deliver.
+
+        ``after`` is the session row, so a plugin can reach ``chat.access`` /
+        ``chat.chat`` through the instance instead of through an argument.
+        """
+        return 0
 
     def stamp(self) -> str | None:
         """Connection epoch written into each inbox payload, or None."""
@@ -242,6 +261,13 @@ class AppPlugins:
         for plugin in self.instances.values():
             if plugin.name in data:
                 plugin.decorate(packet, data[plugin.name])
+
+    def enrich(self, packet: dict, grant: Mapping, row: Mapping, items: Sequence) -> None:
+        for plugin in self.instances.values():
+            plugin.enrich(packet, grant, row, items)
+
+    def idle(self, after: Any) -> int:
+        return sum(plugin.idle(after) for plugin in self.instances.values())
 
     def hints(self, scope: Mapping) -> list[str]:
         return [text for plugin in self.instances.values()

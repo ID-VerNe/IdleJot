@@ -16,7 +16,6 @@ from .app_plugins import TOOL_NAMES as APP_TOOL_NAMES
 from .app_plugins.loader import build as build_app_plugins
 from .mcp_access import AccessDenied
 from .name_guard import clean_sender_name
-from .mcp_chat_hints import DOSSIER_REMINDER
 from .mcp_chat_limits import WAIT_TIMEOUT_SECONDS
 from .mcp_chat_schemas import schemas  # noqa: F401  (issue #11 PC: facade re-export)
 from .mcp_chat_wait import ChatWaitMixin
@@ -53,7 +52,7 @@ def load_water_group_config():
 
 
 CHAT_TOOLS = {'start_chat_session', 'get_chat_session', 'list_chat_sessions', 'read_chat_forward',
-              'wait_chat_messages', 'send_chat_message', 'stop_chat_session', 'list_chat_groups', 'list_chat_friends', 'list_chat_personas', 'query_member_dossier', 'update_member_dossier', 'consolidate_chat_memory', 'query_group_notes'} | TURN_TOOLS | APP_TOOL_NAMES
+              'wait_chat_messages', 'send_chat_message', 'stop_chat_session', 'list_chat_groups', 'list_chat_friends', 'list_chat_personas'} | TURN_TOOLS | APP_TOOL_NAMES
 CHAT_INSTRUCTIONS = '''这是用户明确开启的持续聊天，不设总时长；直到用户停止、权限失效或客户端退出。
 开始即在当前机器人账号与授权会话内边聊边学，保留之前明确暂停的偏好；只学习本次实时他人消息，不读历史或更换模型目的地。好友私聊使用 ACCOUNT:direct:QQ，群聊使用 ACCOUNT:group:GROUP；不发送临时会话。
 统一循环：wait 收到消息先做 Planner；silence 仅结束本轮发言决定，确认处理进度后继续 wait，绝不退出水群。Planner 的 WAITING 只是暂缓决定，不确认本批完成；沿 next_call 等待，到期或新输入时程序重新交付可规划批次。wait 返回 learning_ready 时领取一个阶段；claim 返回 task 时，用下一次实际模型调用完成并沿 task.submit_call 提交。claim/submit 附 updated_chat 时直接沿 next_call 先聊天；未领取任务或已提交且无附带聊天时回 wait。每次只推进一个阶段，不连续领取，无需用户另给学习口令。
@@ -355,21 +354,7 @@ class MCPChat(ChatWaitMixin):
                               stickers=stickers,sticker_status=sticker_status,scope=scope,full=full,
                               wake_hint=self.apps.wake_hint(batch),app_hints=self.apps.hints(scope))
         self.apps.decorate(packet,batch)
-        # Tier 1 L1 Context injection for active speakers
-        try:
-            speaker_ids = [m.get('sender_id') for m in items if not m.get('is_self') and m.get('sender_id')]
-            speaker_names = [m.get('sender') for m in items if not m.get('is_self') and m.get('sender')]
-            if speaker_ids or speaker_names:
-                from water_group.memory_engine import get_memory_engine
-                engine = get_memory_engine()
-                gid = row['conversation_id'].split(':')[-1]
-                l1_cards = engine.build_l1_context(gid, speaker_ids, speaker_names)
-                if l1_cards:
-                    packet['member_dossiers'] = l1_cards
-                    if 'reminders' in packet:
-                        packet['reminders'].append(DOSSIER_REMINDER)
-        except Exception:
-            pass
+        self.apps.enrich(packet,grant,row,items)
         if row['active']:
             packet['continue_with']=dict(self.continuation(row['id'],through=through),when='处理完本批后直接调用；不要为了等待再提交空规划。')
         return packet
@@ -543,11 +528,6 @@ class MCPChat(ChatWaitMixin):
             if signal:signal.set()
             if inserted:
                 self.apps.on_stored(row,payload)
-                try:
-                    from water_group.memory_engine import get_memory_engine
-                    get_memory_engine().observe_message(row['conversation_id'].split(':')[-1], payload)
-                except Exception:
-                    pass
 
     def start(self, grant, args, cancel):
         self.permission(grant)
@@ -779,8 +759,4 @@ class MCPChat(ChatWaitMixin):
         if name=='plan_chat_reply':return self.turns.plan(grant,args,cancel)
         if name=='send_chat_reply':return self.turns.submit(grant,args,cancel)
         if name=='send_chat_message' or self.apps.tool_owner(name):return self.turns.single(grant,name,args,cancel)
-        if name=='query_member_dossier':return self.dossiers.query_member_dossier(grant,args)
-        if name=='update_member_dossier':return self.dossiers.update_member_dossier(grant,args)
-        if name=='consolidate_chat_memory':return self.dossiers.consolidate_chat_memory(grant,args)
-        if name=='query_group_notes':return self.dossiers.query_group_notes(grant,args)
         raise ValueError('未知持续聊天操作。')

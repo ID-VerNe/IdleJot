@@ -9,6 +9,7 @@ from .base import AppPlugins
 
 def build(chat):
     """Instantiate every app plugin for one chat. Order is registration order."""
+    from .dossier import DossierPlugin
     from .language import LanguagePlugin
     from .reactions import ChatReactions
-    return AppPlugins(chat, (LanguagePlugin, ChatReactions))
+    return AppPlugins(chat, (LanguagePlugin, ChatReactions, DossierPlugin))

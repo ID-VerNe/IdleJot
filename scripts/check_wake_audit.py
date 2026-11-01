@@ -34,7 +34,9 @@ P1 / P2 / P3），每条都带对照组——只断言「有输出」会被「�
   m. 静默窗口内攒：窗口里新到的一条被并进同一批，只算一次唤醒；
   n. **不突破等待预算（#83）**：窗口从 deadline 里扣而不是额外加，预算不够就缩窗口；
      连一秒都等不起时原地返回、一秒不睡；
-  o. 不超过 `DEBOUNCE_CAP` 倍：群刷屏时每来一条就推后会让监听永远醒不过来；
+  o. 不超过 `DEBOUNCE_CAP` 倍：群刷屏时每来一条就推后会让监听永远醒不过来。
+     两件事两条用例各断各的——「上限生效」（窗口留宽，只比绝对秒数）与
+     「剩余预算比上限窄时夹在 deadline 上、不多睡也不早退」；
   p. 重读失败不吞唤醒：`refetch()` 抛异常时照旧返回手上这一批（已经确定要叫醒的人，
      不能因为一次读盘失败变成「没叫」）；
   q. `--debounce 0` 关闭：`watch.py --debounce 0` 的 WAKE 不晚于改前。
@@ -696,19 +698,20 @@ def 去抖不超过上限倍数():
     """一直有新唤醒进来时，截止最多推到 `DEBOUNCE_CAP` 倍。
 
     场景要选得让「有上限」与「没上限」真的分道扬镳：窗口比轮询间隔长（1.2s），
-    deadline 留 8 个窗口。正常实现每来一条推后一个窗口、最多推 3 次
-    （`DEBOUNCE_CAP=3` → 总长约 4 个窗口、实测 3.6s）；首次窗口就取剩余预算的
-    实现一进门就睡到 deadline（≈ 9.6s）。
+    deadline 留 20 个窗口——**远大于** `DEBOUNCE_CAP + 1` 个窗口。正常实现每来一条
+    推后一个窗口、最多推 3 次（`DEBOUNCE_CAP=3` → ≈ 4 个窗口 = 4.8s）；去掉上限的
+    实现（`cap` 只剩 deadline）会一路推到 deadline（≈ 24s），当场被 `ceiling` 抓住。
 
-    四条断言各自管一件事：真的走了多拍（`refetches > 1`）、总时长不超过
-    `DEBOUNCE_CAP` 倍窗口（上限生效；取 1.5 倍留余量）、**不等于** deadline
-    （`elapsed < cap_ms * 0.9`——这是抓「首次窗口取满剩余预算」的那一刀，
-    否则 `ceiling` 会被 deadline 自己压住而永远不破）、并进来的批数与重读次数
+    deadline 必须留得这么宽（复核第二轮：第一版只留 8 个窗口，`ceiling` 与 deadline
+    挨得太近，「到底是被上限夹住还是撞了 deadline」两种原因说不清）。留宽之后本用例
+    只断一件事——**上限生效**：真的走了多拍（`refetches > 1`）、总时长不超过
+    `1.5 * DEBOUNCE_CAP` 个窗口（留半倍余量给调度抖动）、并进来的批数与重读次数
     一致（不丢条）。
 
-    变异体 M3b（首次窗口取满剩余预算、推后不夹）在这种输入下走不到推后那步就
-    撞 deadline，所以它由 `静默时窗口不自动撑到上限` 判红，本用例保持绿，不再挂死
-    （复核第二轮：留 200s deadline 时它挂到门禁超时，什么诊断都给不出）。
+    「撞不到 deadline」不再写在这里：那是另一件事，由
+    `去抖不撞deadline` 用一条贴着 deadline 的输入各断各的。第一版把
+    「`elapsed < 0.9 * (deadline - started)`」塞在同一个用例里，实际比的是
+    「拍数比」而不是「有没有撞 deadline」——换一台更快的机器就恒红，是一条伪判据。
     """
     import watch
 
@@ -719,17 +722,64 @@ def 去抖不超过上限倍数():
         return [{"id": 100 + counter["n"]}]
 
     window = 1.2
-    deadline = time.time() + 8 * window
+    deadline = time.time() + 20 * window
     started = time.time()
     spent, fresh = watch.settle([], [], window, deadline, refetch, lambda m: m)
     elapsed = time.time() - started
     ceiling = 1.5 * watch.DEBOUNCE_CAP * window
     ok = (counter["n"] > 1 and elapsed < ceiling
-          and elapsed < 0.9 * (deadline - started)
           and len(fresh) == counter["n"])
     return ok or (f"elapsed={elapsed:.2f} ceiling={ceiling:.2f} "
                   f"deadline={deadline - started:.2f} "
                   f"refetches={counter['n']} batch={len(fresh)}")
+
+
+@case
+def 去抖不撞deadline():
+    """推后之后的截止仍然夹在 deadline 上，不会越过去。
+
+    这是「不突破等待预算」（#83）在上限那一侧的对照：`watch.py:210` 的
+    `until = min(until + budget, started + cap)`，而 `cap` 自己也跟 deadline 取小
+    （`watch.py:186`）。去掉那层夹取（`until += budget`），群刷屏时就会一路往后
+    推到一个**远早于** deadline 的伪截止，然后睡过去——宿主那边早就把进程树杀了。
+
+    场景：窗口 `SETTLE_POLL * 4`（4 拍），deadline 只留 `2.5` 个窗口（10 拍）。
+    每一拍都**有**新唤醒进来（`refetch` 每次返回一条 id 递增的假事件），所以正常实现
+    每拍都真的推后一次；`cap` 自己夹在 deadline 上（`watch.py:186`），推后撞到
+    deadline 就推不动了，窗口在 `[room, room + budget]` 之内收尾。去掉夹取
+    （`until += budget`）的实现每拍到点就把截止再推一个窗口，永远追不上——
+    实测**挂死**（变异驱动器给单条用例加了超时，90s 后判 TIMEOUT），这是本用例
+    与 `去抖不超过上限倍数` 分工的由来：那边的 deadline 留 20 个窗口，`cap` 由
+    `DEBOUNCE_CAP * budget` 收口；这边的 deadline 贴着，`cap` 由 deadline 收口。
+
+    门槛一律用**绝对秒数**（`room`、`budget`、一拍长的和），不拿 `deadline - started`
+    去比再乘系数——后者会把「拍数比」误读成「有没有撞 deadline」，换机器就翻转
+    （复核第二轮对上一版的结论）。
+
+    本用例**不抓**「首次窗口就撑到上限」那类变异（M3b/M3c）：那边一进门就把
+    `until` 设成 `cap`，`elapsed` 照样落在同一个区间里，那是
+    `静默时窗口不自动撑到上限` 的活。
+    """
+    import watch
+
+    ticks = {"n": 0}
+    budget = watch.SETTLE_POLL * 4
+    room = 2.5 * budget
+
+    def refetch():
+        ticks["n"] += 1
+        # 每拍都有新唤醒进来：正常实现靠 `cap` 收口，不夹取只能在 deadline 后面挂死。
+        return [{"id": 100 + ticks["n"]}]
+
+    deadline = time.time() + room
+    started = time.time()
+    spent, fresh = watch.settle([], [], budget, deadline, refetch, lambda m: m)
+    elapsed = time.time() - started
+    ok = (elapsed < room + budget + watch.SETTLE_POLL
+          and spent < room + budget + watch.SETTLE_POLL)
+    return ok or (f"elapsed={elapsed:.2f} room={room:.2f} "
+                  f"budget={budget:.2f} spent={spent:.2f} "
+                  f"ticks={ticks['n']} batch={len(fresh)}")
 
 
 @case

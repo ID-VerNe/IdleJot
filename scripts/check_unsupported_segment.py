@@ -25,6 +25,9 @@ issue #165 的症状有两层，第二层比第一层更难发现：
      三层各钉一条——段上留下 `url`、content 带得出地址、`--show` 打得出来（历史
      行从 `raw` 现算），且视频/文件段的 CDN 地址不混进这个字段（#200 归
      `wg_videos` 的可下载命令）。
+  6. content 封顶的切点（issue #315）：`render_content()` 按**段边界**切断，入库
+     与引用/转发节点两条路径共用——占位整段装不下就整段丢弃，不许被切在半路让
+     `strip_placeholders` 匹配不上、把半截 URL 漏进唤醒行。
 
 AST 墓碑（第 9 项）钉住两种翻车写法不许回来：`dict(type=label)` 与
 `.get(kind,'非文本消息')`。文本扫描会被 docstring 里引用反例误伤，所以按语法树
@@ -472,6 +475,50 @@ def case_details_link_backfill():
     print(f"✓ 9b. 引用/转发节点：新旧两种卡片都带得出链接（合计 {linked} 字），content={out['content'][:40]!r}…")
 
 
+def case_render_cut_on_boundary():
+    """#315：content 封顶时切点必须落在**段边界**，占位不许被切在半路。
+
+    #311 让占位带上最长 400 字的跳转地址，于是「切在占位中间」从丢几个字升级成
+    「半截 URL 漏进唤醒行正文」：#314 只封了链接**总量**，不管切点位置。所以这里
+    不靠链接预算把 content 压下去（`case_details_link_backfill` 正是那样才覆盖不到
+    本 issue），而是用 11985 字正文 + 一张短链接卡片精确把切点放进占位里。
+    """
+    item = ChatDetails.__new__(ChatDetails)
+    card = json.dumps({"data": json.dumps({"meta": {"detail_1": {"qqdocurl": "https://b23.tv/abc?x=1"}}})},
+                      ensure_ascii=False)
+    body = "a" * 11985
+    segments = [dict(type="text", text=body), dict(type="unsupported", kind="json", raw=card)]
+
+    # ① 引用/转发节点渲染（issue 复现命令走的就是这条）。
+    out = ChatDetails.render(item, segments, [], 0)
+    content, kept = out["content"], out["segments"]
+    stripped, _ = wg_text.strip_placeholders(content)
+    assert "https://" not in stripped, f"#315 复发：半截 URL 漏进唤醒行：{content[-40:]!r}"
+    assert len(content) <= 12000, f"render 的 content 超过 MAX_TEXT：{len(content)}"
+    assert len(kept) == len(segments), f"装不下的段没从 segments 里裁掉：{kept}"
+
+    # ② 入库路径（`mcp_chat.receive`）同一个切法。
+    chat = build_chat()
+    payload = receive(chat, [dict(type="text", data=dict(text=body)),
+                             dict(type="json", data=dict(data=card))], 4121)
+    ingested = payload.get("content") or ""
+    stripped, _ = wg_text.strip_placeholders(ingested)
+    assert "https://" not in stripped, f"#315 复发（入库侧）：{ingested[-40:]!r}"
+    assert len(ingested) <= 12000, f"入库 content 超过封顶：{len(ingested)}"
+    assert payload.get("truncated") is True, "切过两头要如实说（truncated）"
+
+    # ③ 对照：全量装得下时 content 一个字符都不许动——边界留白只许出现在真超限时。
+    fits = [dict(type="text", text="正文"), dict(type="unsupported", kind="json", raw=card)]
+    out = ChatDetails.render(item, fits, [], 0)
+    assert "正文[卡片" in out["content"], f"装得下时 content 被改写：{out['content']!r}"
+
+    # ④ `render_content()` 自身：切点落进普通正文时截在正文里，占位整段回退。
+    assert onebot_segments.render_content(["x" * 50, "[卡片：甲 → https://a]", "尾"], None, 60) == \
+        ("x" * 50, None), "普通正文后面跟着装不下的占位，应当整段回退"
+    assert onebot_segments.render_content(["[图片]", "一到十点"], None) == ("[图片]一到十点", None)
+    print(f"✓ 9c. content 封顶切在段边界：入库与引用节点都不漏 URL，装得下时原样不动")
+
+
 def case_show_reports_raw_state():
     """PC：`--show` 说得出「类型 + 原始体在不在、裁没裁」。"""
     lines = wg_text.unsupported_lines([
@@ -593,6 +640,42 @@ def case_placeholder_single_source():
     print("✓ 13. 墓碑：卡片占位只经 card_text()，两条渲染路径没有第二份拼法")
 
 
+def _join_then_slice(tree):
+    """AST 里「先拼成整串、再按下标硬切」的写法：`''.join(parts)[:N]`（#315）。"""
+    hits = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice)):
+            continue
+        value = node.value
+        if not (isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                and value.func.attr == "join"):
+            continue
+        method = value.func.value
+        # `''.join(...)` / `"".join(...)` 与 `str.join(...)` 都算：拼完再切不看段边界。
+        if isinstance(method, ast.Constant) and method.value == "":
+            hits.append(f"line {node.lineno}: ''.join(...)[:…]")
+        elif isinstance(method, ast.Name) and method.id == "str":
+            hits.append(f"line {node.lineno}: str.join(...)[:…]")
+    return hits
+
+
+def case_no_join_then_slice():
+    """墓碑（#315）：content 不许「先拼整串再硬切」，切断只能经 `render_content()`。
+
+    `''.join(parts)[:12000]` 是 #315 的病根写法：它不看切点落在哪个段的占位上。
+    修法是把它收进 `onebot_segments.render_content()`（唯一归属），所以两条渲染
+    路径既不许再出现这种写法，也不许各自再造一份。
+    """
+    for rel in ("chatlocal/mcp_chat.py", "chatlocal/mcp_chat_details.py"):
+        source = (ROOT / rel).read_text(encoding="utf-8")
+        hits = _join_then_slice(ast.parse(source, str(ROOT / rel)))
+        assert not hits, f"{rel} 又出现「拼完整串再硬切」（#315 墓碑）：{hits}"
+        assert "render_content(" in source, f"{rel} 没走 render_content()（#315 唯一切断点）"
+    single = (ROOT / "chatlocal/onebot_segments.py").read_text(encoding="utf-8")
+    assert "def render_content(" in single, "render_content() 不在 onebot_segments.py"
+    print("✓ 14. 墓碑：content 切断只经 render_content()，没有第二条「拼完再硬切」")
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -613,11 +696,13 @@ def main():
         ("一条消息的原始体总预算", case_budget_caps_whole_message),
         ("合并转发节点保真", case_forward_nodes_fidelity),
         ("引用/转发节点带链接（#311）", case_details_link_backfill),
+        ("content 封顶切在段边界（#315）", case_render_cut_on_boundary),
         ("--show 报原始体状态", case_show_reports_raw_state),
         ("--show 打出跳转地址（#311）", case_show_prints_link),
         ("唤醒行占位表兼容", case_wake_line_keeps_budget),
         ("墓碑：源码里没有中文标签当 type", case_no_chinese_type_in_source),
         ("墓碑：卡片占位只有一份（#311）", case_placeholder_single_source),
+        ("墓碑：切断只经 render_content（#315）", case_no_join_then_slice),
     ]
     for label, fn in cases:
         try:

@@ -236,6 +236,66 @@ def 补读先确认这条在不在():
     return code == 1 and "本地没有 id=9999 的记录" in buf.getvalue()
 
 
+# ---- issue #340：`look.py --event <裸数字>` ----
+#
+# 唤醒行打给 Agent 的补读命令是裸数字（`look.py --event 7`）。改前 `look.py` 里有
+# 一份自己的 `event_by_id()`，被 #216 删掉后调用点没跟着改：裸数字一进来就抛
+# `NameError`，于是「可补读」的每条图片都无法补读。改后裸数字先在事件流里确认
+# 这条投递过，再原样拿它当 `chat_inbox` rowid（MCP 包的 `messages[].id` 就是库
+# rowid，见 `chatlocal/mcp_chat.py:303`）。
+#
+# 夹具里的 7 既是事件流 id、也是库里那条同号行——两个仓库里都有的形态；10 只在库、
+# 不在事件流；14 挂在没有群号的会话上（事件流里没有它）。
+
+
+def _look(ref):
+    """跑一次 `look.look()`，返回 `(退出码, stdout)` 并记下真正被补读的 rowid。"""
+    seen = []
+    real = look.read_event
+
+    def spy(event_id, index, frames):
+        seen.append(event_id)
+        return 0
+
+    look.read_event = spy
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            code = look.look(ref, 0, "one")
+    finally:
+        look.read_event = real
+    return code, buf.getvalue(), seen
+
+
+@case
+def 裸数字补读走事件流且不改号():
+    code, text, seen = _look("7")
+    return code == 0 and seen == [7] and text == ""
+
+
+@case
+def 裸数字不在事件流时不回库兜底():
+    # 10 只在 chat_inbox，事件流里没有它：裸数字按 #203 的契约只认事件流，
+    # 不许悄悄回库把那条闲聊的图补进来（要读就写 --event q10）。
+    code, text, seen = _look("10")
+    return (code == 1 and seen == []
+            and "事件流里没有 id=10 的记录" in text and "--event q10" in text)
+
+
+@case
+def 裸数字已在会话库里被挤掉时说清():
+    # 15 在事件流里投递过，但库行已被 1000 条上限挤掉：像素取不到，不能说成
+    # 「读得到、只是没图」。夹具里不放这一行（别的用例按入库顺序读库）。
+    events = EVENTS.read_text(encoding="utf-8")
+    EVENTS.write_text(events + json.dumps({"id": 15, "conversation_id": f"10001:group:{GROUP}"},
+                                          ensure_ascii=False) + "\n", encoding="utf-8")
+    try:
+        code, text, seen = _look("15")
+    finally:
+        EVENTS.write_text(events, encoding="utf-8")
+    return code == 1 and seen == [] and "已不在会话库里" in text
+
+
 # ---- issue #219：批量读点的群号 ----
 #
 # 12 的 payload 一个键都没有（群号只在 `chat_sessions.conversation_id` 上），

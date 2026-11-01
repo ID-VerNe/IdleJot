@@ -169,17 +169,27 @@ def settle(fresh, rows, debounce, deadline, refetch, scope):
        就缩窗口；连一秒都等不起就原地返回。超预算的等待会被宿主连进程树一起杀掉，
        而那条路径上一个字都不打印。
     2. **不超过 `DEBOUNCE_CAP` 倍**：群刷屏时每来一条就推后一次会让监听永远醒不过来。
-       到头了就用手上这一批醒——晚醒不如不醒。
+       到头了就用手上这一批醒——晚醒不如不醒。首次窗口是 `debounce` 本身，推后只
+       发生在真的有新唤醒进来时，累计到 `DEBOUNCE_CAP` 倍为止（静默的窗口不该比
+       配的值更长，那是「连发逐条各醒一次」的另一副面孔）。
     3. **重读失败不吞唤醒**：`refetch()` 抛异常时返回手上这一批，账照记、卡照出。
        已经确定要叫醒的人，不能因为一次读盘失败变成「没叫」。
     """
     budget = min(float(debounce or 0), max(0.0, deadline - time.time()))
-    total = min(float(DEBOUNCE_CAP) * budget, max(0.0, deadline - time.time()))
     if budget <= 0:
         return 0.0, fresh
     started = time.time()
-    until = started + total
+    # 首次窗口就是 `budget`：静默 `debounce` 秒就醒，不是一进门就等满上限。
+    # 推后只发生在**真的有新唤醒进来**时（见循环里那句），累计不超过
+    # `DEBOUNCE_CAP * budget`。`cap` 还要跟 `deadline` 取小——约束 1 是预算，
+    # 它优先于约束 2。
+    cap = min(float(DEBOUNCE_CAP) * budget, max(0.0, deadline - time.time()))
+    until = started + budget
     pause = min(SETTLE_POLL, budget)
+    # 手上这一批可能为空（首条就被 scope 滤掉的边界，或调用方直接给空批）：
+    # 拿 `max()` 空迭代器求游标会在第一次重读时抛 `ValueError`，把一次本该
+    # 静默等待的窗口炸成一次未捕获异常。
+    newest = max(((f.get("id") or 0) for f in fresh), default=0)
     # 先把手上的这批算一批：即使重读失败，也已经「等过一个窗口」再出去，
     # 连发的下一条不会在窗口之内再叫醒一次。
     while True:
@@ -191,13 +201,13 @@ def settle(fresh, rows, debounce, deadline, refetch, scope):
             more = refetch()
         except Exception:  # noqa: BLE001  读盘失败不吞唤醒（约束 3）
             break
-        extra = [e for e in scope(more)
-                 if (e.get("id") or 0) > max((f.get("id") or 0) for f in fresh)]
+        extra = [e for e in scope(more) if (e.get("id") or 0) > newest]
         if not extra:
             continue
         fresh = fresh + extra
+        newest = max(newest, max((e.get("id") or 0) for e in extra))
         # 有新唤醒进来就把截止推后一个窗口，最多到 `DEBOUNCE_CAP` 倍。
-        until = min(until + budget, started + float(DEBOUNCE_CAP) * budget)
+        until = min(until + budget, started + cap)
     return time.time() - started, fresh
 
 

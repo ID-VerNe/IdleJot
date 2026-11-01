@@ -80,8 +80,11 @@ os.environ["IDLEJOT_WG_DB"] = str(DB)
 
 ACCOUNT = "10001"
 SELF = ACCOUNT
-GROUP_A = "111"
-GROUP_B = "222"
+# 群号要够长且互不为子串：``"111"`` 这种短串几乎出现在任何 JSON 里，
+# 「账本里没有明文群号」的断言会恒真（复核指出）。下面两个是夹具号码，
+# 不指向任何真实群，长度与真实群号同量级。
+GROUP_A = "880000111"
+GROUP_B = "880000222"
 CONV_A = f"{ACCOUNT}:group:{GROUP_A}"
 CONV_B = f"{ACCOUNT}:group:{GROUP_B}"
 WAKES = STATE / "wg_wakes.jsonl"
@@ -285,6 +288,10 @@ def keyword唤醒落账为keyword且不带明细():
     要能在 issue 里公开讨论的文件。**先校验 `wake_reason()` 的原始返回值再看账本**：
     改前它就已经是 `keyword:…`，只断账本会把「压根没落账」漏成 pass（基线实测
     过这一点，issue #153 的假绿教训）。
+
+    明细不许落盘这条用**字段白名单**钉，不靠搜字符串：落下去的是事件 id，明细
+    原文本来就不在 `ids` 里，`grep` 命中词永远查不出来（复核第二轮 M9 的教训）。
+    多一个键就说明有人把别的东西（明细、原文、名片）塞进了账本。
     """
     clear_state()
     clear_ledger()
@@ -296,7 +303,7 @@ def keyword唤醒落账为keyword且不带明细():
     proc = run(WATCH, "--timeout", "5", "--debounce", "0", "--replay")
     rows = ledger()
     ok = (len(rows) == 1 and rows[0]["source"] == "keyword"
-          and "小鲸鱼" not in WAKES.read_text(encoding="utf-8")
+          and set(rows[0]) == {"at", "source", "batch", "ids", "group_hash", "pid"}
           and "WAKE" in proc.stdout)
     return ok or f"reason={reason!r} ledger={rows}\n{proc.stdout}"
 
@@ -501,7 +508,12 @@ def 攒批未静默不唤醒也不推进游标():
 
 @case
 def 安静够之后一批一次唤醒():
-    """`quiet_seconds` 已过 → 三条并成一次唤醒，窗口照常推进并关窗（额度用完）。"""
+    """`quiet_seconds` 已过 → 三条并成一次唤醒，窗口照常推进并关窗（额度用完）。
+
+    额度必须**恰好等于这一批的条数**：`consume()` 只在扣到 `budget<=0` 时才当场收窗
+    （issue #98），开窗用默认的 10 条额度时三条只扣掉 3、剩 7，窗口按设计不收——
+    那是夹具没把额度设到位，不是实现漏了收窗。
+    """
     import followup
 
     clear_state()
@@ -509,7 +521,7 @@ def 安静够之后一批一次唤醒():
     write_config()
     build_db()
     append_inbox([(i, f"第 {i} 句") for i in INBOX_IDS])
-    open_window(quiet_seconds=0.2)
+    open_window(max_messages=len(INBOX_IDS), quiet_seconds=0.2)
     time.sleep(0.35)
     got = wake_scan()
     woke = [r["id"] for r in (got or {}).get("woke") or []]
@@ -561,58 +573,143 @@ def 攒批参数开窗时定死():
 
 @case
 def 去抖把窗口内新到的并成一批():
-    """窗口里新到的一条被并进同一批：只算一次唤醒，两条都在 `ids` 里。"""
-    clear_state()
-    clear_ledger()
-    write_config()
-    seed([event(BATCH_IDS[0], "@机器人 先说", at=True)])
-    late = event(BATCH_IDS[1], "@机器人 又说", at=True)
+    """窗口里新到的一条被并进同一批：只算一次唤醒，两条都在 `ids` 里。
 
-    def refetch():
-        # 窗口期间群里又来了一条：落进事件流，下一次重读就能看见。
-        seed([event(BATCH_IDS[0], "@机器人 先说", at=True), late])
-        return [late]
-
+    `fresh` 的初值是**空批**、新到的一条由 `refetch()` 现给——三条断言各自要求
+    一次真的发生过的动作：睡满窗口（`spent`）、重读过（`calls`）、那一批被并进来
+    （`ids`）。把 `settle()` 掏空成 `return 0.0, fresh` 时三条同时不成立，
+    这正是这条用例的变异对照（PR #359 独立复核指出的恒绿写法）。
+    """
     import watch
 
+    late = event(BATCH_IDS[1], "@机器人 又说", at=True)
+    calls = {"n": 0}
+
+    def refetch():
+        calls["n"] += 1
+        return [] if calls["n"] == 1 else [late]
+
     deadline = time.time() + 30
-    first = [event(BATCH_IDS[0], "@机器人 先说", at=True)]
-    spent, fresh = watch.settle(first, first, 1.0, deadline, refetch,
-                                lambda more: more)
+    spent, fresh = watch.settle([], [], 0.6, deadline, refetch, lambda more: more)
     ids = [e["id"] for e in fresh]
-    ok = (spent >= 0.9 and ids == [BATCH_IDS[0], BATCH_IDS[1]])
-    return ok or f"spent={spent:.2f} fresh={ids}"
+    ok = (spent >= 0.55 and calls["n"] >= 1 and ids == [BATCH_IDS[1]])
+    return ok or f"spent={spent:.2f} refetches={calls['n']} fresh={ids}"
+
+
+@case
+def 去抖把后段新到的再并一批():
+    """窗口**快满时**新到的一条也要并进来：截止必须跟着推后一个窗口。
+
+    上一条只在窗口前端放了一条，所以「不推后截止」的实现（`until` 恒定）也能过——
+    那条新唤醒恰好在第一拍就进来了。
+
+    判据落在**总时长**上：第二次重读拿到第二条时若截止**不**推后，循环的剩余预算
+    就被 `until` 固定住，第二条到手后只剩一拍就出循环（≈ `window`）；推后截止时
+    它会接着睡满下一个窗口（≈ `window` + 一个窗口）。`len(fresh) == 2` 两个实现
+    都成立（第二条一样并进来了），单独断它抓不到「不推后」——「并批」与「推后
+    截止」是两件事，由两条用例各管一件。
+
+    窗口必须**大于** `SETTLE_POLL`（取 `8 * SETTLE_POLL`）：窗口比轮询间隔还短时
+    窗口内只有一拍醒来，第二条永远到不了手上，这条用例对两种实现都只会红。
+
+    第二条必须**后段**才到（复核第二轮实测的根因）：第一版把第二条放在第一拍，
+    不推后的实现也要走到窗口末尾才出循环（`refetches=5`），刚好等于当时的门槛
+    `ceil=3.3`，判据恒绿。放在第 9 拍，不推后的实现在第 10 拍就落到 `until` 上
+    （≈ `window`），推后的实现才多睡一整个窗口。
+    """
+    import watch
+
+    first = event(BATCH_IDS[1], "@机器人 一", at=True)
+    second = event(BATCH_IDS[2], "@机器人 二", at=True)
+    seen = {"n": 0}
+
+    window = watch.SETTLE_POLL * 8
+    # 第二条要放在窗口**后段**（第 9 拍，窗口共 10 拍）：放早了两种实现的推后都
+    # 还来得及把窗口睡满，拍数分不开。
+    late = int(window / watch.SETTLE_POLL) - 1
+
+    def refetch():
+        seen["n"] += 1
+        # 后段才给第二条（前端那几拍只给第一条）。
+        if seen["n"] < late:
+            return [first]
+        return [first, second]
+
+    timed = time.time()
+    spent, fresh = watch.settle([], [], window, timed + 30, refetch, lambda m: m)
+    elapsed = time.time() - timed
+    ids = [e["id"] for e in fresh]
+    # 推后截止的实现会把窗口睡满（≈ window / SETTLE_POLL 拍 = 5，实测 7.5s）；
+    # 不推后时第二条一到手 `until` 已经只剩一拍，只再睡一拍就出循环
+    # （实测 4.0s / 9 拍）；推后时第二个窗口从那里起整段睡满（实测 6.0s / 12 拍）。
+    # 门槛取窗口的 1.25 倍：落在两者之间，离两边都不近。
+    ok = (ids == [BATCH_IDS[1], BATCH_IDS[2]]
+          and elapsed >= 1.25 * window and spent >= 1.25 * window)
+    return ok or (f"elapsed={elapsed:.2f} spent={spent:.2f} ids={ids} "
+                  f"refetches={seen['n']} window={window:.2f}")
 
 
 @case
 def 去抖不突破等待预算():
-    """deadline 只剩 0.3s 时窗口缩到 0.3s，绝不睡满请求的 5s（#83）。"""
+    """deadline 只剩 0.3s 时窗口缩到 0.3s，绝不睡满请求的 5s（#83）。
+
+    `settle()` 必须真的睡过（`elapsed` 下限 0.2s），所以「直接返回」的退化实现
+    过不了；上限 0.9s 则钉住「窗口从预算里扣，不额外加」。
+    """
     import watch
 
     deadline = time.time() + 0.3
     started = time.time()
-    spent, fresh = watch.settle([{"id": 1}], [], 5.0, deadline, lambda: [], lambda m: m)
+    spent, fresh = watch.settle([], [], 5.0, deadline, lambda: [], lambda m: m)
     elapsed = time.time() - started
-    ok = elapsed < 1.0 and spent <= 0.45 and fresh == [{"id": 1}]
+    ok = 0.2 <= elapsed < 0.9 and spent <= 0.45 and fresh == []
     return ok or f"elapsed={elapsed:.2f} spent={spent:.2f}"
 
 
 @case
 def 预算耗尽时原地返回一秒不睡():
-    """deadline 已过 → 返回 (0.0, fresh)，连一秒都不睡。"""
+    """deadline 已过 → 返回 (0.0, fresh)，连一秒都不睡。
+
+    「原地返回」这条契约只有在**同一套**的其余去抖用例都要求真的睡过时才立得住：
+    否则 `return 0.0, fresh` 能让本条与它们一起绿。这里额外钉住 `refetch` 一次都
+    没被调用——预算耗尽时不许再去读盘。
+    """
     import watch
 
+    calls = {"n": 0}
+
+    def refetch():
+        calls["n"] += 1
+        return [{"id": 2}]
+
     started = time.time()
-    spent, fresh = watch.settle([{"id": 1}], [], 5.0, time.time() - 1, lambda: [],
+    spent, fresh = watch.settle([{"id": 1}], [], 5.0, time.time() - 1, refetch,
                                 lambda m: m)
     elapsed = time.time() - started
-    ok = spent == 0.0 and elapsed < 0.1 and fresh == [{"id": 1}]
-    return ok or f"spent={spent} elapsed={elapsed:.3f}"
+    ok = (spent == 0.0 and elapsed < 0.1 and fresh == [{"id": 1}]
+          and calls["n"] == 0)
+    return ok or f"spent={spent} elapsed={elapsed:.3f} refetches={calls['n']}"
 
 
 @case
 def 去抖不超过上限倍数():
-    """一直有新唤醒进来时，截止最多推到 `DEBOUNCE_CAP` 倍。"""
+    """一直有新唤醒进来时，截止最多推到 `DEBOUNCE_CAP` 倍。
+
+    场景要选得让「有上限」与「没上限」真的分道扬镳：窗口比轮询间隔长（1.2s），
+    deadline 留 8 个窗口。正常实现每来一条推后一个窗口、最多推 3 次
+    （`DEBOUNCE_CAP=3` → 总长约 4 个窗口、实测 3.6s）；首次窗口就取剩余预算的
+    实现一进门就睡到 deadline（≈ 9.6s）。
+
+    四条断言各自管一件事：真的走了多拍（`refetches > 1`）、总时长不超过
+    `DEBOUNCE_CAP` 倍窗口（上限生效；取 1.5 倍留余量）、**不等于** deadline
+    （`elapsed < cap_ms * 0.9`——这是抓「首次窗口取满剩余预算」的那一刀，
+    否则 `ceiling` 会被 deadline 自己压住而永远不破）、并进来的批数与重读次数
+    一致（不丢条）。
+
+    变异体 M3b（首次窗口取满剩余预算、推后不夹）在这种输入下走不到推后那步就
+    撞 deadline，所以它由 `静默时窗口不自动撑到上限` 判红，本用例保持绿，不再挂死
+    （复核第二轮：留 200s deadline 时它挂到门禁超时，什么诊断都给不出）。
+    """
     import watch
 
     counter = {"n": 0}
@@ -621,28 +718,70 @@ def 去抖不超过上限倍数():
         counter["n"] += 1
         return [{"id": 100 + counter["n"]}]
 
-    deadline = time.time() + 60
+    window = 1.2
+    deadline = time.time() + 8 * window
     started = time.time()
-    spent, fresh = watch.settle([{"id": 1}], [], 0.3, deadline, refetch, lambda m: m)
+    spent, fresh = watch.settle([], [], window, deadline, refetch, lambda m: m)
     elapsed = time.time() - started
-    ceiling = watch.DEBOUNCE_CAP * 0.3
-    ok = (counter["n"] > 1 and elapsed < ceiling + 0.5
-          and len(fresh) == counter["n"] + 1)
-    return ok or f"elapsed={elapsed:.2f} ceiling={ceiling:.2f} refetches={counter['n']}"
+    ceiling = 1.5 * watch.DEBOUNCE_CAP * window
+    ok = (counter["n"] > 1 and elapsed < ceiling
+          and elapsed < 0.9 * (deadline - started)
+          and len(fresh) == counter["n"])
+    return ok or (f"elapsed={elapsed:.2f} ceiling={ceiling:.2f} "
+                  f"deadline={deadline - started:.2f} "
+                  f"refetches={counter['n']} batch={len(fresh)}")
+
+
+@case
+def 静默时窗口不自动撑到上限():
+    """一直**没有**新唤醒进来时，总时长就是 `debounce` 本身，不是 `DEBOUNCE_CAP` 倍。
+
+    这是 issue #144 plan 的原话（「若有新的行进来，就把截止时刻往后推」）：推后
+    要由「有新行」触发。一进门就把窗口算成 `DEBOUNCE_CAP * budget` 的实现在没有
+    任何连发时也要多等两倍——`--debounce 5` 变成实等 15s，配置与行为对不上，而
+    且每一次唤醒都在白等。`refetch` 恒返回空批（没有新行），断言总时长落在
+    `[0.9*budget, budget + 2 拍]` 之内：比 `budget` 短说明没睡够，接近 `3*budget`
+    说明窗口被撑到了上限。
+    """
+    import watch
+
+    def refetch():
+        return []
+
+    budget = watch.SETTLE_POLL * 4
+    started = time.time()
+    spent, fresh = watch.settle([{"id": 1}], [], budget, time.time() + 30,
+                                refetch, lambda m: m)
+    elapsed = time.time() - started
+    ceiling = budget + 2 * watch.SETTLE_POLL
+    ok = (fresh == [{"id": 1}] and elapsed >= 0.9 * budget
+          and elapsed < ceiling and spent < ceiling)
+    return ok or f"elapsed={elapsed:.2f} spent={spent:.2f} budget={budget:.2f}"
 
 
 @case
 def 重读失败不吞唤醒():
-    """`refetch()` 抛异常 → 照旧返回手上这一批（已确定要叫醒的人不能被吞）。"""
+    """`refetch()` 抛异常 → 照旧返回手上这一批（已确定要叫醒的人不能被吞）。
+
+    两条一起断：读盘真的被尝试过（`calls >= 1`）、且读失败后**立刻**返回
+    （`elapsed` 远小于窗口，不空转等满）。只断 `fresh` 的写法对「掏空的 settle」
+    恒真——那个实现根本不读盘。
+    """
     import watch
 
+    calls = {"n": 0}
+
     def boom():
+        calls["n"] += 1
         raise OSError("读盘失败")
 
-    deadline = time.time() + 30
-    spent, fresh = watch.settle([{"id": 1}], [], 0.2, deadline, boom, lambda m: m)
-    ok = fresh == [{"id": 1}]
-    return ok or f"spent={spent:.2f} fresh={fresh}"
+    started = time.time()
+    spent, fresh = watch.settle([{"id": 1}], [], 1.5, time.time() + 30, boom,
+                                lambda m: m)
+    elapsed = time.time() - started
+    ok = fresh == [{"id": 1}] and calls["n"] == 1 and elapsed < 1.0
+    return ok or (f"spent={spent:.2f} elapsed={elapsed:.2f} "
+                  f"refetches={calls['n']} fresh={fresh}")
 
 
 @case
@@ -650,10 +789,16 @@ def 去抖关闭时不额外等待():
     """`--debounce 0`：`settle()` 立刻返回，`watch.py` 的 WAKE 不晚于改前。"""
     import watch
 
-    spent, fresh = watch.settle([{"id": 1}], [], 0, time.time() + 30, lambda: [],
+    calls = {"n": 0}
+
+    def refetch():
+        calls["n"] += 1
+        return [{"id": 99}]
+
+    spent, fresh = watch.settle([{"id": 1}], [], 0, time.time() + 30, refetch,
                                 lambda m: m)
-    if spent != 0.0 or fresh != [{"id": 1}]:
-        return f"settle spent={spent} fresh={fresh}"
+    if spent != 0.0 or fresh != [{"id": 1}] or calls["n"] != 0:
+        return f"settle spent={spent} fresh={fresh} refetches={calls['n']}"
     clear_state()
     clear_ledger()
     write_config()

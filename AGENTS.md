@@ -550,8 +550,9 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 93 | `reply` | `check_bilibili_subtitle.py` | B 站字幕（#339）：四类引用（短链 / 站内视频页 / 裸 BV / av）解析出 bvid 与 p=、多 P 取对应 cid 并在正文说出第几 P、四种「没有」各说各的（没链接 / 链接打不开 / 要登录 / 接口不可用）且两两不同、短链只跟一跳且 Location 与 subtitle_url 都过 host 白名单（站外 302 不做第二跳且与「没字幕」同口径）、成功进缓存而失败不进、免凭证声明真的过掉宿主要绑定的那道闸（Command.needs_credential 落到 handler.need_ck）、默认关闭时不在 #帮助也不可用 |
 | 94 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164）；id 撞号分节：事件流 id 与会话库 rowid 同号时 q&lt;n&gt; 只落到本群那条、裸 id 回库兜底要打出源说明（#203） |
 | 95 | `reply` | `check_trigger_mode.py` | 按群选择 natural/mention_only 触发模式：collector 请求值按 trigger_mode 取（不再硬编码 True）、natural 群普通消息 wake_reason 放行、@/关键词/is_self/指令早退不破坏、两群不同配置按群生效（#188） |
+| 96 | `reply` | `check_wake_audit.py` | 唤醒账本 / 追问攒批 / 监听去抖（#144）：@ 与关键词按 wake_reason 分来源落账且关键词明细不落盘（字段白名单，不是查词）、追问唤醒来自 chat_inbox 也记一行且一批只记一行 batch=条数、解禁唤醒 batch=1、群号只留 12 位哈希、坏行跳过好行照读、写失败静默返回 None 不拖垮真实唤醒、--status 的「唤醒」行把「账本还没开始记」/「过去 24h 无唤醒」/按来源计数三种说法分开；追问攒批未安静够时不唤醒且不推进 consume 游标（顺序不能反）、安静够后一批一次唤醒、quiet_seconds=0 退回改前行为、参数开窗时定死；settle 把窗口内新到的并成一批、后段新到的把截止再推一个窗口（不推后必红）、从不突破等待预算（预算耗尽原地返回一秒不睡）、不超过 DEBOUNCE_CAP 倍且撞不到 deadline、静默窗口不自动撑到上限、重读失败不吞唤醒、--debounce 0 不额外等待 |
 
-共 95 个 CI 门禁，分 5 个分片（`static` 20、`runtime` 15、`mcp` 18、`storage` 11、`reply` 31）；`manual` 15、`stale` 0、`dead` 0、`support` 2 见 `scripts/gates.json` 的对应档位（理由写在那里）。
+共 96 个 CI 门禁，分 5 个分片（`static` 20、`runtime` 15、`mcp` 18、`storage` 11、`reply` 32）；`manual` 15、`stale` 0、`dead` 0、`support` 2 见 `scripts/gates.json` 的对应档位（理由写在那里）。
 <!-- gates:ci:end -->
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

@@ -28,6 +28,7 @@ from wg_up_probe import (  # noqa: E402  (探测层，分节 PA)
     _process_names,
     port_open,
     port_owners,
+    port_owners_status,
     self_pids,
     stack_pids,
     supervisor_pids,
@@ -58,6 +59,9 @@ class StopResult:
     # 收掉的注入实例数（收前只读计数与直接收掉取较大者，issue #46）。
     instances: int | None = 0
     ports_left: list = field(default_factory=list)
+    # False when the port table could not be read at all: `ports_left` being empty
+    # is then "we do not know", not "the ports are free" (issue #336).
+    ports_readable: bool = True
     # The `#` daemon's lock file, cleared when its holder turned out to be dead.
     # None means there was nothing to clear; the pid is reported so a stale lock
     # that came back is visible in stopper.log instead of silently swept.
@@ -65,7 +69,7 @@ class StopResult:
 
     @property
     def ok(self):
-        return not self.ports_left
+        return not self.ports_left and self.ports_readable
 
     @property
     def untouched(self):
@@ -79,7 +83,7 @@ class StopResult:
         空栈时给非零会把「先停再起」误判成失败；所以这里只多一句显式说明。
         """
         return (not self.guard and not self.orphans and not self.port_owners
-                and not self.refused and not self.ports_left
+                and not self.refused and not self.ports_left and self.ports_readable
                 and self.instances == 0 and self.stale_lock is None)
 
     def summary(self):
@@ -101,6 +105,10 @@ class StopResult:
             line += f"；端口被非栈进程占着，未动：pid={pids(self.refused)}"
         if self.ports_left:
             line += f"；⚠ 端口仍未释放：{','.join(self.ports_left)}"
+        elif not self.ports_readable:
+            # 读不到端口表 ≠ 端口已释放（issue #336）：`ok` 已经是 False，
+            # 摘要也必须说清原因，否则值守者看到的还是「全放开了」。
+            line += "；⚠ 端口查询失败：无法确认端口是否已释放"
         else:
             line += "；端口已全部释放"
         return line
@@ -241,8 +249,11 @@ def stop_stack():
     result.stale_lock = _clear_stale_commands_lock()
 
     result.ports_left = wait_ports_free(12)
+    # 端口表读不出来时，`wait_ports_free` 看到的是空表、会立刻返回「都放开了」，
+    # 所以这里必须再问一次可读性——「不知道」不许记成「已释放」（issue #336）。
+    holders, result.ports_readable = port_owners_status()
     if result.ports_left:
-        holders = [pid for pid in port_owners() if pid not in protected]
+        holders = [pid for pid in holders if pid not in protected]
         names = _process_names(holders)
         for pid in holders:
             # A bound port is not proof the holder is ours. Only the shapes the

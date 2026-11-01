@@ -11,9 +11,11 @@
     .venv/Scripts/python.exe scripts/check_stop_stack.py
 """
 import ast
+import inspect
 import os
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,13 +58,16 @@ class FakeOS:
 
     `listening` 是 {端口: pid}；`stubborn` 里的 pid 杀不掉，用来模拟清不掉的端口。
     `names` 是 {pid: 进程名}，端口兜底据此判断占用者是不是栈自己的进程。
+    `netstat_fails` 让 netstat 自己抛错，模拟查询本身失败（不是「没有监听」）。
     """
 
-    def __init__(self, listening=None, stubborn=(), names=None):
+    def __init__(self, listening=None, stubborn=(), names=None, netstat_fails=False):
         self.kills = []
         self.listening = dict(listening or {})
         self.stubborn = set(stubborn)
         self.names = dict(names or {})
+        self.netstat_fails = netstat_fails
+        self.netstat_calls = 0
 
     def run(self, cmd, *args, **kwargs):
         if cmd[0] == "taskkill":
@@ -74,6 +79,9 @@ class FakeOS:
                         del self.listening[port]
             return Completed(b"")
         if cmd[0] == "netstat":
+            self.netstat_calls += 1
+            if self.netstat_fails:
+                raise OSError("netstat 不可用")
             return Completed(self.netstat())
         if cmd[0] == "powershell":
             return Completed(self.names_of(cmd[-1]))
@@ -100,6 +108,23 @@ class Completed:
         self.returncode = 0
 
 
+class _PatchedSubprocess:
+    """只替换 `run` 的 `subprocess` 替身，其余属性一律转发给真模块。
+
+    直接给 `wg_up_probe.subprocess` 赋一个只有 `run` 的假对象太窄：模块里别的调用
+    （将来的 `subprocess.PIPE` 之类）会凭空少属性。转发让它只在 `run` 上不同。
+
+    仍然保留：`port_owners_status` 之外还有别的 spawn（POSIX 的 `ps`），它们都该走
+    这份桩，而不是漏到真机器上。
+    """
+
+    def __init__(self, run):
+        self.run = run
+
+    def __getattr__(self, name):
+        return getattr(subprocess, name)
+
+
 class Stubs:
     """把 OS 边界整体换掉，退出时还原（issue #37：补丁打到真实调用点所在的模块）。
 
@@ -109,6 +134,13 @@ class Stubs:
 
     `time` 要打两处：`stop_stack` 自己的 sleep 在 `wg_up_stack`，端口等待循环在
     `wg_up_probe`。只打一处等于放一半真等待进来。
+
+    `run_hidden` 也要打两处（issue #336）：端口表由 `wg_up_probe` 经
+    `from winconsole import run_hidden` 拉起——它**必须**走开窗抑制（netstat 同样是
+    控制台程序，issue #39 的门禁钉着），所以桩只能落在 `wg_up_probe.run_hidden`
+    这个模块级名字上。真事故是反过来的：callsite 藏进 `winconsole.run_hidden`，桩
+    落在空处，netstat 真跑了一把、门禁却把端口表读成空的，CI 上「外部进程占端口
+    不许杀」偶发变红。（进进程的 `subprocess` 也一并换掉，兜住模块里其它 spawn。）
     """
 
     def __init__(self, pids, os_stub=None, instances=0, before=0):
@@ -141,7 +173,8 @@ class Stubs:
         self.saved = (
             subprocess.run, wg_up_probe.time, wg_up_stack.time,
             wg_up_probe._match_pids, wg_up_stack._kill_instances,
-            wg_up_stack._count_instances,
+            wg_up_stack._count_instances, wg_up_probe.subprocess,
+            getattr(wg_up_probe, "run_hidden", None),
         )
         subprocess.run = self.os.run
         wg_up_probe.time = self.clock
@@ -149,12 +182,20 @@ class Stubs:
         wg_up_probe._match_pids = self.match
         wg_up_stack._kill_instances = lambda: self.instances
         wg_up_stack._count_instances = lambda: self.before
+        # 钉在真实调用点（issue #336）：探测模块的 `run_hidden` 必须是桩。
+        wg_up_probe.run_hidden = self.os.run
+        wg_up_probe.subprocess = _PatchedSubprocess(self.os.run)
         return self
 
     def __exit__(self, *exc):
         (subprocess.run, wg_up_probe.time, wg_up_stack.time,
          wg_up_probe._match_pids, wg_up_stack._kill_instances,
-         wg_up_stack._count_instances) = self.saved
+         wg_up_stack._count_instances, wg_up_probe.subprocess,
+         hidden) = self.saved
+        if hidden is None:
+            del wg_up_probe.run_hidden
+        else:
+            wg_up_probe.run_hidden = hidden
         return False
 
     def stop(self):
@@ -243,6 +284,53 @@ def case_leftover_ports_are_reported():
     assert not result.ok, "端口没释放却报告成功"
     assert any(addr.endswith(":47860") for addr in result.ports_left), result.ports_left
     assert "未释放" in result.summary(), result.summary()
+
+
+def case_unreadable_ports_are_not_reported_free():
+    """读不到端口表时不许当成「端口已释放」（issue #336）。
+
+    CI 上「外部进程占端口不许杀」偶发变红，报的是 `[]`——端口表被读成空。空的端口表
+    有两种来源：真没人监听（可以报 ok），和查询压根没跑到/失败了（绝对不许报 ok）。
+    这个用例钉住的是桩必须真的落在你怀疑的那个调用点上：
+
+    1. 端到端：netstat 自己抛错时，`ok` 必须为 False，摘要要说清是查询失败；
+    2. 反向对照：拿一份**完全脱离模块**的 `port_owners()`（新命名空间里执行同一段函数
+       代码，`run_hidden` 换成只会抛错的替身）验证——查询失败时它返回 `{}`，与「没有
+       监听」形状完全相同。桩一旦没打到真实调用点，上层就无从分辨，这正是 #336 的
+       机制：改前的 callsite 藏在 `winconsole` 里，本门禁的 netstat 桩落在空处。
+    """
+    os_stub = FakeOS(listening={47860: "888"}, names={"888": "Code.exe"},
+                     netstat_fails=True)
+    stubs = Stubs({"guard": [], "watchdog": [], "stack": []}, os_stub=os_stub)
+    result = stubs.stop()
+    assert os_stub.netstat_calls > 0, "端口查询一次都没发生，用例没测到要测的东西"
+    assert not result.ok, "端口查询失败了却报告成功"
+    assert "端口查询失败" in result.summary(), result.summary()
+    assert os_stub.kills == [], f"查询失败时不该动刀: {os_stub.kills}"
+
+    # 桩必须真的打到探测的真实调用点：改前 callsite 藏在 winconsole 里，桩落在空处，
+    # netstat 一次都不会被记录（issue #336 的原始症状）。
+    with stubs:
+        assert wg_up_probe.port_owners() == {}, wg_up_probe.port_owners()
+    assert os_stub.netstat_calls > 1, "netstat 桩没打到探测的真实调用点"
+
+    detached = _detached_port_owners()
+    assert detached() == {}, "查询失败时 port_owners 应回落成空表，而不是抛错"
+
+
+def _detached_port_owners():
+    """把真实的 `port_owners` 放进独立命名空间，`run_hidden` 只会抛错。
+
+    独立命名空间证明的是函数**自己的**失败兜底，不借 Stubs：真灯一改就翻红。
+    """
+    def raising_run(*args, **kwargs):
+        raise OSError("netstat 不可用")
+
+    namespace = {"run_hidden": raising_run, "STOP_PORTS": wg_up_probe.STOP_PORTS}
+    exec(textwrap.dedent(inspect.getsource(wg_up_probe.port_owners_status)), namespace)
+    exec(textwrap.dedent(inspect.getsource(wg_up_probe.port_owners)), namespace)
+    func = namespace["port_owners"]
+    return lambda: func(namespace["STOP_PORTS"])
 
 
 def case_instances_uncounted_is_not_zero():
@@ -401,6 +489,7 @@ CASES = [
     ("外部进程占端口不许杀", case_foreign_port_holder_is_spared),
     ("进程名未知不许杀", case_unknown_name_is_spared),
     ("端口清不掉必须报失败", case_leftover_ports_are_reported),
+    ("端口查询失败不许当释放", case_unreadable_ports_are_not_reported_free),
     ("注入实例未统计 != 0", case_instances_uncounted_is_not_zero),
     ("树杀收掉的实例也计数", case_instances_counted_before_tree_kill),
     ("停止结果落 stopper.log", case_log_line_written),

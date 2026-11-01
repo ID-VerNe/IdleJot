@@ -271,8 +271,8 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
 | | daemon 侧 | app 侧 |
 |---|---|---|
 | 目录 | `water-group/daemon/plugins/` | `chatlocal/app_plugins/` |
-| 现有插件 | `miyoushe_plugin.py` / `sixty_plugin.py` / `followup_plugin.py` / `busboss_plugin.py` / `repeater_plugin.py` | `language.py` / `reactions.py` |
-| 静态面 | `plugins/__init__.py:55` 的 `LOADERS`、`:64` 的 `EVENT_LOADERS`（**显式清单，不扫目录**） | `spec.py:42` 的 `PLUGINS`（`REACTIONS` / `LANGUAGE` 两块）+ `loader.py:10` 的 `build()` |
+| 现有插件 | `miyoushe_plugin.py` / `sixty_plugin.py` / `followup_plugin.py` / `busboss_plugin.py` / `repeater_plugin.py` | `language.py` / `reactions.py` / `dossier.py` |
+| 静态面 | `plugins/__init__.py:55` 的 `LOADERS`、`:64` 的 `EVENT_LOADERS`（**显式清单，不扫目录**） | `spec.py` 的 `PLUGINS`（`REACTIONS` / `LANGUAGE` / `DOSSIER` 三块）+ `loader.py:10` 的 `build()` |
 | 扩展点 | `Command`（指令型，走 `Registry.commands()` 合成表）+ `Hooks.on_event`（事件型，没有表） | `AppPlugin` 的方法族：工具 / 事件 / 生命周期 / 描述子 |
 | 开关 | `config.json` 的 `plugins.<名字>` 三态 + 群级覆盖 | `spec.policy` 文件名（文件/DB 数据态）或插件自判 |
 
@@ -299,14 +299,18 @@ MSYS_NO_PATHCONV=1 taskkill /T /F /PID <up.py --status 里的 #指令 pid>
 
 | 语义 | 方法 |
 |---|---|
-| 全量 fan-out（每个插件都被调用） | `scope` / `decorate` / `reset` / `resume` / `close` / `suspend` / `on_stored` / `stopped` |
+| 全量 fan-out（每个插件都被调用） | `scope` / `decorate` / `enrich` / `reset` / `resume` / `close` / `suspend` / `on_stored` / `stopped` |
 | 首个非 `None` 胜出 | `receive` / `wake` / `wake_hint` / `wake_signal` / `plan_context` / `select` |
-| 聚合 | `batch` / `hints` / `stamps` |
+| 聚合（逐个相加） | `batch` / `hints` / `stamps` / `idle` |
 | 经 `tool_owner` 直取、**不** fan-out | `handoff` / `durable` |
+
+`enrich` 排在**所有** `decorate` 之后跑，且对每个包都跑（不是「`batch()` 有数据才跑」）：
+需要整批消息才能算出来的字段（画像卡就属于这种）挂在这里，插件在 `decorate` 里写同一字段会被它盖掉，
+所以两者不会互相竞争。`idle` 只在一次 wait 什么也没等到时调用，参数是会话行，返回值累加。
 
 `suspend()` 必须独立存在：不能并进 `close()`（`close` 在锁外、`suspend` 在锁内 invalidate，合并会破坏锁序），也不能并进 `reset()`（`reset` 表示新连接接管，会轮转 reactions 的 epoch；suspend 没有后继连接，epoch 必须保留）。
 
-改完插件怎么生效见 §0.2。剩余未迁移：PD2c（群友画像）、PD2d（媒体，本机不可验证，垫底），进度在 issue #4。
+改完插件怎么生效见 §0.2。剩余未迁移：PD2d（媒体，本机不可验证，垫底），进度在 issue #4。
 
 ---
 

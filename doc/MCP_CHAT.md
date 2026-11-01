@@ -147,11 +147,17 @@ MCP 这边的可选能力（工具 + 授权位 + 实时事件）走一套独立�
   （热重载闭包会跟着函数体内的 import 走）。
 - `<功能>.py`：功能本身，协议方法只做转发。
 
-当前注册两个：**reactions**（消息表情回应，见 [MCP_REACTIONS.md](MCP_REACTIONS.md)）与
+当前注册三个：**reactions**（消息表情回应，见 [MCP_REACTIONS.md](MCP_REACTIONS.md)）、
 **language**（实时语言学习，功能模块原地不动，见
-[MCP_LANGUAGE_LEARNING.md · 插件化归属](MCP_LANGUAGE_LEARNING.md#插件化归属issue-4-pd2b)）。
-两者共用同一套钩子；宿主的等待线报、计划上下文、工具边界交接都经描述子
+[MCP_LANGUAGE_LEARNING.md · 插件化归属](MCP_LANGUAGE_LEARNING.md#插件化归属issue-4-pd2b)）与
+**dossier**（群友画像：四个读写工具 + 唤醒行里的画像卡 + 空闲消化，功能模块
+`chatlocal/mcp_chat_dossier.py` 原地不动）。
+三者共用同一套钩子；宿主的等待线报、计划上下文、工具边界交接都经描述子
 （`wake_signal` / `plan_context` / `handoff` / `durable`）取数据，不认插件的字段名和文案。
+
+画像这类「要整批消息才算得出来」的字段挂 `enrich(packet, grant, row, items)`：它排在**所有**
+`decorate` 之后，算出来就写自己那个包字段（`member_dossiers`），宿主不知道这个字段叫什么。
+空闲消化挂 `idle(after)`，返回本次消化了几批，默认 0；插件自己判开关，停用就返回 0。
 
 新增一个 app 侧能力 = 在 `spec.py` 加一块 + 在 `app_plugins/` 加一个模块 + 在 `loader.py`
 注册一行。**不许**去 `mcp_chat` / `mcp_tools` 里加 `if name == ...`：

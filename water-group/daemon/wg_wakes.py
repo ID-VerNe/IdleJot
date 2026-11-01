@@ -26,6 +26,7 @@ def list_wakes():
     import wg_quotes
     import wg_send_failure
     import wg_text
+    import wg_videos
 
     rows = up.events()
     # issue #164 PA：只看本会话的群。改前遍历全量事件流，钉死群 111 的会话照样
@@ -56,7 +57,7 @@ def list_wakes():
             continue
         mark = up.wake_state(e, rows, ledger)
         stamp = wg_clock.clock_ms(e.get("timestamp"))
-        images = wg_images.render(e)
+        images = wg_images.render(e) + wg_videos.render(e)
         quotes = wg_quotes.render_event(e)
         # 正文渲染与 watch 唤醒行同一份口径（issue #32）：段占位不占额度，
         # 截断了带 … 和 --show 指引。

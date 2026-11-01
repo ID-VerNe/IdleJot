@@ -54,6 +54,7 @@ import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收
 import wg_clock  # noqa: E402  (「现在」的唯一出口，issue #95)
 import wg_event_ref  # noqa: E402  (id / qid 两套命名空间，issue #203)
 import wg_images  # noqa: E402  (图片标记渲染，issue #35 追问行同款)
+import wg_videos  # noqa: E402  (视频标记渲染，issue #200 追问行同款)
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_config  # noqa: E402  (config.json 的唯一读取口，issue #164 PC)
 import wg_event_ref  # noqa: E402  (事件 id 的唯一解析入口，issue #216)
@@ -358,6 +359,11 @@ def since(after_id, session, not_before=None, limit=50):
                     # `--event <裸数字>` 会指到另一条消息的图（issue #203）。
                     "images": wg_images.render(
                         dict(data, id=event_id), media,
+                        ref_name=wg_event_ref.format_ref(wg_event_ref.INBOX, event_id)),
+                    # 追问窗里收到的视频同理（issue #200）：改前追问行只剩裸
+                    # [视频]，而「刚聊到一半发了个视频」正是这条入口最常撞见的。
+                    "videos": wg_videos.render(
+                        dict(data, id=event_id),
                         ref_name=wg_event_ref.format_ref(wg_event_ref.INBOX, event_id)),
                     # @ 指向只在段里（issue #138）：`content` 已被人名替换过，
                     # `consume()` 判「只 @ 别人、没有正文」要靠这一列。

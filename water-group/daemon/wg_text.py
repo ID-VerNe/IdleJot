@@ -208,6 +208,7 @@ def _print_event(event_id, payload, source, name=None):
     import wg_clock
     import wg_images
     import wg_quotes
+    import wg_videos
 
     ref = name if name is not None else event_id
     stamp = wg_clock.stamp((payload.get("timestamp") or 0) / 1000)
@@ -225,10 +226,14 @@ def _print_event(event_id, payload, source, name=None):
     # 里面没有 `id` 键，不注入就只能按 0 反查索引、把补读命令打成 `--event 0`。
     # 写法与 `--context`（wg_context.py）、追问行（followup.py）同一份。
     images = wg_images.render(dict(payload, id=event_id), ref_name=ref)
+    # 视频同理（issue #200）：不注入 id 会打出 `--event 0`。
+    videos = wg_videos.render(dict(payload, id=event_id), ref_name=ref)
     if suffix:
         print(suffix)
     if images:
         print(images)
+    if videos:
+        print(videos)
     return 0
 
 

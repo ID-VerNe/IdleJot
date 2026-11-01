@@ -29,6 +29,7 @@
 .venv/Scripts/python.exe water-group/daemon/reply.py --who <花名>     # 解析花名到 QQ 与归属群并给出画像卡，不发送
 .venv/Scripts/python.exe water-group/daemon/reply.py <id> "看这张" --image <图片路径>  # 发本地图片，可重复；每张独占一条气泡排在文字之后
 .venv/Scripts/python.exe water-group/daemon/look.py --event <id>       # 唤醒行图片标「可补读」时先落盘再读；--pick 看候选、--recent 看最近
+.venv/Scripts/python.exe water-group/daemon/video.py --event <id>      # 视频标「可下载」时下到本地；--frames 抽首/中/尾 3 帧、--list 看候选、--recent 看最近
 ```
 
 `reply.py` 共 17 个参数，上面是最常用的；`--also`（连发 @ 用一条答复算作回了多条）、
@@ -54,6 +55,13 @@
 唤醒行里的图片标记三种形态：`path=…`（已落盘，直接读）、`可补读 look.py --event <id> --index <i>`
 （deferred，先跑命令再读）、`未登记`（无任何记录，命令照样能补读）。别对着裸 `[图片]` 说
 「看不到图」——先看标记尾缀（issue #35）。
+
+视频标记同理（issue #200）：`[视频 name=… size=… 可下载 video.py --event <id> --index <i>]`
+是「现在下得到」，`无下载地址` 是「这条段里没 URL，别再试」。QQ 多媒体 CDN 的地址带 `rkey`，
+实测约 8 小时就 `retcode -5503`——所以旧消息下载失败时 `video.py` 会先用 `get_msg` 重签一次，
+两级都失败才让你「请群友重发」。抽帧需要 PATH 里有 `ffmpeg`（不在 `pyproject.toml` 里），
+缺失时它明说缺什么，不会把视频说成「没有内容」。`--event` 同样认 `q<n>`：上下文行与追问行
+打的就是后者。
 
 **时间基准（issue #95）**：`up.py --status` 首个非空行、`reply.py --list` / `--context`
 表头、`watch.py` 唤醒块首行、`followup.py --show` 首行都带
@@ -504,20 +512,21 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 77 | `reply` | `check_unmute_probe.py` | 禁言解禁要叫醒值守的监听：解禁瞬时 WAKE、仍禁言/探测失败/全员禁言静默且不冒充解禁、节流两档、只读入口口径不变、listen 转述完整（#192）；禁言期间不扫追问窗口、窗口原封不动、解禁与无账本两组对照照常 [追问] 唤醒（#197） |
 | 78 | `reply` | `check_quote_visibility.py` | 引用原文必须到达 Agent，缺了也要说清原因（#94） |
 | 79 | `reply` | `check_image_visibility.py` | 唤醒行图片标记可执行，不许出现裸 [图片]（#35） |
-| 80 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、四种格式都真能发、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度（超了拒、额度内照发）、不回退计划通道、发图也记账（#128） |
-| 81 | `reply` | `check_reply_also.py` | --also 连发不遮蔽外层事件 ref，--also 存在不崩、两条都进账本（#302） |
-| 82 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
-| 83 | `reply` | `check_wake_dossier.py` | 沉淀的群友画像必须到达唤醒行 / --list / --context（不是只挂在 MCP 的 chat_guidance 里）：命中才附、不串到别人身上、每人一行有硬顶且不挤正文额度、群级术语一次一块不跨群、引擎坏了照常唤醒（#163） |
-| 84 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
-| 85 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
-| 86 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
-| 87 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
-| 88 | `reply` | `check_sixty` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
-| 89 | `reply` | `check_busboss.py` | 车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103） |
-| 90 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164）；id 撞号分节：事件流 id 与会话库 rowid 同号时 q&lt;n&gt; 只落到本群那条、裸 id 回库兜底要打出源说明（#203） |
-| 91 | `reply` | `check_trigger_mode.py` | 按群选择 natural/mention_only 触发模式：collector 请求值按 trigger_mode 取（不再硬编码 True）、natural 群普通消息 wake_reason 放行、@/关键词/is_self/指令早退不破坏、两群不同配置按群生效（#188） |
+| 80 | `reply` | `check_video_visibility.py` | 视频段标记可执行：唤醒行 / reply.py --list / --show / --context 与追问行四处都带 video.py 命令且记号与行首一致（q<n> 就是 q<n>）、无地址与文件段误判都会说明、q<n> 读会话库而裸数字不猜库、重签按名字匹配不拿别的视频顶替、daemon 下载判据与服务端同值；抽帧在缺 ffmpeg / 时长未知 / 短时长/失败时都说实话且产物进缓存预算（#200） |
+| 81 | `reply` | `check_reply_image.py` | 回复能发本地图片：--image 出 base64 图段、四种格式都真能发、整张解码才放行、半截图/超大像素/超帧数零请求、图也算气泡额度（超了拒、额度内照发）、不回退计划通道、发图也记账（#128） |
+| 82 | `reply` | `check_reply_also.py` | --also 连发不遮蔽外层事件 ref，--also 存在不崩、两条都进账本（#302） |
+| 83 | `reply` | `check_alias_visibility.py` | 正文外号必须能指到人，认不出也不许编（#30） |
+| 84 | `reply` | `check_wake_dossier.py` | 沉淀的群友画像必须到达唤醒行 / --list / --context（不是只挂在 MCP 的 chat_guidance 里）：命中才附、不串到别人身上、每人一行有硬顶且不挤正文额度、群级术语一次一块不跨群、引擎坏了照常唤醒（#163） |
+| 85 | `reply` | `check_at_segment_name.py` | at 段带显示名：入库/转发体两侧透传 name，@<数字> 与纯数字别名不得在正文命中里自指（#52） |
+| 86 | `reply` | `check_reply_timing.py` | 回复时序、密钥排除、轮换与失败透明 |
+| 87 | `reply` | `check_now_clock.py` | 值守工具链必须带当前时刻（#95） |
+| 88 | `reply` | `check_miyoushe.py` | 米游社取数 handler：DS 签名、URL 参数、缓存、错误码 |
+| 89 | `reply` | `check_sixty` | 60s 资讯层契约：信封判 code、query 参数、白名单、降级（#53） |
+| 90 | `reply` | `check_busboss.py` | 车盈网班次契约：节点 value 嵌套形状、日期结构判别、凭证轮换写回、缓存与零请求（#103） |
+| 91 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164）；id 撞号分节：事件流 id 与会话库 rowid 同号时 q&lt;n&gt; 只落到本群那条、裸 id 回库兜底要打出源说明（#203） |
+| 92 | `reply` | `check_trigger_mode.py` | 按群选择 natural/mention_only 触发模式：collector 请求值按 trigger_mode 取（不再硬编码 True）、natural 群普通消息 wake_reason 放行、@/关键词/is_self/指令早退不破坏、两群不同配置按群生效（#188） |
 
-共 91 个 CI 门禁，分 5 个分片（`static` 18、`runtime` 15、`mcp` 18、`storage` 11、`reply` 29）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
+共 92 个 CI 门禁，分 5 个分片（`static` 18、`runtime` 15、`mcp` 18、`storage` 11、`reply` 30）；`manual` 15、`stale` 0、`dead` 0、`support` 1 见 `scripts/gates.json` 的对应档位（理由写在那里）。
 <!-- gates:ci:end -->
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

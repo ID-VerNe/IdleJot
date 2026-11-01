@@ -202,6 +202,8 @@ def _print_event(event_id, payload, source, name=None):
 
     ``name`` 是首行要打给 Agent 抄的记号（issue #203）：会话库的行打 ``q<n>``，
     事件流的行打裸数字。省略时按裸 ``event_id`` 打，与改前一致。
+    **图片那一行必须跟着同一个记号走**（issue #310）：`--show q<n>` 打出来的补读
+    命令要是 `--event 0`，抄回去必然读不到——#204 的往返契约在这一处不成立。
     """
     import wg_clock
     import wg_images
@@ -219,7 +221,10 @@ def _print_event(event_id, payload, source, name=None):
         # 原始体在不在、被裁过没有。说得出就说，说不出的写「未保留」。
         print(line)
     suffix = wg_quotes.render_event(payload)
-    images = wg_images.render(payload)
+    # 记号与 id 一起传下去（issue #310）：payload 来自 `chat_inbox.payload` 时
+    # 里面没有 `id` 键，不注入就只能按 0 反查索引、把补读命令打成 `--event 0`。
+    # 写法与 `--context`（wg_context.py）、追问行（followup.py）同一份。
+    images = wg_images.render(dict(payload, id=event_id), ref_name=ref)
     if suffix:
         print(suffix)
     if images:

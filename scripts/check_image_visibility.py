@@ -44,7 +44,9 @@ pin_state_env(STATE)  # state 两腿都钉（#281：IDLEJOT 先于 TULPA，单�
 import followup  # noqa: E402
 import up  # noqa: E402
 import watch  # noqa: E402
+import wg_event_ref  # noqa: E402
 import wg_images  # noqa: E402
+import wg_text  # noqa: E402
 import wg_up_wake  # noqa: E402  (issue #37 PC: config 的真实调用点；up.config 只是门面引用)
 
 # 事件 id 段：9001+ 与真实数据不撞车；每条用例一个 id，索引行按需写入。
@@ -57,6 +59,11 @@ EID_NONE = 9006       # 占位在、记录全无
 EID_PLAIN = 9007      # 没有图
 EID_MEDIA = 9008      # 段缺失、media 兜底（reply.py --context 那条路）
 EID_WAKE = 9009       # watch 唤醒行端到端
+# issue #310：`--show q<n>` 走 chat_inbox，payload 里没有 `id` 键。三条用例分别钉
+# 「未登记」分支、「可补读」分支，以及事件流行不许跟着加 q（反向）。
+EID_SHOW_NONE = 9010  # 会话库行，索引里无行 → 未登记分支
+EID_SHOW_IDX = 9011   # 会话库行 + 索引 deferred → 可补读分支
+EID_SHOW_EVENT = 9012 # 事件流行：记号必须仍是裸数字
 NOW_MS = int(time.time() * 1000)
 
 
@@ -65,6 +72,25 @@ def index_row(event_id, state, local_path="", index=0, quote_of=None):
                 local_path=local_path, files=[local_path] if local_path else [],
                 dimensions=[], frame_indices=[], seen=bool(local_path),
                 at=time.time(), sender="群友丁", ts=NOW_MS, quote_of=quote_of)
+
+
+def inbox_row(event_id, message_id, payload):
+    """插一条 chat_inbox 行：`--show q<n>` 读的就是它（issue #310）。"""
+    db = sqlite3.connect(DB)
+    db.execute("INSERT INTO chat_inbox (id,session_id,message_id,payload,media,at)"
+               " VALUES (?,?,?,?,?,?)",
+               (event_id, SID, message_id, json.dumps(payload, ensure_ascii=False),
+                "[]", float(NOW_MS / 1000)))
+    db.commit()
+    db.close()
+
+
+def show(event_id, namespace):
+    """真跑一遍 `--show`，返回它打出来的那几行——抄回去的记号就在里面。"""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        wg_text.show_event(event_id, namespace=namespace)
+    return buf.getvalue()
 
 
 def build():
@@ -76,6 +102,7 @@ def build():
         index_row(EID_WEIRD, "budget_exhausted"),
         index_row(EID_MEDIA, "deferred"),
         index_row(EID_WAKE, "deferred"),
+        index_row(EID_SHOW_IDX, "deferred"),
     ])
     db = sqlite3.connect(DB)
     db.execute("CREATE TABLE chat_sessions (id TEXT, conversation_id TEXT, active INTEGER)")
@@ -91,6 +118,11 @@ def build():
                    "is_self": False, "segments": []}, ensure_ascii=False), "[]", float(NOW_MS / 1000)))
     db.commit()
     db.close()
+    # issue #310：`--show q<n>` 的两条图片分支各一条库行。payload 故意不带 `id`，
+    # 与 `wg_event_ref._ref_from_inbox` 从库里解出来的形状一致（那正是 #310 的根因）。
+    for eid, mid in ((EID_SHOW_NONE, "m-show-none"), (EID_SHOW_IDX, "m-show-idx")):
+        inbox_row(eid, mid, {"sender": "群友丁", "content": "[图片]",
+                             "timestamp": NOW_MS, "is_self": False, "segments": []})
 
 
 def event_of(event_id, *, segments, content="[图片]"):
@@ -208,6 +240,39 @@ def 唤醒行端到端带图片提示():
     text = buf.getvalue()
     return (code == 0 and "WAKE" in text
             and f"look.py --event {EID_WAKE} --index 0" in text)
+
+
+# ---------------------------------------------------------------- issue #310
+# `--show q<n>` 读的是 chat_inbox 那一行，而 `_ref_from_inbox` 解出的 payload 里没有
+# `id` 键。图片渲染不注入 id、不传记号时，补读命令恒打成 `--event 0`：打出来了却
+# 抄不通，`#204` 的往返契约（打出来的记号抄回去必须认）在这一处不成立。
+
+@case
+def show_会话库行_未登记分支打q记号():
+    """issue #310 的原症状：`--event 0` 抄进 look.py 必然读不到。"""
+    text = show(EID_SHOW_NONE, wg_event_ref.INBOX)
+    return (f"look.py --event q{EID_SHOW_NONE} 补读" in text
+            and "--event 0" not in text)
+
+
+@case
+def show_会话库行_可补读分支打q记号():
+    """索引里有该行时走「可补读」，`--index` 那条提示里的记号同样得是 q<n>。"""
+    text = show(EID_SHOW_IDX, wg_event_ref.INBOX)
+    return (f"look.py --event q{EID_SHOW_IDX} --index 0" in text
+            and f"--event {EID_SHOW_IDX} " not in text)
+
+
+@case
+def show_事件流行仍打裸数字():
+    """反向：事件流的行不许跟着加 q。一律加前缀会把 `--show 7` 教成 `--show q7`。"""
+    with open(STATE / "wg_events.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"id": EID_SHOW_EVENT, "sender": "群友丁", "content": "[图片]",
+                             "timestamp": NOW_MS, "is_self": False, "segments": []},
+                            ensure_ascii=False) + "\n")
+    text = show(EID_SHOW_EVENT, wg_event_ref.EVENT)
+    return (f"look.py --event {EID_SHOW_EVENT} 补读" in text
+            and f"q{EID_SHOW_EVENT}" not in text)
 
 
 # ---------------------------------------------------------------- issue #228

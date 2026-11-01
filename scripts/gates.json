@@ -566,6 +566,10 @@
    "why": "推送前 parity：干净 worktree + 空数据根下复跑门禁（#61）；CI 本身就是干净环境，且本脚本要建 worktree/读 git 历史，不进 ci"
   },
   {
+   "name": "check_pr_parity_isolation.py",
+   "why": "parity 现场隔离（#348）：跨进程互斥、同进程重入互斥、收尾只认自己那份（不连坐别人的树）、收不掉不静默。建真 worktree，量级与 check_pr_parity.py 同档，不进 ci"
+  },
+  {
    "name": "check_repo_settings.py",
    "why": "平台设置只读探测（分支保护 / delete_branch_on_merge / core.hooksPath）+ 复核两态政策（维护者数 x review/CODEOWNERS，双人态另需 code owner 审查、路径含 .githooks/ 钩子，#78）；CI 的 GITHUB_TOKEN 读 protection 会 403，只能本机跑（#58）"
   }
@@ -580,6 +584,10 @@
   {
    "name": "check_forward_recursion",
    "why": "issue #351 用例包（无独立入口）：合并转发递归展开的 9 组维度用例，夹具由 check_mcp_chat_enrichment 注入；拆出来只为过 check_module_size 的 1000 行硬上限"
+  },
+  {
+   "name": "check_pr_parity_lock.py",
+   "why": "共享模块（带 --self-test，无门禁入口）：parity 的跨进程互斥锁，被 check_pr_parity.py import，#348"
   }
  ]
 }

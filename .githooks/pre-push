@@ -24,6 +24,15 @@ if [ "$SKIP_PARITY" = "1" ]; then
   exit 0
 fi
 
+# 并发的两棵 parity 树怎么不互相踩（issue #348）：两个会话同时 push 时，两边的 parity
+# 曾经会互相抽掉对方**正在跑**的那棵树。修法在 parity 一侧：`check_pr_parity.py` 把
+# 「建树 → 跑门禁 → 收树」整段包在同一把跨进程锁里（scripts/check_pr_parity_lock.py，
+# 位置也只有那一处知道），另一侧进来先排队再建树；收尾只删自己登记过的那一条。
+#
+# 钩子这层**故意不持锁**：它一旦持有，下面起的 parity 子进程就拿不到同一把锁，父子互等
+# 直到超时。所以这里没有额外代码——逐个 commit 调 parity，由它们自己在同一条锁队列上
+# 排好，一次只跑一棵树。两个会话各自 push 也一样，排队的是两个 parity 调用。
+
 while read -r local_ref local_sha remote_ref remote_sha; do
   case "$local_sha" in
     0000000000000000000000000000000000000000) continue ;;

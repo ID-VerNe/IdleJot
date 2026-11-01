@@ -22,7 +22,7 @@ from .mcp_chat_schemas import schemas  # noqa: F401  (issue #11 PC: facade re-ex
 from .mcp_chat_wait import ChatWaitMixin
 from .mcp_schemas import event_id, idempotency_key, session_id
 from .onebot_events import EventReceiver
-from .onebot_segments import at as at_segment, card_text, message_id, name as at_name, qq as qq_id, reply as reply_segment
+from .onebot_segments import at as at_segment, card_text, message_id, name as at_name, qq as qq_id, render_content, reply as reply_segment
 from .onebot_segments import UNSUPPORTED_TOTAL_CHARS, unsupported
 from . import mcp_chat_prompts as prompts
 from .mcp_chat_turns import ChatTurns, TOOLS as TURN_TOOLS
@@ -479,7 +479,9 @@ class MCPChat(ChatWaitMixin):
                     segments.append(segment)
                     parts.append(card_text(kind,data,segment))
         else:return
-        content=''.join(parts)
+        # issue #315：`''.join(parts)[:12000]` 会把卡片占位硬切在半路（收尾 `]` 没了，
+        # 唤醒行剥不掉占位，半截 URL 漏进正文）。切断按段走，段清单同步裁剪。
+        content,segments=render_content(parts,segments)
         # issue #39: the upstream card/nickname can be QQ quote-bubble UI text
         # (``<X>回应了你的消息：<Y>``) rather than a real card. Never let that
         # string become the displayed sender -- fall back to the QQ number so
@@ -489,8 +491,8 @@ class MCPChat(ChatWaitMixin):
         )
         payload=dict(source='send_receipt' if send_request is not None else 'onebot_websocket',onebot_message_id=mid,conversation_id=cid,sender_id=uid,
                      sender=sender_name[:200],
-                     timestamp=timestamp,received_at=time.time(),is_self=uid==account,content=content[:12000],
-                     truncated=len(content)>12000 or (isinstance(source,list) and len(source)>100),segments=segments[:100])
+                     timestamp=timestamp,received_at=time.time(),is_self=uid==account,content=content,
+                     truncated=len(''.join(parts))>12000 or (isinstance(source,list) and len(source)>100),segments=segments[:100])
         payload['app_epochs']=self.apps.stamps()
         payload['synthetic']=any(bool(event.get(k)) for k in ('virtual','is_notify','is_system','synthetic'))
         if type(event.get('message_seq')) is int and event['message_seq']>0:

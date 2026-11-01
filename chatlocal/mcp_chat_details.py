@@ -6,7 +6,7 @@ import time
 from . import reply_timing as timing
 from .mcp_chat_media import image_ref
 from .onebot import OneBotError
-from .onebot_segments import at as at_segment, card_text, kind_of, link_fields, reply as reply_segment, unsupported
+from .onebot_segments import at as at_segment, card_text, kind_of, link_fields, render_content, reply as reply_segment, unsupported
 from .onebot_segments import UNSUPPORTED_TOTAL_CHARS
 
 MAX_NODES=100  # QQ 单条合并转发的上限，实测 get_forward_msg 一次全量返回（issue #8）
@@ -308,7 +308,10 @@ class ChatDetails:
                 else:
                     parts.append(card_text(kind,source))
                     result.append(dict(type='unsupported',kind=kind_of(kind)))
-        return dict(content=''.join(parts)[:MAX_TEXT],segments=result)
+        # issue #315：切断落在段边界上，不再把卡片占位切在半路。段清单同步裁剪，
+        # 免得「content 里看不到这段」而「segments 里还留着」两种说法并存。
+        content,kept=render_content(parts,result,MAX_TEXT)
+        return dict(content=content,segments=kept)
 
     def render_nodes(self,nodes,media,stamp,allow_images=True,quote_message_id=None):
         # message_id 一起透出：Agent 可以拿它对该条再 get_msg（issue #8）。

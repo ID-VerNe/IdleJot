@@ -5,13 +5,17 @@
 被另一边从底下抽走了。原先的收尾是「`remove` 自己的 → `prune` 全仓 → `rmtree`」，
 且建树前不核对登记，所以任意一边都能抽掉另一边的树。
 
-本门禁把修法的三条分别钉住，每条都配「不修就会红」的对照：
+本门禁把修法的各条分别钉住，每条都配「不修就会红」的对照：
 
 1. **跨进程互斥**：`check_pr_parity_lock` 的字节锁真能挡住第二个**进程**；同一个进程里
    两个句柄也互斥（钩子同进程连跑两次 parity 靠的就是这一条）；
 2. **只认自己那份**：登记表按规范化路径比对；收尾只 `remove` 自己那条，别人正在用的树
    一格都不许动；
-3. **不静默**：收不掉的残留要说进 `Report.problems`，不许一声不响地当成功。
+3. **不静默**：收不掉的残留要说进 `Report.problems`，不许一声不响地当成功；
+4. **孤儿登记不复用**：登记在、目录不在时必须按失败处理并提示 `prune`，不许把一棵不存在
+   的树当成可复用现场（取消全局 `prune` 之后的新坑，issue #348 复核第 ② 条）；
+5. **`main()` 持锁接线**：跑真的 `check_pr_parity.main()`，锁被占期间它不许进入 `_parity`，
+   放锁之后才进——只验锁模块本身证明不了 `main()` 用上了它（issue #348 复核第 ① 条）。
 
 跑法：`python scripts/check_pr_parity_isolation.py`（本机手跑；它建真 worktree，量级与
 `check_pr_parity.py` 同档，所以不在 CI 分片里跑）。
@@ -75,7 +79,7 @@ def wait_for(predicate, seconds=30.0):
 
 
 def case_lock_is_cross_process(scene):
-    """1. 跨进程：一个进程持锁期间别的进程拿不到，关掉 stdin 即恢复。"""
+    """1. 跨进程：一个进程持锁期间别的进程拿不到，收掉持锁进程即恢复。"""
     print('\n[1] 跨进程互斥')
     holder = subprocess.Popen([sys.executable, str(LOCK_SCRIPT), '--hold', '--ref', 'case-1'],
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -88,9 +92,10 @@ def case_lock_is_cross_process(scene):
         check('probe 说出持锁者 ref', 'case-1' in busy.stdout, True)
         check('持锁期间 serialize rc=1', lock_cli(scene, '--serialize').returncode, 1)
     finally:
-        holder.stdin.close()
-        holder.wait(timeout=120)
-    check('持锁进程正常退出', holder.returncode, 0)
+        # --hold 靠**进程退出**放锁（不靠 stdin EOF）：句柄继承给子进程时关 stdin 不放锁，
+        # 拿「关 stdin」当释放手段就会在这里挂满 120s（issue #348 复核第 ③ 条）。
+        lock.terminate(holder)
+    check('持锁进程被收掉', holder.poll() is not None, True)
     # 对照：同一条命令在没人拿着时必须反过来，否则上面那句 rc=1 什么都不证明。
     check('释放后 probe rc=0（对照）', lock_cli(scene, '--probe').returncode, 0)
     check('释放后 serialize rc=0', lock_cli(scene, '--serialize').returncode, 0)
@@ -208,6 +213,75 @@ def case_cleanup_not_silent(scene):
     check('孤儿目录仍被删掉', Path(path).exists(), False)
 
 
+def case_orphan_not_reused(scene):
+    """7. 登记在、目录不在的孤儿不许被当成可复用现场（砍掉全局 prune 之后的新坑）。"""
+    print('\n[7] 孤儿登记不复用')
+    sha = head_sha()
+    scratch = scene / 'orphan-reuse'
+    status, path, _ = parity.add_worktree(sha, scratch)
+    check('先建一棵真树', status, parity.ADD_OK)
+    # 只拆目录、留登记：正是上一轮被硬杀（或别处 prune 掉目录）之后的现场。
+    shutil.rmtree(path)
+    check('目录已拆掉但登记还在', parity.is_registered(path), True)
+
+    again, reused, reason = parity.add_worktree(sha, scratch)
+    check('孤儿登记不许 reuse', again, 'fail')
+    check('孤儿不给路径', reused, None)
+    check('孤儿原因点名 prune', 'prune' in (reason or ''), True)
+    # 对照：登记与目录都在时才必须 reuse（否则上面那条 fail 什么都不证明）。
+    git('worktree', 'prune')
+    check('prune 之后登记已清', parity.is_registered(path), False)
+    status, path, _ = parity.add_worktree(sha, scratch)
+    check('prune 后重建成功', status, parity.ADD_OK)
+    third, same, _ = parity.add_worktree(sha, scratch)
+    check('真树仍在时才 reuse（对照）', (third, same), ('reuse', Path(path)))
+    parity.cleanup(path)
+
+
+def case_main_holds_lock(scene):
+    """8. `main()` 真的持锁：锁被占期间绝不进入 `_parity`，放锁之后才进去。
+
+    这是整条修复的接线处——`check_pr_parity.py:main()` 里那段 `lock.acquire(...)`。
+    只验 `check_pr_parity_lock` 自身（第 1–3 组）证明不了 `main()` 用上了它：把那段
+    删掉，门禁照样全绿。所以这里跑**真的 `main()`**，只把 `_parity` 换成一行记录。
+    """
+    print('\n[8] main() 持锁接线')
+    driver = scene / 'driver.py'
+    marker = scene / 'entered.txt'
+    driver.write_text(
+        'import pathlib, sys\n'
+        f'sys.path.insert(0, {str(SCRIPTS)!r})\n'
+        'import check_pr_parity as parity\n'
+        f'marker = pathlib.Path({str(marker)!r})\n'
+        'def fake(args, sha):\n'
+        '    marker.write_text("entered", encoding="utf-8")\n'
+        '    return 0\n'
+        'parity._parity = fake\n'
+        'sys.argv = ["check_pr_parity.py", "--ref", sys.argv[1]]\n'
+        'sys.exit(parity.main())\n', encoding='utf-8')
+    sha = head_sha()
+    runner = subprocess.Popen([sys.executable, str(driver), sha], cwd=ROOT,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              env=scene_env(scene), text=True, encoding='utf-8')
+    holder = None
+    try:
+        holder = lock.acquire(scene / lock.LOCK_NAME, blocking=True)
+        check('门禁自己拿着锁', holder is not None, True)
+        # 锁在门禁手里时 main() 必须卡在排队上：给足让它跑完 _parity 的时间。
+        time.sleep(3.0)
+        check('锁被占时没进入 _parity', marker.exists(), False)
+        check('锁被占时 main() 还没退出', runner.poll(), None)
+    finally:
+        lock.release(holder, scene / lock.LOCK_NAME)
+    try:
+        runner.communicate(timeout=120)
+    except subprocess.TimeoutExpired:
+        runner.kill()
+        runner.communicate(timeout=30)
+    check('放锁后 main() 才进入 _parity（对照）', marker.exists(), True)
+    check('main() 正常返回', runner.returncode, 0)
+
+
 def guarded(name, case, scene):
     """一组用例崩了也继续跑下一组：崩在哪一组、崩成什么，都要看得见（基线对照要的是全貌）。"""
     try:
@@ -228,7 +302,9 @@ def main():
                            ('等锁串行化', case_lock_serializes_threads),
                            ('只认自己那份', case_registration),
                            ('不连坐', case_prune_spares_others),
-                           ('不静默', case_cleanup_not_silent)):
+                           ('不静默', case_cleanup_not_silent),
+                           ('孤儿登记不复用', case_orphan_not_reused),
+                           ('main() 持锁接线', case_main_holds_lock)):
             guarded(name, case, scene)
     finally:
         shutil.rmtree(scene, ignore_errors=True)
@@ -236,7 +312,7 @@ def main():
         for line in FAILS:
             print(f'FAIL {line}')
         return 1
-    print('PASS parity 现场隔离六项')
+    print('PASS parity 现场隔离八项')
     return 0
 
 

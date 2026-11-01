@@ -19,7 +19,7 @@ Windows 上没有 `fcntl`（本机实测 `import fcntl` → ModuleNotFoundError�
 时 Windows 关闭句柄、字节锁自动释放；这与 `wg_images._locked()`（issue #228）同一个取舍，
 `commands.py` 那套 `O_EXCL` 是「单实例占位」，被硬杀后会留死锁文件要手删。
 
-    python scripts/check_pr_parity_lock.py --hold --ref <sha>  # 持锁直到 stdin EOF（排查/门禁夹具）
+    python scripts/check_pr_parity_lock.py --hold --ref <sha>  # 持锁直到本进程被杀（排查/门禁夹具）
     python scripts/check_pr_parity_lock.py --serialize        # 等锁空出来再返回（脚本串联）
     python scripts/check_pr_parity_lock.py --probe            # 只读：有人拿着返回 1
     python scripts/check_pr_parity_lock.py --self-test        # 逐项自检（不碰网络、不建树）
@@ -27,11 +27,21 @@ Windows 上没有 `fcntl`（本机实测 `import fcntl` → ModuleNotFoundError�
 `check_pr_parity.py` 在建树前拿到这把锁、收树后才放，所以同一台机器上任何时刻只有一份
 parity 在建树/跑门禁/收树；两个会话各自 push 时，排的是同一条队。
 
+`_lock()` 只把「别人拿着」（`EACCES` / `EDEADLK`）当占用；区域锁不被支持（`ENOLCK` /
+`EINVAL` / `ENOTSUP`）时**报错退出**，不混进自旋——否则那种机器上 `blocking=True` 会空转到
+天荒地老，症状和「有人一直拿着」一模一样。`acquire(blocking=True)` 等到
+`ACQUIRE_CAP_SECONDS` 还没拿到就说清「等满了」并返回 None，不无限挂着。
+
+`--hold` 的释放在**进程退出**时发生（`taskkill` / Ctrl-C / 调用方主动收掉），不靠 stdin：
+句柄被继承给子进程时，父进程关掉 stdin 并不会让子进程那边的读返回 EOF，锁就一直在手里
+（issue #348 复核第 ③ 条）。
+
 环境变量：`IDLEJOT_PARITY_HOME` 改锁所在目录（默认系统临时目录）；`IDLEJOT_PARITY_LOCK`
 直接指定锁文件（多机共享 temp 时才需要）——两者都是测试夹具用的，运行时不设。
 """
 import argparse
 from contextlib import contextmanager
+import errno
 import json
 import os
 from pathlib import Path
@@ -53,6 +63,12 @@ HOLDER_NAME = 'idlejot-parity.holder'
 # 锁文件里那段被锁住的字节写的是持有者；1 字节放不下 pid，所以锁整段 8 字节。
 LOCK_BYTES = 8
 POLL = 0.5
+# `acquire(blocking=True)` 最多等这么久。锁本该在「建树 + 跑门禁」那个量级内放开
+# （本机全量 parity 约 3–4 分钟），等过这个数的更可能是「持有者活着但卡死」——
+# 无限自旋分不清「在排队」和「卡住了」，等满就明说，调用方照旧按失败处理。
+ACQUIRE_CAP_SECONDS = 3600.0
+# 「别人拿着」的 errno：msvcrt 对已被锁住的区域报 EACCES（13），同进程重入报 EDEADLK。
+BUSY_ERRNOS = frozenset({errno.EACCES, errno.EDEADLK})
 
 
 def lock_dir():
@@ -121,21 +137,33 @@ def recorded_holder():
 
 
 def _lock(path):
+    """拿锁：拿到返回 fd，**别人拿着**返回 None；别的失败（区域锁不支持）直接抛。
+
+    把「占用」与「这台机器根本不支持字节区域锁」分开，是 issue #348 复核的第 ③ 条：
+    原先一律返回 None，于是 `blocking=True` 会拿一条永远不会变的前提出来自旋。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_CREAT | os.O_RDWR)
     try:
         msvcrt.locking(fd, msvcrt.LK_NBLCK, LOCK_BYTES)
-    except OSError:
+    except OSError as error:
         os.close(fd)
-        return None
+        if error.errno in BUSY_ERRNOS:
+            return None
+        raise RuntimeError(
+            f'无法在 {path} 上建立跨进程锁（errno={error.errno}: {error.strerror}）——'
+            '该文件系统不支持字节区域锁，parity 无法保证两处现场互不干扰'
+        ) from error
     return fd
 
 
-def acquire(path=None, *, blocking=False, on_wait=None, sleep=time.sleep):
+def acquire(path=None, *, blocking=False, on_wait=None, sleep=time.sleep,
+            monotonic=time.monotonic, cap=ACQUIRE_CAP_SECONDS):
     """拿锁：成功返回 fd（调用方负责 `release`）；非阻塞拿不到返回 None。
 
-    `blocking=True` 时自旋到拿到为止；`on_wait` 只在**第一次**发现有人在用时叫一次，
-    免得排队期间刷屏。`sleep` 可注入（门禁用它免掉真实等待）。
+    `blocking=True` 时自旋到拿到为止，最多 `cap` 秒；等满仍拿不到返回 None 并说明。
+    `on_wait` 只在**第一次**发现有人在用时叫一次，免得排队期间刷屏。
+    `sleep` / `monotonic` / `cap` 可注入（门禁与自检用它免掉真实等待）。
     """
     if msvcrt is None:
         raise RuntimeError('跨进程锁需要 Windows（msvcrt）；parity 是 Windows-only 工具')
@@ -145,7 +173,11 @@ def acquire(path=None, *, blocking=False, on_wait=None, sleep=time.sleep):
         return fd
     if on_wait is not None:
         on_wait(recorded_holder())
+    deadline = monotonic() + cap
     while fd is None:
+        if monotonic() >= deadline:
+            print(f'parity: 等锁已满 {cap:.0f}s 仍未拿到（{target}），按失败处理', file=sys.stderr)
+            return None
         sleep(POLL)
         fd = _lock(target)
     return fd
@@ -217,7 +249,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='parity 跨进程互斥锁（issue #348）')
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--hold', action='store_true',
-                       help='持锁直到 stdin EOF（钩子：在整次推送期间先持锁）')
+                       help='拿住锁直到本进程被杀（给门禁/排查当持锁夹具；不是钩子路径）')
     group.add_argument('--serialize', action='store_true',
                        help='只确认锁现在空闲（拿得到即返回 0，拿不到打印持有者并返回 1）')
     group.add_argument('--probe', action='store_true', help='只读：有人拿着返回 1，否则 0')
@@ -256,12 +288,19 @@ def main(argv=None):
         return 2
     path = lock_path()
     fd = acquire(path, blocking=True, on_wait=lambda holder: print(describe_wait(holder), file=sys.stderr))
+    if fd is None:
+        print(f'FAIL: 等锁超时（{path}）', file=sys.stderr)
+        return 1
     try:
         write_holder(args.ref)
-        # 钩子把 stdin 接到管道上；读到这里说明 stdin 已经没有更多输入了，整次推送结束。
-        while sys.stdin.buffer.read(65536):
-            pass
-        return 0
+        # 拿到锁就报一行，调用方据此知道「锁已经在手里」可以开始做别的事，
+        # 而不必去猜持有者记录落盘了没有。
+        print(f'holding：{path}', flush=True)
+        # 释放靠进程退出（taskkill / Ctrl-C / 调用方 kill）：**不读 stdin**。
+        # 句柄被继承给子进程时，父进程关 stdin 不会让子进程这边的读返回 EOF，
+        # 「读到这里就结束」的前提不成立，锁会一直握在手里（issue #348 复核第 ③ 条）。
+        while True:
+            time.sleep(3600)
     except KeyboardInterrupt:
         return 130
     finally:
@@ -334,23 +373,59 @@ def self_test():
         expect('死记录不冒充持有者', after.returncode, 0)
         expect('死记录被顺手清掉', holder.exists(), False)
 
-        # 5. --hold 真的持有：子进程阻塞在 stdin 上时，本进程拿不到锁；关掉 stdin 后可拿
+        # 5. --hold 真的持有：子进程活着时本进程拿不到锁；收掉它（SIGTERM）后可拿。
+        #    刻意**不**关 stdin：旧实现读到 stdin EOF 才放手，而句柄一旦继承给子进程，
+        #    父进程关 stdin 并不会让那边读到 EOF——素材就在这里，别再把它当释放手段。
         piping = subprocess.Popen([sys.executable, script, '--hold', '--ref', 'hookref'],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE, env=env, text=True, encoding='utf-8')
         try:
-            _until(lambda: _holder_ref(holder) == 'hookref')
+            _until(lambda: 'holding' in (piping.stdout.readline() or ''))
             expect('--hold 写下了持有者记录', _holder_ref(holder), 'hookref')
             held_probe = cli('--probe')
             expect('--hold 期间 probe 说 held', held_probe.returncode, 1)
-            piping.stdin.close()
-            piping.wait(timeout=20)
-            expect('--hold 结束时 rc', piping.returncode, 0)
+            piping.stdin.close()  # 关 stdin 不再等于放锁：下面这条正是不许放的那个前提
+            expect('关 stdin 后锁仍被 Hold 握着', cli('--probe').returncode, 1)
         finally:
             if piping.poll() is None:
-                piping.kill()
-                piping.wait(timeout=20)
+                terminate(piping)
         expect('--hold 结束即释放', cli('--probe').returncode, 0)
+
+        # 6. acquire 的自旋不会无限：等满 cap 就说清并返回 None（时钟可注入，不真等 1 小时）
+        def spin(cap, failure):
+            """每次加锁尝试都按 `failure` 失败，返回 (结果, 累计睡眠, 尝试次数)。"""
+            ticks = [0.0]
+            tries = []
+            module = sys.modules[__name__]
+            saved = module.msvcrt.locking
+
+            def fake_locking(fd, mode, size):
+                tries.append(mode)
+                raise failure
+
+            def fake_sleep(step):
+                ticks[0] += step
+
+            module.msvcrt.locking = fake_locking
+            try:
+                got = acquire(lock, blocking=True, sleep=fake_sleep,
+                              monotonic=lambda: ticks[0], cap=cap)
+            finally:
+                module.msvcrt.locking = saved
+            return got, ticks[0], len(tries)
+
+        got, waited, tries = spin(2.0, OSError(errno.EACCES, 'busy'))
+        expect('被占着时等满返回 None', got, None)
+        expect('等满的时长被 cap 住', 2.0 <= waited <= 2.0 + 2 * POLL, True)
+        expect('等满前真的重试过', tries > 1, True)
+
+        raised = None
+        try:
+            spin(2.0, OSError(errno.ENOLCK, 'no locks available'))
+        except RuntimeError as error:
+            raised = error
+        expect('区域锁不被支持时报错而不是自旋', raised is not None, True)
+        expect('报错里点名 errno', f'errno={errno.ENOLCK}' in str(raised), True)
     finally:
         shutil.rmtree(scene, ignore_errors=True)
         for key, value in previous.items():
@@ -383,9 +458,26 @@ def self_test():
         for line in failures:
             print(f'SELF-TEST FAIL {line}')
         return 1
-    print('SELF-TEST OK 互斥六项：空闲 free / 占用 held 且说出持有者 / '
-          'serialize 两态相反 / 释放即清记录 / 死记录不冒充 / --hold 真持锁 / wait 等满即返回')
+    print('SELF-TEST OK 互斥八项：空闲 free / 占用 held 且说出持有者 / '
+          'serialize 两态相反 / 释放即清记录 / 死记录不冒充 / --hold 靠退出放锁（关 stdin 不放）/ '
+          '等满 cap 返回 None / 不支持区域锁时报错不自旋 / wait 等满即返回')
     return 0
+
+
+def terminate(process, seconds=20):
+    """收掉 `--hold` 夹具：先 SIGTERM（走 `finally` 正常放锁），不退再 kill。
+
+    门禁与自检都用它收持锁夹具——`--hold` 不认 stdin EOF，只认进程退出。
+    """
+    if process.poll() is not None:
+        return process.returncode
+    try:
+        process.terminate()
+        process.wait(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=seconds)
+    return process.returncode
 
 
 def _holder_ref(path):

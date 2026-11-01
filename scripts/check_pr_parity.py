@@ -24,6 +24,8 @@ CI 本身不跑本脚本：CI 已经是那个干净环境，且它需要完整 g
 `can't open file '.../pristine/scripts/<gate>.py'`——树在跑的过程中被另一边抽走了。
 现在「建树 → 跑门禁 → 收树」整段持 `scripts/check_pr_parity_lock.py` 的跨进程锁，
 收尾只 `remove` 自己登记过的那条路径（不再全局 `prune`），收不掉时说进 stderr。
+取消全局 `prune` 之后，复用前必须**确认目录还在**：孤儿登记（目录已删、登记还在）按
+失败处理并提示 `git worktree prune`，不会把一棵不存在的树当成可复用的现场。
 """
 import argparse
 import json
@@ -76,19 +78,38 @@ def is_registered(path):
     return any(_same_path(path, entry) for entry in registered_worktrees())
 
 
+def _usable(entry):
+    """登记表里这条路径此刻真的还是一棵 checkout（目录在、`scripts/` 在）。
+
+    只看登记不看目录，正是 issue #348 复核的第 ② 条：本 PR 取消了全局 `prune`，于是
+    上一轮硬杀留下的孤儿登记（目录已被删、登记还在）会被 `add_worktree` 当成「可以复用」，
+    随后 `shard_problem` 报 `该 ref 缺少 scripts/gates.json` 并退出 2——一个由修复本身
+    引入的新失败。复用前先摸一下盘。
+    """
+    base = Path(entry)
+    return base.is_dir() and (base / 'scripts' / 'gates.json').is_file()
+
+
 def add_worktree(sha, scratch):
     """在 `scratch/pristine` 建 detached worktree。
 
-    返回 `(状态, 路径, 原因)`：`ADD_OK` 新建成；`'reuse'` 该路径已在登记表里（上一轮
-    硬杀留下的），直接复用而不重复 `add`；`'fail'` 建不起来（原因在第三项）。
+    返回 `(状态, 路径, 原因)`：`ADD_OK` 新建成；`'reuse'` 该路径已在登记表里**且目录还在**
+    （上一轮硬杀留下的活树），直接复用而不重复 `add`；`'fail'` 建不起来或登记是孤儿
+    （原因在第三项）。
 
     返回值里的路径是**登记表里的写法**：`git` 会把 `C:\\a\\b` 之类的多余分隔符规范化，
     拿请求时的字符串去比对登记表会假阴性，后续收尾必须用这里的路径（issue #348）。
     """
     path = scratch / 'pristine'
     for entry in registered_worktrees():
-        if _same_path(path, entry):
+        if not _same_path(path, entry):
+            continue
+        if _usable(entry):
             return 'reuse', Path(entry), None
+        # 登记在、目录不在：不能复用（否则等于被指向一棵不存在的树），也不能悄悄
+        # 就地覆盖（那条登记要么是别人的，要么得先 prune 掉）。说清让谁来收拾。
+        return 'fail', None, (f'{entry} 登记在 git 的 worktree 表里，但目录已不在（孤儿登记）；'
+                              '先 `git worktree prune` 再重跑')
     result = run(['git', 'worktree', 'add', '--detach', str(path), sha], ROOT)
     if result.returncode != 0:
         return 'fail', None, output_of(result)

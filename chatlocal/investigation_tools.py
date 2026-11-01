@@ -14,7 +14,7 @@ def schemas(tool):
         tool('get_interaction_threads','提取2–6名同平台稳定账号的真正交互线索，先find_people确认账号。'
             'strict只取原生reply/完整quote/明确@账号；contextual另含短时间连续交替发言候选，不能当确定对话。'
             'participants是sender_id字符串数组。返回原文和关系依据，仍须结合语境。query为空格分词OR主题过滤。',
-            dict(platform=dict(type='string',enum=['qq','wechat']),participants=dict(type='array',items=string,minItems=2,maxItems=6),
+            dict(platform=dict(type='string',enum=['qq']),participants=dict(type='array',items=string,minItems=2,maxItems=6),
                 mode=dict(type='string',enum=['strict','contextual']),conversation_ids=dict(type='array',items=string,maxItems=20),
                 start=string,end=string,query=string,offset=dict(type='integer',minimum=0,maximum=1000),
                 limit=dict(type='integer',minimum=1,maximum=10,default=5)),['platform','participants']),

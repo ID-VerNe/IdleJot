@@ -60,7 +60,7 @@ def install_codex(url, token, *, home=None, scope=None, server_name='tulpa'):
         if existing == entry:
             return dict(installed=True, changed=False)
         if existing is not None:
-            raise ValueError(f'Codex 已有名为 {server_name} 的其他连接，未覆盖。请修改 MCP 名称后重试，例如 tulpa_wechat。')
+            raise ValueError(f'Codex 已有名为 {server_name} 的其他连接，未覆盖。请修改 MCP 名称后重试，例如 tulpa_qq。')
         text = original.decode('utf-8-sig')
         updated = (text.rstrip()+'\n\n'+stanza).encode('utf-8')
         after = tomllib.loads(updated.decode('utf-8'))

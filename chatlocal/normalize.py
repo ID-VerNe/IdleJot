@@ -64,9 +64,8 @@ def first(obj, *keys, default=None):
 
 def platform_name(value):
     value = str(value or '').lower()
-    value = {'微信': 'wechat', 'weixin': 'wechat', 'wx': 'wechat'}.get(value, value)
-    if value not in ('qq', 'wechat'):
-        raise ValueError('无法确定平台，请选择 qq 或 wechat')
+    if value != 'qq':
+        raise ValueError('无法确定平台，请选择 qq')
     return value
 
 
@@ -87,15 +86,13 @@ def decode_export(path):
         raise ValueError('导出文件必须是 JSON 对象/数组或统一 Schema JSONL')
     if 'chunked' in data or ('messages' not in data and 'chunks' in data):
         raise ValueError('请在 QCE 选择单文件 JSON 导出；此版本不导入分块 manifest。')
-    # wx --json may wrap its payload.
+    # Vendor exports used to wrap their payload under a "data" key.
     if isinstance(data.get('data'), dict) and 'messages' in data['data']:
         data = data['data']
-    kind = ('wechatauto' if data.get('reader') == 'wechatauto-replica' or ('chats' in data and 'wxid' in data)
-            else 'qce' if 'chatInfo' in data else 'chatlab' if 'chatlab' in data
-            else 'weflow' if 'weflow' in data else 'wx' if 'chat' in data else 'canonical')
+    kind = 'qce' if 'chatInfo' in data else 'canonical'
     records = data.get('messages')
     if not isinstance(records, list):
-        raise ValueError('找不到 messages 数组；支持 QCE、wx-cli、ChatLab、WeFlow JSON 和统一 JSONL。')
+        raise ValueError('找不到 messages 数组；支持 QCE JSON 和统一 Schema JSONL。')
     return data, [(f'/messages/{i}', m) for i, m in enumerate(records)], kind
 
 
@@ -115,9 +112,9 @@ def normalize(raw, head, kind, platform='', conversation='', self_ids=''):
     p = platform or raw.get('platform')
     conv = conversation or raw.get('conversation')
     media=raw.get('media') or []
-    from .voice_metadata import clean as clean_voice, wechat_voice, PLACEHOLDER
+    from .voice_metadata import clean as clean_voice
     voice=clean_voice(raw.get('voice'))
-    from .artifact_metadata import clean_descriptor, wechat_file
+    from .artifact_metadata import clean_descriptor
     raw_files=raw.get('files') or []
     if not isinstance(raw_files,list):raise ValueError('files 必须是数组')
     files=[d for v in raw_files[:16] if (d:=clean_descriptor(v))]
@@ -140,65 +137,6 @@ def normalize(raw, head, kind, platform='', conversation='', self_ids=''):
         content = content.get('text') if isinstance(content, dict) else content
         if raw.get('system') or raw.get('isSystemMessage') or raw.get('recalled') or raw.get('isRecalled'):
             return None
-    elif kind == 'wx':
-        p = 'wechat'
-        conv = conversation or head.get('chat')
-        conv_id = head.get('username')
-        conv_type = 'group' if str(conv_id).endswith('@chatroom') else 'direct'
-        sender_id = first(raw, 'sender_username', 'sender_id')
-        original_id = first(raw, 'server_id', 'msg_svr_id', 'id', 'msg_id')
-        if original_id is None and raw.get('local_id') is not None:
-            original_id = f"local:{raw['local_id']}:{stamp(ts)}"
-        # wx-cli intentionally omits the peer label on some private messages.
-        # Preserve that uncertainty rather than invent a sender.
-        sender = sender or '未知发送者（导出未提供）'
-        # wx often exports human readable type names; media is not transcribed.
-        msg_type = first(raw, 'type', 'msg_type')
-        if msg_type is not None and str(msg_type).lower() not in ('1', 'text', '文本', '文本消息'):
-            return None
-        self_value = truth(first(raw, 'is_self', 'is_send'))
-    elif kind == 'weflow':
-        p = 'wechat'
-        info = head.get('session') or {}
-        conv = conversation or first(info, 'displayName', 'remark', 'nickname', 'wxid')
-        conv_id = info.get('wxid')
-        conv_type = 'group' if str(conv_id).endswith('@chatroom') else 'direct'
-        sender_id = raw.get('senderUsername')
-        sender = first(raw, 'senderDisplayName', 'senderUsername')
-        ts = first(raw, 'createTime', 'formattedTime')
-        self_value = truth(raw.get('isSend'))
-        original_id = first(raw, 'platformMessageId', 'localId')
-        if raw.get('type') not in ('文本消息', '引用消息'):
-            return None
-    elif kind == 'wechatauto':
-        p = 'wechat'
-        conv_id = raw.get('chat')
-        conv_type = 'group' if str(conv_id).endswith('@chatroom') else 'direct'
-        chats = {c['username']:c.get('name',c['username']) for c in head.get('chats',[])}
-        conv = conversation or chats.get(conv_id,conv_id)
-        sender_id = raw.get('sender_username','') if head.get('identity_method') else ''
-        sender = str(first(raw,'sender_name',default=sender_id or '未知发送者'))
-        ts = raw.get('create_time')
-        original_id = raw.get('server_id')
-        if not original_id or str(original_id)=='0':
-            original_id = f"local:{raw.get('local_id')}:{stamp(ts)}"
-        if sender_id and head.get('wxid'):
-            self_value = sender_id == head['wxid']
-        base_type=int(raw.get('type_code',0)) & 0xffffffff
-        if base_type==34:
-            voice=wechat_voice(raw,head.get('wxid',''));content=PLACEHOLDER
-        elif base_type in (3,47):
-            if not media:media=[dict(kind='sticker' if base_type==47 else 'image',status='unavailable')]
-            content=raw.get('text','')
-        elif base_type==49 and (attachment:=wechat_file(raw.get('content',''))):
-            files=[attachment]
-            content='[文件] '+attachment['filename']
-        elif base_type==49 and reply:
-            content=raw.get('text','')
-        elif base_type!=1:return None
-        # Group plaintext can be prefixed by the actual sender username.
-        if sender_id and isinstance(content,str) and content.startswith(sender_id+':\n'):
-            content = content[len(sender_id)+2:]
     elif kind == 'chatlab':
         info = head.get('meta') or {}
         p = info.get('platform') or p

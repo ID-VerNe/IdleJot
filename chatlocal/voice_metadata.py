@@ -1,12 +1,10 @@
 """Metadata only: importing a voice never locates, copies or transcribes audio."""
-import re
 
-PLACEHOLDER='[语音消息]'
 
 def clean(value):
     if not isinstance(value,dict):return None
     kind=value.get('kind')
-    if kind not in ('qq_ptt','wechat_voice'):return None
+    if kind != 'qq_ptt':return None
     result={'kind':kind}
     for key in ('filename','md5','account','chat','server_id','source_db'):
         if isinstance(value.get(key),(str,int)) and not isinstance(value[key],bool):result[key]=str(value[key])[:300]
@@ -24,11 +22,3 @@ def qq_voice(q,blob):
     seconds=next((v for t,v in fields.get(45906,[]) if t=='varint'),0)
     return clean(dict(kind='qq_ptt',filename=meta.get('filename',''),md5=md5,
         duration_ms=int(seconds)*1000,size=meta.get('size',0)))
-
-def wechat_voice(raw,account):
-    if int(raw.get('type_code',0))&0xffffffff!=34:return None
-    xml=str(raw.get('content',''))
-    length=re.search(r'voicelength=["\'](\d+)',xml)
-    return clean(dict(kind='wechat_voice',account=account,chat=raw.get('chat',''),
-        server_id=raw.get('server_id',0),local_id=raw.get('local_id',0),source_db=raw.get('source_db',''),
-        duration_ms=int(length[1]) if length else 0))

@@ -32,7 +32,7 @@ def sender_config():
 
 
 def capability(platform):
-    if platform!='qq':return dict(available=False,note='微信暂不支持发送，可以生成、编辑并复制草稿。')
+    if platform!='qq':return dict(available=False,note='本版只支持 QQ 发送，可以生成、编辑并复制草稿。')
     if not sender_config()['REPLY_ONEBOT_URL']:
         return dict(available=False,note='尚未配置本机发送接口。请在 .env 配置 REPLY_ONEBOT_URL 和 REPLY_ONEBOT_TOKEN；草稿仍可生成和复制。')
     return dict(available=True,note='批准后将核对登录账号和目标会话，并发送当前编辑框中的文字。')
@@ -229,5 +229,5 @@ class QQSender:
 
 
 def sender_for(platform):
-    if platform!='qq':raise SendError('本版不支持微信发送。')
+    if platform!='qq':raise SendError('本版只支持 QQ 发送。')
     return QQSender()

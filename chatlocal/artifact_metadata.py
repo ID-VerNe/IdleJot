@@ -1,7 +1,6 @@
 """Small, inert file descriptors; no download and no content parsing on import."""
 import re
 from pathlib import PureWindowsPath
-from xml.etree import ElementTree as ET
 
 
 def clean_descriptor(raw):
@@ -22,26 +21,6 @@ def clean_descriptor(raw):
     if re.fullmatch('[a-f0-9]{32}', md5):
         item['md5'] = md5
     return item
-
-
-def wechat_file(content):
-    if not isinstance(content, str) or len(content) > 1024 * 1024:
-        return None
-    # File-message XML is data, not a source of URLs/keys for the model.
-    if '<!DOCTYPE' in content.upper() or '<!ENTITY' in content.upper():
-        return None
-    try:
-        root = ET.fromstring(content[content.index('<'):])
-    except (ValueError, ET.ParseError):
-        return None
-    app = root if root.tag == 'appmsg' else root.find('.//appmsg')
-    if app is None or app.findtext('type') != '6':
-        return None
-    size = app.findtext('appattach/totallen', '')
-    return clean_descriptor(dict(filename=app.findtext('title', ''),
-        size=int(size) if size.isdigit() else None,
-        md5=app.findtext('appattach/filemd5', '') or app.findtext('md5', ''),
-        resource_id=app.findtext('appattach/attachid', '')))
 
 
 def qq_file(q, blob):

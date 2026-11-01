@@ -11,7 +11,6 @@ from chatlocal.retrieval import Plan
 from chatlocal.agent_tools import ChatTools
 from chatlocal.llm import validate_answer
 from chatlocal.artifact_onebot import OneBot
-from chatlocal.artifact_metadata import wechat_file
 from check_fixture_support import temp_dir  # noqa: E402
 
 
@@ -23,8 +22,15 @@ def main():
         raw=(root/'任务书.txt');raw.write_text(body,'utf-8')
         a._roots=lambda p:[root]
         values=[]
-        for n,p in enumerate(['qq','wechat']):
-            values.append(dict(platform=p,conversation_id='c',conversation='课程群',sender='老师',sender_id='teacher',
+        # Two messages carrying the same file must collapse into ONE artifact row
+        # while both messages keep referencing it. They used to come from qq and
+        # wechat; #350 leaves qq as the only platform, so the second message now
+        # lives in another conversation instead. Both dimensions the fixture pins
+        # survive: dedup by sha256 is orthogonal to which messages point at it,
+        # and search_files still scopes by conversation (only one message is in
+        # range below).
+        for n,(cid,conv) in enumerate([('c','课程群'),('other','另一个群')]):
+            values.append(dict(platform='qq',conversation_id=cid,conversation=conv,sender='老师',sender_id='teacher',
                 source_id=str(n),timestamp='2026-09-22 10:00:00',content='[文件] 任务书.txt',
                 files=[dict(filename=raw.name,size=raw.stat().st_size)],is_self=False))
         export=root/'messages.json';export.write_text(json.dumps(values,ensure_ascii=False),'utf-8')
@@ -54,6 +60,29 @@ def main():
         assert validate_answer(answer,[],file_evidence=t.file_evidence)['claims']
         assert not validate_answer(answer,[])['claims']
         assert not a.search({},Plan(platforms=['wechat'],start=1900000000000))['files']
+        # #350: qq is the only platform this build writes. The read side still
+        # tolerates an unknown value (it becomes an empty result set), so the
+        # place to pin the narrowing is the import path, not the query path.
+        # The control group matters as much as the rejection: a normalizer that
+        # rejected everything would pass a rejection-only assertion and still
+        # import nothing, so 'qq' has to keep resolving (both cases) and the
+        # refusal must name the platform we do accept -- an unrelated ValueError
+        # would otherwise read as a pass.
+        from chatlocal.normalize import platform_name
+        assert platform_name('qq')=='qq'
+        assert platform_name('QQ')=='qq'
+        for bad_platform in ('wechat','wework','invalid',''):
+            try:platform_name(bad_platform);raise AssertionError(f'{bad_platform} platform accepted')
+            except ValueError as err:assert 'qq' in str(err),err
+        bad=root/'wechat.json'
+        bad.write_text(json.dumps([dict(values[0],platform='wechat')],ensure_ascii=False),'utf-8')
+        try:s.import_file(bad);raise AssertionError('wechat message imported')
+        except ValueError:pass
+        # ...and the same fixture with the platform flipped back must import,
+        # otherwise the line above only proves the fixture was already broken.
+        ok=root/'qq.json'
+        ok.write_text(json.dumps([dict(values[0],platform='qq',source_id='ctrl')],ensure_ascii=False),'utf-8')
+        assert s.import_file(ok)['imported']==1
         a.mark_cited(chunks['files'])
         try:a.evict(1);raise AssertionError('cited binary was evicted')
         except ArtifactError:pass
@@ -63,8 +92,6 @@ def main():
         try:a.materialize(sid);raise AssertionError('missing file treated as available')
         except ArtifactError:pass
         assert a.get(sid)['availability']=='MISSING'
-        assert wechat_file('<msg><appmsg><type>6</type><title>报告.pdf</title><appattach><totallen>123</totallen></appattach></appmsg></msg>')['size']==123
-        assert wechat_file('<!DOCTYPE x [<!ENTITY foo "bad">]><msg/>') is None
         # Files without server IDs keep distinct stable sources; file-only
         # records receive a searchable placeholder instead of being discarded.
         with s.connect() as db:blank_before=db.execute("SELECT count(*) FROM artifact_sources WHERE original_message_id=''").fetchone()[0]

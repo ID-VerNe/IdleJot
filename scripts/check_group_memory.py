@@ -754,9 +754,20 @@ def test_mcp_integration():
     assert "update_member_dossier" in CHAT_TOOLS, "update_member_dossier must be in CHAT_TOOLS"
     assert "consolidate_chat_memory" in CHAT_TOOLS, "consolidate_chat_memory must be in CHAT_TOOLS"
 
-    # 2. Check schemas includes dossiers tools with valid schemas
+    # 2. Check schemas includes dossiers tools with valid schemas。
+    # issue #4 PD2c：这四行已搬进 app 侧插件（chatlocal/app_plugins/dossier.py），
+    # 宿主的 chat_schemas 不再持有；按插件注册表取，断言内容一字不变。
     from chatlocal.agent_tools import tool
-    schemas = chat_schemas(tool)
+    from chatlocal.app_plugins import dossier as dossier_plugin
+    from chatlocal.app_plugins.spec import DOSSIER
+    assert dossier_plugin.DossierPlugin.tool_names == frozenset(DOSSIER["tools"]), (
+        "dossier tool list must match the spec")
+    produced = dossier_plugin.schemas(tool)
+    assert {s["name"] for s in produced} == frozenset(DOSSIER["tools"]), "every dossier tool must emit a schema"
+    assert not any(s["name"] == "query_member_dossier" for s in chat_schemas(tool)), (
+        "the host must not keep a second copy of the dossier schemas")
+    assert chat_schemas(tool) and CHAT_TOOLS, "host row factory still works"
+    schemas = produced
     dossier_tool = next((s for s in schemas if s["name"] == "query_member_dossier"), None)
     assert dossier_tool is not None, "query_member_dossier schema must exist"
     assert "identifier" in dossier_tool["parameters"]["properties"]

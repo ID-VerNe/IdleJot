@@ -58,7 +58,7 @@ runner 形态原样留在本主模块。issue #284 正文「runner 是 R4 形态
 # 显式分行防后人误重排。
 from ._fixture import (  # noqa: F401
     DB, FOREIGN, GROUP, MESSAGES, ONEBOT, ROOT, SID, TMP, WATCH, append, build,
-    followup, pin_state_env, run_watch, up, wg_text, wg_up_wake,
+    followup, pin_state_env, run_watch, scratch_dir, up, wg_text, wg_up_wake,
 )
 import json
 import os
@@ -188,8 +188,9 @@ def check_multigroup_session_pinned():
     saved_env = os.environ.pop("IDLEJOT_WG_CONVERSATION", None)
     saved_env2 = os.environ.pop("TULPA_WG_CONVERSATION", None)
     # 临时库 + 临时状态目录：本用例不能共用 TMP——会污染既有窗口文件。
-    import tempfile
-    tmp2 = Path(tempfile.mkdtemp(prefix="wg_followup_multigroup_"))
+    # 走 scratch_dir（#322 C）：与 _fixture 同一套 atexit 清理，不再手写 mkdtemp
+    # ——手写那份一旦在 pin_state_env 之前抛异常，目录就没人回收了。
+    tmp2 = scratch_dir("wg_followup_multigroup_")
     db2 = tmp2 / "multigroup.sqlite3"
     saved_db = os.environ.get("IDLEJOT_WG_DB")
     saved_state = os.environ.get("IDLEJOT_WG_STATE")
@@ -241,10 +242,18 @@ def check_multigroup_session_pinned():
         assert "111:group:222" not in out, f"别群 conversation_id 漏进追问行：{out}"
         assert "stale= None" in out, f"本群会话存活却判 stale：{out}"
 
-        # 对照组：撤掉 env（未钉死 + 多群）→ 退化成改前的整表取最后一行，
-        # 不报错、不静默选群——单群机器不触发本 bug，多群未钉死由 wg_isolation.note()
-        # 单独告警，这里只断言「行为退化、不崩」。
+        # 对照组：撤掉 env + 给一份「两个群都 enabled」的夹具 config——
+        # `wg_isolation.resolve()` 第三档要求**唯一**启用群，两个都不唯一，落到
+        # 未钉死（`ambiguous()` 为真），`active_session_id()` 于是退化成改前的整表
+        # 取最后一行（s222）。这才是 #206 的真实现场：多群未钉死。
+        # 改前这里只 `assert "active=" in out2`——撤回 env 后第三档若被真实 config
+        # 顶成「唯一启用群」，s111 正好命中，断言照样绿，「未钉死」根本没被验到
+        # （#322 B：对照组假绿）。现在钉住具体会话，两条分支才互相排斥。
+        cfg = tmp2 / "config-multigroup.json"
+        cfg.write_text(json.dumps({"self_account": "111", "groups": {
+            "111": {"enabled": True}, "222": {"enabled": True}}}), encoding="utf-8")
         env2 = dict(env)
+        env2["IDLEJOT_WG_CONFIG"] = str(cfg)
         for key in ("IDLEJOT_WG_CONVERSATION", "TULPA_WG_CONVERSATION"):
             env2.pop(key, None)
         proc2 = subprocess.run([sys.executable, str(script)], cwd=str(ROOT),
@@ -252,9 +261,10 @@ def check_multigroup_session_pinned():
                                encoding="utf-8", errors="replace", timeout=60)
         out2 = proc2.stdout or ""
         assert proc2.returncode == 0, f"未钉死退化崩溃：{out2}\n{proc2.stderr}"
-        # 未钉死时 active_session_id 退化成整表取最后一行（s222），这是改前行为，
-        # 与单群机器等价——bug 只在多群未钉死时由 wg_isolation.note() 告警，不在这里拦。
-        assert "active=" in out2, f"未钉死退化没跑通：{out2}"
+        # 未钉死时 active_session_id 退化成整表取最后一行（s222）——改前行为，
+        # 与单群机器等价。bug 只在多群未钉死时由 wg_isolation.note() 告警，不在这里拦；
+        # 但「确实退化了」必须被钉住，否则上一段的过滤断言可能根本没生效过。
+        assert "active= s222" in out2, f"未钉死没退化成整表最后一行：{out2}"
     finally:
         for key, value in (("IDLEJOT_WG_DB", saved_db),
                            ("TULPA_WG_DB", saved_db),
@@ -924,6 +934,9 @@ def main():
     # issue #217 专项：追加 id 1301+ 的新消息，必须再排在 #218（id 1000+）之后，
     # 否则 #218 的 since(1000) 会把 1301/1302 当接话捞进去。
     check_skipped_rows_still_wake()
+    # issue #322：夹具在 import 期把会话钉进 os.environ，跑完还原，别污染同进程的
+    # 其他调用方（与 IDLEJOT_WG_DB 同口径——进程退出本就丢弃，显式还原只是不靠运气）。
+    os.environ.pop("IDLEJOT_WG_CONVERSATION", None)
     print("PASS")
     return 0
 

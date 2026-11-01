@@ -9,22 +9,23 @@
 最多只有一份 parity 在跑。为什么必须跨进程、而不能是脚本里的一个计数器：两个 worktree
 各 push 一次、或者一边 push 一边手跑，是两个**独立进程**。
 
-为什么要独立成模块：`.githooks/pre-push` 必须能拿到**与 parity 同一个**锁位置，钩子层
-还要在整次推送期间先持锁再调 parity（parity 自己进程内只能看见自己那几次调用，
-盖不住「两个会话各 push 一次」）。路径只有一个出处，钩子只写一行调用，不复述。
+为什么要独立成模块：锁的位置只能有一个出处，`check_pr_parity.py` 与门禁
+`check_pr_parity_isolation.py` 都从这里取，不在两处各写一份路径规则。`.githooks/pre-push`
+**不持这把锁**：它逐个 commit 调 `check_pr_parity.py`，那几次调用自己在同一条队上排好；
+钩子若先持锁再去起子进程，父子会互等同一把锁直到超时。
 
 Windows 上没有 `fcntl`（本机实测 `import fcntl` → ModuleNotFoundError），`mkdir` 又会在
 进程被硬杀后留下死目录，所以用 `msvcrt.locking` 锁一段字节：持锁进程被 `taskkill /F`
 时 Windows 关闭句柄、字节锁自动释放；这与 `wg_images._locked()`（issue #228）同一个取舍，
 `commands.py` 那套 `O_EXCL` 是「单实例占位」，被硬杀后会留死锁文件要手删。
 
-    python scripts/check_pr_parity_lock.py --hold --ref <sha>  # 持锁直到 stdin EOF（监听/钩子外包）
+    python scripts/check_pr_parity_lock.py --hold --ref <sha>  # 持锁直到 stdin EOF（排查/门禁夹具）
     python scripts/check_pr_parity_lock.py --serialize        # 等锁空出来再返回（脚本串联）
     python scripts/check_pr_parity_lock.py --probe            # 只读：有人拿着返回 1
     python scripts/check_pr_parity_lock.py --self-test        # 逐项自检（不碰网络、不建树）
 
 `check_pr_parity.py` 在建树前拿到这把锁、收树后才放，所以同一台机器上任何时刻只有一份
-parity 在建树/跑门禁/收树；`.githooks/pre-push` 逐 commit 调用 parity，排的是同一条队。
+parity 在建树/跑门禁/收树；两个会话各自 push 时，排的是同一条队。
 
 环境变量：`IDLEJOT_PARITY_HOME` 改锁所在目录（默认系统临时目录）；`IDLEJOT_PARITY_LOCK`
 直接指定锁文件（多机共享 temp 时才需要）——两者都是测试夹具用的，运行时不设。

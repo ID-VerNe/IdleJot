@@ -185,18 +185,26 @@ def case_prune_spares_others(scene):
 
 
 def case_cleanup_not_silent(scene):
-    """6. 收不掉要说出来；收得掉就不许报问题。"""
+    """6. 收得掉就不许报问题；登记被抹掉时必须说出来（不静默）。"""
     print('\n[6] 不静默')
     sha = head_sha()
-    status, path, _ = parity.add_worktree(sha, scene / 'orphan')
+    status, path, _ = parity.add_worktree(sha, scene / 'gone')
     check('树建好', status, parity.ADD_OK)
-    # 把登记抹掉（模拟上一轮硬杀留下的孤儿目录）：此时 remove 走不下去，
+    clean = parity.cleanup(path)
+    check('正常收尾 ok', clean.ok, True)
+    check('正常收尾不报问题（对照）', clean.problems, [])
+    check('正常收尾确实 remove 过', clean.removed, True)
+
+    status, path, _ = parity.add_worktree(sha, scene / 'orphan')
+    check('第二棵树建好', status, parity.ADD_OK)
+    # 把登记抹掉（模拟上一轮硬杀留下的孤儿目录，或别处 prune 过）：此时 remove 走不下去，
     # 收尾必须把「登记表里没有这棵树」记进 problems，而不是静默 ok。
     git('worktree', 'remove', '--force', str(path))
     Path(path).mkdir(parents=True, exist_ok=True)
     (path / 'leftover.txt').write_text('x', encoding='utf-8')
     report = parity.cleanup(path)
     check('孤儿目录如实记账', bool(report.problems), True)
+    check('孤儿目录没走 remove 路径', report.removed, False)
     check('孤儿目录仍被删掉', Path(path).exists(), False)
 
 

@@ -67,6 +67,7 @@ def registered_worktrees():
 
 
 def _same_path(left, right):
+    """两段路径是否指同一个位置：`normcase` 抹平大小写与斜杠，`normpath` 抹平 `..` 与尾分隔符。"""
     return os.path.normcase(os.path.normpath(str(left))) == os.path.normcase(os.path.normpath(str(right)))
 
 
@@ -98,7 +99,7 @@ def add_worktree(sha, scratch):
     return 'fail', None, f'git worktree add 成功但登记表里没有 {path}'
 
 
-def cleanup(path, *, quiet=True):
+def cleanup(path):
     """收掉**自己的**那棵树：先核对登记，再 `remove --force`，最后删临时目录。
 
     只认 `path` 这一条（issue #348 的现场就是一边收尾顺手动了另一边）。刻意**不调**
@@ -106,7 +107,9 @@ def cleanup(path, *, quiet=True):
     正是「抽别人的树」最容易扩散的那一步；孤儿登记留给 `git worktree list` 自己报，
     或由人工 `git worktree prune` 处理。
 
-    收不掉时把原因写进 `Report.problems` 并（非 quiet 时）打到 stderr，不静默成功。
+    收不掉时把原因写进 `Report.problems`，不静默成功；打不打到 stderr 由调用方决定
+    （`check_pr_parity.py` 的 `finally` 里统一说一次，门禁只读 `Report`）。
+    注：调用方传进来的必须是 `add_worktree` 返回的那条路径——它是登记表里的写法。
     """
     report = Report(path)
     path = Path(path)
@@ -115,8 +118,9 @@ def cleanup(path, *, quiet=True):
         report.removed = result.returncode == 0
         if not report.removed:
             report.problems.append(f'git worktree remove 失败：{output_of(result) or "（无输出）"}')
-    elif path.exists():
-        # 登记没了但目录还在：没人认领，只能自己删（此处只可能落到自己的 scratch 下）。
+    else:
+        # 登记已经没了，这棵树不再是「git 的 worktree」。不能静默：正常路径下它此刻
+        # 一定还在登记里，不在了就说明有人动了手脚（上一轮硬杀、或别处 prune 过）。
         report.problems.append('登记表里没有这棵树，按目录清理')
     scratch = path.parent
     if path.exists():
@@ -128,9 +132,6 @@ def cleanup(path, *, quiet=True):
         if scratch.exists():
             report.problems.append(f'临时目录删不掉：{scratch}')
     report.ok = not report.problems and not path.exists() and not scratch.exists()
-    if not quiet and report.problems:
-        for problem in report.problems:
-            print(f'parity: 收尾未完成 — {problem}', file=sys.stderr)
     return report
 
 
@@ -142,7 +143,6 @@ class Report:
         self.removed = False
         self.problems = []
         self.ok = False
-
 
 
 def clean_env(home):
@@ -213,7 +213,6 @@ def _parity(args, sha):
     if status == 'reuse':
         print(f'parity: 复用了已登记的 worktree（{pristine}）')
 
-    code = 2
     try:
         problem = shard_problem(pristine, args.shard)
         if problem:
@@ -225,12 +224,10 @@ def _parity(args, sha):
         if result.returncode == 0:
             label = f'分片 {args.shard}' if args.shard else '全部分片'
             print(f'PASS: parity 通过（{label}，干净 checkout + 空数据根）')
-            code = 0
-        else:
-            print(f'FAIL: parity 未通过（{Path(str(pristine / "scripts" / "run_gates.py")).name} '
-                  f'退出 {result.returncode}）')
-            code = 1 if result.returncode == 1 else 2
-        return code
+            return 0
+        print(f'FAIL: parity 未通过（{Path(str(pristine / "scripts" / "run_gates.py")).name} '
+              f'退出 {result.returncode}）')
+        return 1 if result.returncode == 1 else 2
     finally:
         if args.keep:
             print(f'保留现场：worktree={pristine} home={home}')
@@ -241,7 +238,6 @@ def _parity(args, sha):
                 for problem in report.problems:
                     print(f'parity: 收尾未完成 — {problem}', file=sys.stderr)
                 print(f'parity: 残留现场 {scratch}（请手工清理）', file=sys.stderr)
-
 
 
 if __name__ == '__main__':

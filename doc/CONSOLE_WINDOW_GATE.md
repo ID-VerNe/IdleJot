@@ -1,6 +1,6 @@
-# 控制台开窗门禁（`check_no_console_child.py`）的扫描边界
+# 控制台开窗门禁（`check_no_console_child`）的扫描边界
 
-本文件说明 `scripts/check_no_console_child.py` 为什么扫哪些、不扫哪些，尤其解释
+本文件说明 `scripts/check_no_console_child/`（入口 `_entry.py`）为什么扫哪些、不扫哪些，尤其解释
 **第三方 vendored 源码（`tools/`）** 这件事（issue #323，源自 #39 / #319）。
 门禁自身的规则原文在模块 docstring 里，这里只讲边界与取舍。
 
@@ -16,7 +16,7 @@
 | 范围 | 是不是运行时 | 为什么不扩大 |
 |---|---|---|
 | `water-group/` / `water_group/` / `chatlocal/` / `server_wg.py` | 是 | — |
-| `scripts/` 下**后端运行时会拉起**的少数 worker（`RUNTIME_WORKERS`，issue #319） | 是（只是住在 scripts/ 外面） | 整个 `scripts/` 大多数是 CI 与人工诊断，人工跑的时候弹个黑框不是 bug |
+| `scripts/` 下**后端运行时会拉起**的少数 worker（`RUNTIME_WORKERS`，issue #319；#329 起由 AST 从运行时树派生，不再手工维护） | 是（只是住在 scripts/ 外面） | 整个 `scripts/` 大多数是 CI 与人工诊断，人工跑的时候弹个黑框不是 bug |
 | `tools/` 下的 `VENDORED_SOURCES`（issue #323） | 是（安装后由后端调用） | 见 §3 |
 
 判据只认"名字"：`creationflags` 里必须出现 `NO_WINDOW` / `CREATE_NO_WINDOW`，`0` 和
@@ -62,7 +62,7 @@ vendored 代码不能 import 本仓的 helper，这就是它唯一的正确写�
 - **`tools/qq-reader` 的 spawn 不判**：`qq_db.py`、`_snapshot.py`、`_macos.py` 里的未加固 spawn
   都在 Linux / macOS 上游路径上，Windows 走不到。强行判定会给将来真正的 POSIX 移植制造假红；
   真要判，应当在那条路径真正启用时用 `# console-gate: posix-only` 之外的方式单独处理。
-- **`VENDORED_SOURCES` 是显式清单，不扫目录**：与 `RUNTIME_WORKERS` 同理。新增 vendored 文件
-  需要手工登记一行；漏登记的表现是"未扫"里**没有**它（等于又回到 #323 之前的状态），因此
-  登记新第三方树时请同时确认它在不在清单里。
+- **`VENDORED_SOURCES` 是显式清单，不扫目录**（与 `RUNTIME_WORKERS` 不同：#329 之后后者由 AST
+  派生并双向对账，这里没有等价的机器判据）。新增 vendored 文件需要手工登记一行；漏登记的表现是
+  "未扫"里**没有**它（等于又回到 #323 之前的状态），因此登记新第三方树时请同时确认它在不在清单里。
 - **只扫 `.py` / `.pyw`**：vendored 的二进制、批处理不在此列。

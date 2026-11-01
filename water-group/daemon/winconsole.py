@@ -21,8 +21,8 @@ window full of garbage where a listener was supposed to run:
 the reported window came from. One call site per module used to carry its own
 copy of the flag, so a module added later could -- and did -- miss it (issue
 #39). `run_hidden` / `popen_hidden` are now the only way the daemons start a
-console child; `scripts/check_no_console_child.py` fails the build if a raw
-`subprocess` call reappears without the flag.
+console child; `scripts/check_no_console_child/`（入口 `_entry.py`）fails the build
+if a raw `subprocess` call reappears without the flag.
 
 Both halves of quirk 2 have to agree, which is what `ensure_utf8_stdio` is for:
 `sys.stdout.reconfigure(encoding="utf-8")` only decides which bytes Python

@@ -206,12 +206,12 @@ def scan(root):
     notes.append(f'serial default {elapsed:.2f}s (4 x {STUB_SLEEP}s)')
 
     _clear_traces(tree)
-    code, out, elapsed = _run(tree, ['ci', '--jobs', '1'])
+    code, out, serial_elapsed = _run(tree, ['ci', '--jobs', '1'])
     if code != 0:
         failures.append(f'--jobs 1: must pass, exit={code}\n{out}')
     if _overlaps(_spans(tree)):
         failures.append(f'--jobs 1: overlapped {_overlaps(_spans(tree))}')
-    notes.append(f'--jobs 1 {elapsed:.2f}s')
+    notes.append(f'--jobs 1 {serial_elapsed:.2f}s')
 
     # --- 2. --jobs 2 真重叠（同分片的两条也要并起来），结果表仍按清单顺序 ---
     _clear_traces(tree)
@@ -223,9 +223,13 @@ def scan(root):
         failures.append('--jobs 2: no two gates overlapped -- parallelism is a no-op')
     if [name for _, name, _ in _summary_rows(out)] != order_expected:
         failures.append(f'--jobs 2: results not in manifest order {_summary_rows(out)}')
-    # 墙钟只做粗筛（两条泳道两波，加上解释器启动），重叠量由上面的 pairs 钉住；
-    # 阈值放得开一点，免得慢机器把「跑得对」判成「没并行」。
-    if elapsed > 4 * STUB_SLEEP * 0.9:
+    # 墙钟只做粗筛（两条泳道两波，加上解释器启动），重叠量由上面的 pairs 钉住。
+    # **并行性由 pairs 断言，墙钟不承担这条**：`--jobs 2` 与 `--jobs 1` 的差值只有
+    # `2 * STUB_SLEEP`（0.6s），而解释器启动、进程回收与整机负载极易吃掉它——满负荷
+    # 跑全量门禁时实测 1.11s/1.22s，与串行的 1.7s 只差半秒，却会被当成「没并行」
+    # 判红（issue #339）。所以这里只留一道防线：真的退化成串行（≈`--jobs 1` 的墙钟）
+    # 才判红。
+    if elapsed >= serial_elapsed:
         failures.append(
             f'--jobs 2: {elapsed:.2f}s for 4 x {STUB_SLEEP}s -- not parallel')
     notes.append(f'--jobs 2 {elapsed:.2f}s, overlapped {pairs}')

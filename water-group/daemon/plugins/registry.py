@@ -105,8 +105,21 @@ class Registry:
 
         顺序 = 注册顺序 = ``#帮助`` 的顺序；模块级 dict 可被测试整体替换，
         所以这里返回普通 dict 而不是只读视图。
+
+        ``needs_credential`` 由 :class:`plugins.base.Command` 声明、宿主按
+        ``handler.need_ck`` 读（``commands.run_handler``），这里把声明**落到
+        handler 上**——只写 ``Command(needs_credential=False)`` 的话，``#帮助``
+        会把指令列出来，真发一句却被拦去要绑定（issue #339）。
         """
-        return {name: (cmd.desc, cmd.handler) for name, cmd in self._commands.items()}
+        out: dict[str, tuple[str, Callable]] = {}
+        for name, cmd in self._commands.items():
+            if cmd.needs_credential is False:
+                try:
+                    cmd.handler.need_ck = False
+                except (AttributeError, TypeError):
+                    pass  # 内置函数一类设不了属性：照旧按「需要凭证」处理
+            out[name] = (cmd.desc, cmd.handler)
+        return out
 
     def error_types(self) -> tuple[type[BaseException], ...]:
         out: list[type[BaseException]] = []

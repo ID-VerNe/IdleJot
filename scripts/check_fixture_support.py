@@ -110,6 +110,47 @@ def pin_state_env(state, home=None, *, env=None):
     return target
 
 
+def pin_conversation(conversation, state=None, *, home=None, env=None):
+    """Pin which group this session looks after, so a stray config cannot decide.
+
+    ``wg_isolation.resolve()`` (``water-group/daemon/wg_isolation.py:64``) falls
+    back to ``config:唯一启用群`` when neither env nor ``<state>/wg_conversation.txt``
+    says anything. On a developer machine whose ``water-group/config.json`` has
+    exactly one enabled group, that pins the session -- and every fixture event
+    without a ``conversation_id`` is then filtered out as another group's, which
+    turned ``check_video_visibility`` / ``check_image_visibility`` red locally
+    while CI stayed green (issue #316). The same hole hits two more suites that
+    run ``watch.main()`` in-process from an empty data root
+    (``check_now_clock`` / ``check_trigger_mode``) -- they are green only because
+    the pinned scratch root happens to carry no config.
+
+    Two legs, like ``pin_state_env``:
+
+    * ``<state>/wg_conversation.txt`` -- the authoritative per-session file, so
+      an in-process ``watch.main()`` is pinned whatever ``wg_config`` resolved.
+      Written when ``state`` is given (parent dirs are created: the state dir
+      often does not exist yet at module top).
+    * ``IDLEJOT_WG_CONVERSATION`` -- the env leg beats the file, and is what a
+      ``watch.py`` subprocess reads. Its ``TULPA_WG_CONVERSATION`` sibling is
+      cleared so a stray external value cannot outlive the pin (``IDLEJOT`` is
+      read first, but leaving the other leg lying around is the #281 trap).
+
+    ``env=None`` (default) pins into ``os.environ`` for module-top use before any
+    daemon import; pass a dict to fill a subprocess environment instead. Returns
+    the pinned mapping.
+    """
+    target = {'IDLEJOT_WG_CONVERSATION': conversation,
+              **({'WATER_GROUP_HOME': str(home)} if home is not None else {})}
+    if state is not None:
+        path = Path(state) / 'wg_conversation.txt'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(conversation), encoding='utf-8')
+    sink = os.environ if env is None else env
+    sink.update(target)
+    sink.pop('TULPA_WG_CONVERSATION', None)
+    return target
+
+
 def _scratch_home():
     """Lazily created data root for suites that do not already have a temp dir."""
     global _SCRATCH_HOME

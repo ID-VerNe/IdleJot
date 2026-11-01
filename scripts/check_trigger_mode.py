@@ -41,7 +41,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
+from check_fixture_support import pin_conversation, pin_state_env, scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False, root=False)
 
 DAEMON = ROOT / "water-group" / "daemon"
@@ -58,8 +58,6 @@ os.environ["WATER_GROUP_HOME"] = str(SCRATCH)
 pin_state_env(STATE)
 os.environ["IDLEJOT_WG_CONFIG"] = str(CONFIG)
 os.environ["IDLEJOT_WG_DB"] = str(DB)
-os.environ.pop("IDLEJOT_WG_CONVERSATION", None)
-os.environ.pop("TULPA_WG_CONVERSATION", None)
 
 ACCOUNT = "10001"
 SELF = ACCOUNT
@@ -67,6 +65,12 @@ GROUP_A = "111"          # natural
 GROUP_B = "222"          # mention_only
 CONV_A = f"{ACCOUNT}:group:{GROUP_A}"
 CONV_B = f"{ACCOUNT}:group:{GROUP_B}"
+# 会话身份必须**钉出来**，不能交给「临时数据根恰好没有 config」：本机一旦只剩一个
+# 启用群，wg_isolation 就会落到 config:唯一启用群，没钉死的用例跟着被改钉
+# （issue #316）。这里 env 两条清空、由 <state>/wg_conversation.txt 兜底成 A，
+# 于是「没钉死」= 确定的 A，而不是听天由命。
+pin_conversation(CONV_A, STATE)
+os.environ.pop("IDLEJOT_WG_CONVERSATION", None)  # 起点是「没钉」：靠 state 文件
 NOW_MS = int(time.time() * 1000)
 # 每个用例一个 id 段，互不干扰。
 AT_ID = 9201
@@ -295,6 +299,43 @@ def 两群不同配置按群生效():
     return ok or (f"reason_a={reason_a!r} ids_a={ids_a}\n"
                   f"reason_b={reason_b!r} ids_b={ids_b}\n"
                   f"{proc_a.stdout}\n{proc_b.stdout}")
+
+
+@case
+def 单群配置不替本会话挑群():
+    """config 只有一个启用群时，wg_isolation 会落到 ``config:唯一启用群``。
+
+    这条钉的是本门禁**自己踩过的坑**（issue #316）：改前它把会话身份交给
+    「临时数据根恰好没有 config」这一条隐性依赖。真机上一旦只剩一个启用群，
+    没钉死的用例就被改钉到那个群、唤醒被读侧滤空。这里把状态降到最坏情形
+    （env 两条清空 + state 文件清空 + 单群 config），断言 ``pin_conversation``
+    写的 state 文件能把会话钉住，而不是被 config 挑走。
+
+    本用例自己负责收拾：``clear_state()`` 会删掉 ``wg_conversation.txt``，
+    收尾必须把它写回去，否则后面依赖「没钉死 → A」的用例会失去 pin。
+    """
+    import wg_isolation
+
+    write_config({"111": {"trigger_mode": "natural"}})
+    saved = {k: os.environ.pop(k, None) for k in wg_isolation.CONVERSATION_ENV}
+    clear_state()                                     # 连 wg_conversation.txt 一起删
+    try:
+        fallback, source = wg_isolation.resolve()     # 对照：这才是 #316 的坑
+        pin_conversation(CONV_B, STATE)               # 钉住（env + state 文件）
+        os.environ.pop("IDLEJOT_WG_CONVERSATION", None)  # 再退回只剩 state 文件那腿
+        pinned, pinned_source = wg_isolation.resolve()
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        clear_state()
+        pin_conversation(CONV_A, STATE)               # 还原门禁默认的「file:A」
+        os.environ.pop("IDLEJOT_WG_CONVERSATION", None)
+    return (source.startswith("config:")
+            and fallback != ""
+            and pinned == CONV_B and pinned_source.startswith("file:"))
 
 
 # ---------- 6：collector 请求值来源 ----------

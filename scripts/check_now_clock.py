@@ -38,7 +38,7 @@ DAEMON = ROOT / "water-group" / "daemon"
 
 # 数据根必须在 import 之前钉死：STATE / DB 都是 import 期求值的。
 import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
-from check_fixture_support import scratch_dir  # noqa: E402
+from check_fixture_support import pin_conversation, scratch_dir  # noqa: E402
 HOME = scratch_dir(prefix="wg-clock-gate-")
 (HOME / "data").mkdir(parents=True, exist_ok=True)
 os.environ["WATER_GROUP_HOME"] = str(HOME)
@@ -68,6 +68,10 @@ import wg_config  # noqa: E402
 DB = Path(os.environ["IDLEJOT_WG_DB"])
 SID = "session-clock"
 GROUP = "1:group:123"
+# 会话钉死在这个群：进程内跑 watch.main() 的用例写的事件都带这个 conversation_id，
+# 但「钉住」这件事不能靠「临时数据根恰好没有 config」（本机有 config 且只有一个
+# 启用群时 wg_isolation 会改钉到那个群，唤醒被滤空，issue #316）。
+pin_conversation(GROUP, HOME / "state")
 
 NOW_RE = re.compile(r"现在 (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) "
                     r"\((UTC[+-]\d{1,2}(?::\d{2})?|UTC)\)")

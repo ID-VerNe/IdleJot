@@ -18,8 +18,7 @@ def initialize(db):
         platform TEXT NOT NULL,name TEXT NOT NULL,data BLOB NOT NULL,
         PRIMARY KEY(platform,name));
     ''')
-    for platform in ('qq','wechat'):
-        db.execute('INSERT OR IGNORE INTO sync_state(platform) VALUES(?)',(platform,))
+    db.execute("INSERT OR IGNORE INTO sync_state(platform) VALUES('qq')")
 
 
 def commit_checkpoint(db, sync, added):

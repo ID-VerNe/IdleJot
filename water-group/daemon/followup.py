@@ -71,6 +71,9 @@ WINDOW = STATE / "wg_followup.json"
 # commands._plugins_from）。**跟不跟（三态开关）归插件**，不归这个模块——
 # 开关在 plugins/base.py 的 Plugin.enabled，本文件只负责窗口机件。
 DEFAULTS = {"max_messages": 10, "idle_seconds": 180}
+# 攒批窗口（秒，issue #144 P2）：最后一条接话之后安静这么久才唤醒，把连发的几句
+# 并成一次往返。0 = 关掉（改前行为：每条各醒一次）。
+QUIET_SECONDS = 6.0
 
 
 def settings():
@@ -84,7 +87,7 @@ def settings():
     try:
         cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
         raw = cfg.get("followup") or {}
-        for key in DEFAULTS:
+        for key in list(DEFAULTS) + ["quiet_seconds"]:
             if key in raw:
                 data[key] = raw[key]
     except (OSError, ValueError):
@@ -150,7 +153,7 @@ def active_session_id():
 
 
 def open(after_id, max_messages=None, idle_seconds=None, session=None, not_before=None,
-         after_ref=None):
+         after_ref=None, quiet_seconds=None):
     """回复成功后开窗。after_id 通常就是刚回复的那条消息。
 
     ``after_id`` 是 **chat_inbox 的 rowid**，``since()`` 直接 `id>?` 用它——这一点
@@ -175,6 +178,12 @@ def open(after_id, max_messages=None, idle_seconds=None, session=None, not_befor
         max_messages = int(cfg["max_messages"])
     if idle_seconds is None:
         idle_seconds = int(cfg["idle_seconds"])
+    if quiet_seconds is None:
+        quiet_seconds = cfg.get("quiet_seconds", QUIET_SECONDS)
+    try:
+        quiet_seconds = max(0.0, float(quiet_seconds))
+    except (TypeError, ValueError):
+        quiet_seconds = QUIET_SECONDS
     now = time.time()
     state = {
         "after_id": _after_id_of(after_id if after_ref is None else after_ref),
@@ -185,6 +194,9 @@ def open(after_id, max_messages=None, idle_seconds=None, session=None, not_befor
         "budget": int(max_messages),
         "max_messages": int(max_messages),
         "idle_seconds": int(idle_seconds),
+        # 攒批窗口（issue #144 P2）：开窗时定下来，之后改配置不影响已开的窗——与
+        # budget / idle_seconds 同一口径，否则「改配置」会让同一个窗口前后行为不一致。
+        "quiet_seconds": quiet_seconds,
         "wakes": 0,
     }
     save(state)

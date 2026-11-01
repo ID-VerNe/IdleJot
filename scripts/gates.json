@@ -48,9 +48,14 @@
    "why": "路径卫生：运行时数据不许从仓库根推导（防 #14 复发）"
   },
   {
+   "name": "check_stripped_wechat_path.py",
+   "shard": "static",
+   "why": "微信读取路径已剥离（#350）：源码里不许再 import wechatauto / chatlocal.wechat_keys / import_pipeline / client_accounts，也不许把 tools/wechat-reader 当路径用；判据走 AST（只认真 import 与真字符串常量）并带自测——注释与 docstring 里的历史叙述必须放行，否则门禁会退化成「删注释」；自测含恒空判据的反向对照，证明坏夹具真的会让断言失守。写这条判据时顺带抓出 chatlocal/store.py 里一个从初始快照起就悬空的 `from .import_pipeline import complete_job`（无模块、无调用方），已一并删除"
+  },
+  {
    "name": "check_no_console_child",
    "shard": "static",
-   "why": "子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发）；#319 起范围含后端在运行时拉起的 scripts/ worker（RUNTIME_WORKERS 白名单），范围本身也被自检钉住——worker 改名即红，不会静默漏扫；#323 起 vendored 树（VENDORED_SOURCES，如 tools/wechat-reader 的 ffmpeg 调用）在同一套判据下扫描，文件不存在时报「未扫」而不是假装干净；#329 起这份 worker 名单由 AST 从运行时树派生并双向对账——代码里新起一个未登记的 worker、登记了却不再起、以及路径求不出来，三种都红，手写清单漏项不再可能。#329 同时也把单文件顶过 1000 行红线，按 #169 PF-2 / #283 / #285 先例拆成 `scripts/check_no_console_child/` 包（入口 `_entry.py`，`python -m scripts.check_no_console_child` 亦可），入口名不变、对 gates.json 与 CI 透明"
+   "why": "子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发）；#319 起范围含后端在运行时拉起的 scripts/ worker（RUNTIME_WORKERS 白名单），范围本身也被自检钉住——worker 改名即红，不会静默漏扫；#323 曾把 vendored 树（VENDORED_SOURCES，唯一一行是 tools/wechat-reader 的 ffmpeg 调用）纳入同一套判据，微信读取路径随 #350 一并删除后该范围与补丁表一起撤销，判据本身留下并在自测里用同形状的不带标志写法正例钉住；#329 起这份 worker 名单由 AST 从运行时树派生并双向对账——代码里新起一个未登记的 worker、登记了却不再起、以及路径求不出来，三种都红，手写清单漏项不再可能。#329 同时也把单文件顶过 1000 行红线，按 #169 PF-2 / #283 / #285 先例拆成 `scripts/check_no_console_child/` 包（入口 `_entry.py`，`python -m scripts.check_no_console_child` 亦可），入口名不变、对 gates.json 与 CI 透明"
   },
   {
    "name": "check_listen_passthrough.py",
@@ -70,7 +75,7 @@
   {
    "name": "check_run_gates_parallel.py",
    "shard": "static",
-   "why": "本机门禁调度（#317）：默认仍串行（`--jobs 1`）下结果表与清单同序；`--jobs N` 按条并行且结果表仍按清单位置编号；`EXCLUSIVE`（`check_listener_rehang` 靠全机 WMI 认进程并树杀）在线程池收摊之后单独跑、不与任何泳道重叠；`--fail-fast` 只拦没启动的、在飞的不被腰斩；`--shard` 子集上 --jobs 同样生效。实测子进程跑真桩树，断言落在结果表行号上、不对 stdout 交错顺序下嘴"
+   "why": "本机门禁调度（#317）：默认仍串行（`--jobs 1`）下结果表与清单同序；`--jobs N` 按条并行且结果表仍按清单位置编号；`--jobs` 钳到 CPU 数、片头如实报生效值（写 999 看到的是本机能跑的数字，且不许把请求值回显成生效值、不许把串行放大成并行）；`EXCLUSIVE`（`check_listener_rehang` 靠全机 WMI 认进程并树杀、`check_run_gates_parallel` 自身在测计时）在线程池收摊之后单独跑、不与任何泳道重叠；`--fail-fast` 只拦没启动的、在飞的不被腰斩；`--shard` 子集上 --jobs 同样生效。实测子进程跑真桩树，断言落在结果表行号与片头捕获组上、不对 stdout 交错顺序下嘴"
   },
   {
    "name": "check_status_napcat_line.py",
@@ -496,6 +501,11 @@
    "name": "check_trigger_mode.py",
    "shard": "reply",
    "why": "按群选择 natural/mention_only 触发模式：collector 请求值按 trigger_mode 取（不再硬编码 True）、natural 群普通消息 wake_reason 放行、@/关键词/is_self/指令早退不破坏、两群不同配置按群生效（#188）"
+  },
+  {
+   "name": "check_wake_audit.py",
+   "shard": "reply",
+   "why": "唤醒账本 / 追问攒批 / 监听去抖（#144）：@ 与关键词按 wake_reason 分来源落账且关键词明细不落盘（字段白名单，不是查词）、追问唤醒来自 chat_inbox 也记一行且一批只记一行 batch=条数、解禁唤醒 batch=1、群号只留 12 位哈希、坏行跳过好行照读、写失败静默返回 None 不拖垮真实唤醒、--status 的「唤醒」行把「账本还没开始记」/「过去 24h 无唤醒」/按来源计数三种说法分开；追问攒批未安静够时不唤醒且不推进 consume 游标（顺序不能反）、安静够后一批一次唤醒、quiet_seconds=0 退回改前行为、参数开窗时定死；settle 把窗口内新到的并成一批、后段新到的把截止再推一个窗口（不推后必红）、从不突破等待预算（预算耗尽原地返回一秒不睡）、一直有新唤醒时不超过 DEBOUNCE_CAP 倍（deadline 留 20 个窗口，只断上限生效）、贴着 deadline 时推后撞不到 deadline（deadline 只留 2.5 个窗口，不夹取会挂死）、静默窗口不自动撑到上限、重读失败不吞唤醒、--debounce 0 不额外等待"
   }
  ],
  "manual": [

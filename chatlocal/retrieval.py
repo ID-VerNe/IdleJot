@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from .normalize import TZ, stamp, display_time
 
-STOP = set('之前 关于 怎么 怎样 什么 哪些 有没有 最近 过去 一周 一下 事情 讨论 记录 聊天 帮我 查找 找到 请问 我 你 他 她 的 了 是 在 和 与 里 中 过 吗 呢 地 得 做 提到 曾经 一件 一个 时候 我们 他们 内容 微信 qq wechat'.split())
+STOP = set('之前 关于 怎么 怎样 什么 哪些 有没有 最近 过去 一周 一下 事情 讨论 记录 聊天 帮我 查找 找到 请问 我 你 他 她 的 了 是 在 和 与 里 中 过 吗 呢 地 得 做 提到 曾经 一件 一个 时候 我们 他们 内容 qq'.split())
 TASK_TERMS = ['麻烦', '帮忙', '请', '记得', '需要', '能否', '能不能', '可以帮', '帮我', '截止', '提交', '任务', '尽快', '安排', '发我', '给我', '要你', '辛苦', '有空', '打电话', '看一下', '带我', '过来']
 PROMISE_TERMS = ['我来', '我会', '我负责', '我去', '答应', '保证', '没问题', '好的', '可以', '收到', '明天', '发你', '给你', '转你']
 
@@ -16,7 +16,7 @@ class Plan:
     keywords: list = field(default_factory=list)
     start: int | None = None
     end: int | None = None
-    platforms: list = field(default_factory=lambda: ['qq', 'wechat'])
+    platforms: list = field(default_factory=lambda: ['qq'])
     conversations: list = field(default_factory=list)
     snapshot_max_id: int | None = None
 
@@ -33,7 +33,7 @@ def date_bound(value, end=False):
 
 def make_plan(question, platforms=None, conversations=None, start='', end='', keywords='', now=None):
     now = now or datetime.now(TZ)
-    p = Plan(platforms=platforms or ['qq', 'wechat'], conversations=conversations or [])
+    p = Plan(platforms=platforms or ['qq'], conversations=conversations or [])
     p.start, p.end = date_bound(start), date_bound(end, True)
     # Untouched Gradio textboxes can submit JSON null, not an empty string.
     q = (question or '').strip()

@@ -11,6 +11,7 @@ from ._common import (
     run_script, fixture_home, child_env,
     status_report_line, status_listener_line,
     listen, up, wg_budget, wg_clock, wg_listener_state,
+    kill_tree,
 )
 
 
@@ -145,8 +146,7 @@ def 值守中与空窗两侧都判定得出():
         finally:
             restore()
             if proc is not None and proc.poll() is None:
-                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                               capture_output=True)
+                kill_tree(proc.pid)
     return (seen_watch and "值守中" in seen_note
             and code == 0
             and record is not None and bool(record.get("stopped_at"))

@@ -34,8 +34,22 @@ There is a third quirk hiding behind the first one: a child started with
 CREATE_NO_WINDOW does not write where its caller's stdout points when the caller
 has no console. `run_passthrough` is the answer for the call sites that need the
 child's text (issue #91); see `run_hidden` for why inheriting is not enough.
+
+And a fourth, which is why issue #319 kept reporting a window after every spawn
+site had the flag (2026-11-01): CREATE_NO_WINDOW decides whether the child gets
+*its own* console; it says nothing about a console the process *already owns*,
+and the display system can still show that one. `startupinfo`'s
+STARTF_USESHOWWINDOW + SW_HIDE is the missing half -- it tells the display system
+the console is not to be shown, so the window does not depend on which console
+program the caller happens to start. Measured on this box: identical sanity cases
+give identical results with and without the show-state (0 hits for
+CREATE_NO_WINDOW with a console-less caller, 2 hits for DETACHED with a `cmd`
+grandchild, 0 for both when the console is hidden), so the sanity cases cannot
+tell the two spellings apart -- the show-state is a belt for a shape they do not
+cover, not a replacement for the flag.
 """
 import ctypes
+import copy
 import subprocess
 import sys
 
@@ -47,6 +61,29 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 DETACHED = getattr(subprocess, "DETACHED_PROCESS", 0)
 
 UTF8_CODEPAGE = 65001
+
+# SW_HIDE / STARTF_USESHOWWINDOW: the display state of the console, as opposed to
+# whether a console is allocated at all (issue #319). Absent on POSIX like the two
+# flags above; `_hidden_startupinfo` is the only place that reads them.
+SW_HIDE = 0
+STARTF_USESHOWWINDOW = getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+
+
+def _hidden_startupinfo(startupinfo):
+    """Return a STARTUPINFO that asks for a hidden window, or None on POSIX.
+
+    `startupinfo` is copied, never edited in place. A caller that passed its own
+    struct still owns it -- two spawns from one call site would otherwise share a
+    single object, and the second one would silently inherit the first one's
+    show-state. Copying also keeps a caller's `dwFlags` / `lpDesktop`: this adds
+    the show-state and changes nothing else.
+    """
+    if sys.platform != "win32":
+        return startupinfo
+    info = copy.copy(startupinfo) if startupinfo is not None else subprocess.STARTUPINFO()
+    info.dwFlags |= STARTF_USESHOWWINDOW
+    info.wShowWindow = SW_HIDE
+    return info
 
 
 def _with_no_window(kwargs):
@@ -71,11 +108,19 @@ def _with_no_window(kwargs):
     (job objects do that, see up.py), and "do not inherit the caller's console"
     is preserved -- NO_WINDOW also starts a *new* console rather than reusing the
     parent's. Keeping it would let one missed call site keep flashing windows.
+
+    Two flags, and the second one exists because the first is not sufficient
+    (issue #319, measured 2026-11-01): the flag governs allocation, the
+    show-state governs display. A console program started from a context that
+    already owns a console can still have that console shown; STARTUPINFO's
+    SW_HIDE is what removes "which console program did you start" from the answer.
+    Together they mean the caller does not have to reason about it at all.
     """
     flags = kwargs.get("creationflags", 0)
     if flags & DETACHED:
         flags = (flags & ~DETACHED) | NO_WINDOW
-    return {**kwargs, "creationflags": flags | NO_WINDOW}
+    return {**kwargs, "creationflags": flags | NO_WINDOW,
+            "startupinfo": _hidden_startupinfo(kwargs.get("startupinfo"))}
 
 
 def run_hidden(args, **kwargs):
@@ -140,6 +185,19 @@ def run_passthrough(args, **kwargs):
 def popen_hidden(args, **kwargs):
     """`subprocess.Popen` for a child the caller keeps and reaps itself."""
     return subprocess.Popen(args, **_with_no_window(kwargs))
+
+
+def check_output_hidden(args, **kwargs):
+    """`subprocess.check_output` for a console program: stdout piped, no window.
+
+    The scanned-out half of issue #353: `git.exe` is a console program, and the
+    gates that read `git ls-files` / `git rev-parse` were the ones flashing a
+    window when the gate chain ran without a console. Same suppression, just the
+    output-collecting spelling of it -- `run_hidden` returns a `CompletedProcess`
+    with `stdout=None` unless you ask for `stdout=PIPE`, which is the easy thing
+    to get wrong at a call site that used to be `check_output`.
+    """
+    return subprocess.check_output(args, **_with_no_window(kwargs))
 
 
 def use_utf8_console():

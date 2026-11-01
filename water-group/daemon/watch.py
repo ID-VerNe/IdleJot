@@ -92,6 +92,7 @@ import wg_listener_state  # noqa: E402  (监听存亡账本的续心跳，issue 
 import wg_quotes  # noqa: E402  (引用原文渲染，issue #94)
 import wg_send_failure  # noqa: E402  (禁言账本的现查与解禁唤醒，issue #192)
 import wg_text  # noqa: E402  (正文渲染：段占位不占额度，issue #32)
+import wg_wake_audit  # noqa: E402  (唤醒账本：谁叫醒过、从哪条路、带了几条，issue #144)
 import winconsole  # noqa: E402  (stdout 编码 + 控制台代码页，一次收口)
 
 ROOT = HERE.parents[1]
@@ -104,6 +105,15 @@ POLL = 1.5
 DEFAULT_TIMEOUT = wg_budget.WAIT_BUDGET
 # 过期未回唤醒的报告里最多列几个 id：一行报得下，又不至于把整块输出撑成清单。
 EXPIRED_SHOWN = 5
+# 去抖默认窗口（秒，issue #144 P3）。5s 的依据是「同一个人连发的间隔」实测分布的
+# 拐点：N=5s 时连发块只吃掉 0.1% 的唤醒，N=12s 才到 0.8%——收益本来就小，再放长
+# 只是徒增延迟。**它是上限不是承诺**：等待预算不够时 `settle()` 会自己缩窗口。
+DEBOUNCE = 5
+# 去抖最多把窗口推长到默认值的几倍：群刷屏时若每来一条就推后一次，监听会永远
+# 醒不过来——那正是「唤醒」要避免的失效模式，不是它要解决的问题。
+DEBOUNCE_CAP = 3
+# 去抖期间的轮询粒度。比 `POLL` 细，是为了「静默 5s」真的接近 5s 而不是跳到 6s。
+SETTLE_POLL = 0.5
 
 
 def read_cursor():
@@ -133,6 +143,72 @@ def wake_pending(event, rows, ledger):
     return (bool(up.wake_reason(event))
             and not up.replied_after(event.get("id"), rows, ledger)
             and not up.wake_expired(event))
+
+
+def _fresh_of(rows, cursor, ledger):
+    """游标之后、还该回、没过时效的唤醒——`fresh` 的唯一算法。
+
+    去抖期间要按同一个口径重算一遍（新到的行是否也算「同一批」），所以它必须
+    是一个函数而不是循环里的一段列表推导：两份口径写出来就迟早会分叉。
+    """
+    return [e for e in rows
+            if (e.get("id") or 0) > cursor
+            and up.wake_reason(e)
+            and not up.replied_after(e.get("id"), rows, ledger)
+            and not up.wake_expired(e)]
+
+
+def settle(fresh, rows, debounce, deadline, refetch, scope):
+    """静默窗口：再等 `debounce` 秒，期间有新唤醒进来就把截止推后（issue #144 P3）。
+
+    返回 `(真正用掉的秒数, 最终这一批)`。
+
+    三条硬约束，任何一条破了都比不做更糟：
+
+    1. **不突破等待预算（#83）**：窗口从 `deadline` 里扣，不是额外加。预算不够
+       就缩窗口；连一秒都等不起就原地返回。超预算的等待会被宿主连进程树一起杀掉，
+       而那条路径上一个字都不打印。
+    2. **不超过 `DEBOUNCE_CAP` 倍**：群刷屏时每来一条就推后一次会让监听永远醒不过来。
+       到头了就用手上这一批醒——晚醒不如不醒。首次窗口是 `debounce` 本身，推后只
+       发生在真的有新唤醒进来时，累计到 `DEBOUNCE_CAP` 倍为止（静默的窗口不该比
+       配的值更长，那是「连发逐条各醒一次」的另一副面孔）。
+    3. **重读失败不吞唤醒**：`refetch()` 抛异常时返回手上这一批，账照记、卡照出。
+       已经确定要叫醒的人，不能因为一次读盘失败变成「没叫」。
+    """
+    budget = min(float(debounce or 0), max(0.0, deadline - time.time()))
+    if budget <= 0:
+        return 0.0, fresh
+    started = time.time()
+    # 首次窗口就是 `budget`：静默 `debounce` 秒就醒，不是一进门就等满上限。
+    # 推后只发生在**真的有新唤醒进来**时（见循环里那句），累计不超过
+    # `DEBOUNCE_CAP * budget`。`cap` 还要跟 `deadline` 取小——约束 1 是预算，
+    # 它优先于约束 2。
+    cap = min(float(DEBOUNCE_CAP) * budget, max(0.0, deadline - time.time()))
+    until = started + budget
+    pause = min(SETTLE_POLL, budget)
+    # 手上这一批可能为空（首条就被 scope 滤掉的边界，或调用方直接给空批）：
+    # 拿 `max()` 空迭代器求游标会在第一次重读时抛 `ValueError`，把一次本该
+    # 静默等待的窗口炸成一次未捕获异常。
+    newest = max(((f.get("id") or 0) for f in fresh), default=0)
+    # 先把手上的这批算一批：即使重读失败，也已经「等过一个窗口」再出去，
+    # 连发的下一条不会在窗口之内再叫醒一次。
+    while True:
+        left = until - time.time()
+        if left <= 0:
+            break
+        time.sleep(min(pause, left))
+        try:
+            more = refetch()
+        except Exception:  # noqa: BLE001  读盘失败不吞唤醒（约束 3）
+            break
+        extra = [e for e in scope(more) if (e.get("id") or 0) > newest]
+        if not extra:
+            continue
+        fresh = fresh + extra
+        newest = max(newest, max((e.get("id") or 0) for e in extra))
+        # 有新唤醒进来就把截止推后一个窗口，最多到 `DEBOUNCE_CAP` 倍。
+        until = min(until + budget, started + cap)
+    return time.time() - started, fresh
 
 
 def rewind_for_backlog(rows, cursor, ledger):
@@ -228,6 +304,9 @@ def poll_unmute():
     # 点明下一步而不是只说「解禁了」：Agent 被叫醒后要做的事有两件——先看谁在等
     # （`--list`），再把监听重挂回来（首轮的 `rewind_for_backlog` 会补扫积压）。
     print("  重挂监听会自动补扫禁言期间积压的未回唤醒（BACKFILL），也可先看 reply.py --list")
+    # 解禁也是一次唤醒，只是没有具体消息（issue #144 P1）：不记账的话，`--status`
+    # 报出的「过去 24h N 次」会漏掉这条路径，而它恰恰是空窗后唯一的唤醒。
+    wg_wake_audit.record("unmute", batch=1)
     print("WAKE")
     return True
 
@@ -271,6 +350,9 @@ def main():
                         help=f"最多等多少秒（默认 {DEFAULT_TIMEOUT}，即等待预算）")
     parser.add_argument("--after", type=int, default=None, help="从这个事件 id 之后开始找")
     parser.add_argument("--replay", action="store_true", help="忽略游标，重扫所有未回唤醒")
+    parser.add_argument("--debounce", type=int, default=DEBOUNCE,
+                        help=f"静默窗口秒数（默认 {DEBOUNCE}，0 关闭）。这是上限不是承诺："
+                             f"等待预算不够时会自己缩，最多推到 {DEBOUNCE_CAP} 倍")
     args = parser.parse_args()
 
     winconsole.ensure_utf8_stdio()
@@ -333,13 +415,19 @@ def main():
             reported_empty = False
         # 过期唤醒和 --list 一样滤掉：冷启动后 .tmp 是新的、游标归零，陈年
         # 未回唤醒会整批变成「新唤醒」打印出来，Agent 据此回头回复旧话题。
-        fresh = [e for e in rows
-                 if (e.get("id") or 0) > cursor
-                 and up.wake_reason(e)
-                 and not up.replied_after(e.get("id"), rows, ledger)
-                 and not up.wake_expired(e)]
+        fresh = _fresh_of(rows, cursor, ledger)
 
         if fresh:
+            # 去抖（issue #144 P3）：先等一个静默窗口再打印，把「连发逐条各醒一次」
+            # 变成「一批醒一次」。实测收益只有 1% 量级（见 issue 的追评），所以它
+            # 是 P3——但 `--also` 现在是「醒的时机恰好凑上」，去抖才把它变成机制保证。
+            quiet, fresh = settle(fresh, rows, args.debounce, deadline,
+                                  lambda: wg_isolation.rows_of(up.events()),
+                                  lambda more: _fresh_of(more, cursor, ledger))
+            if not fresh:
+                # 静默窗口期间这一批全变成过期/已回了：按「没唤醒」继续等，
+                # 别拿一个空批次去打印一个只有标题的唤醒块。
+                continue
             # 一睁眼先给基准：下面每行是消息时间戳，不是现在（issue #95）。
             print(wg_clock.now_line())
             for e in fresh:
@@ -367,6 +455,12 @@ def main():
                 wg_event_ref.group_of(fresh[0].get("conversation_id")))
             if note:
                 print(note)
+            # 唤醒账本（issue #144 P1）：一次唤醒一行，`batch` 记这一批带了几条，
+            # `source` 沿用 wake_reason 的 at / keyword 分级。这是「去抖到底省了
+            # 多少」唯一说得出口的依据——没有它，调参只能靠感觉。
+            wg_wake_audit.record(
+                up.wake_reason(fresh[0]), ids=[e.get("id") for e in fresh],
+                group_id=wg_event_ref.group_of(fresh[0].get("conversation_id")))
             print("WAKE")
             return 0
 
@@ -419,6 +513,12 @@ def main():
             # 报告文案由 followup 决定：额度用完的那一批不说「还剩 0 条」
             # （issue #98）。收窗也在 consume() 里做完，不再留到下一轮。
             print(scan["report"])
+            # 追问唤醒终于可见（issue #144 P1）：它的来源是 chat_inbox，从不落
+            # wg_events.jsonl，所以在账本之前它连「统计不到」都算不上——是根本
+            # 不存在于任何流水里。
+            wg_wake_audit.record(
+                "followup", ids=[r.get("id") for r in woke],
+                group_id=wg_event_ref.group_of(woke[0].get("conversation_id")))
             print("WAKE")
             return 0
 

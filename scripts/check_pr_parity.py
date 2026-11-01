@@ -44,9 +44,31 @@ ISOLATED_PREFIXES = ('IDLEJOT_WG_', 'TULPA_WG_')
 LOG_ENCODING = 'utf-8'
 ADD_OK = 'ok'
 
+# 本脚本常由 `.githooks/pre-push` 拉起，而钩子所在的父进程未必有控制台（`pythonw`、
+# 编辑器内的任务、CI 的作业包装），它拉起的 `git` 与门禁执行器都是控制台程序——裸调会给
+# 每条新开一扇黑框（issue #353，承接 #39 / #319）。抑制只在一处拼写，所以用运行时树的
+# helper 而不是本地再抄一份标志。
+#
+# 但**不能硬依赖**它：本文件也被用来在裁剪安装里跑，那里没有运行时树。抑制是加固，
+# 拿不到就照常跑，而不是拒绝启动（同 `run_gates.py` 的取舍）。
+sys.path.insert(0, str(ROOT / 'water-group' / 'daemon'))
+try:
+    import winconsole  # noqa: E402  -- 位置依赖上面这行 sys.path
+except ImportError:  # 裁剪安装里没有运行时树：退回「直接跑」，不假装加固
+    winconsole = None
+
 
 def run(command, cwd, env=None):
-    return subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, encoding=LOG_ENCODING)
+    """跑一条**要读输出**的短命令（`git rev-parse` / `worktree add|remove`）。
+
+    走 `run_hidden` 而不是裸 `subprocess.run`：`git` 是控制台程序，且这里本来就要
+    `capture_output`，不存在 issue #91 那个「输出直通丢失」的前提。
+    """
+    if winconsole is None:
+        return subprocess.run(command, cwd=cwd, env=env, capture_output=True,
+                              text=True, encoding=LOG_ENCODING)
+    return winconsole.run_hidden(command, cwd=cwd, env=env, capture_output=True,
+                                 text=True, encoding=LOG_ENCODING)
 
 
 def output_of(result):
@@ -198,6 +220,23 @@ def parity_command(pristine, shard):
     return command + (['--shard', shard] if shard else [])
 
 
+def run_gates(pristine, shard, env):
+    """跑门禁执行器，返回退出码。
+
+    这一条和 `run` 的区别是**输出必须直通**：94 条门禁的逐条结果就是给人看的，钩子里
+    也只隔着这一层。所以不能走 `run_hidden`——`CREATE_NO_WINDOW` 会把子进程交给自己那扇
+    新控制台，父进程没有控制台时「继承我的 stdout」就指错了地方，门禁全部变成哑的
+    （issue #91 的形状）。`run_passthrough` 正是为此存在：两路合流回管道、UTF-8 解码、
+    整块写回本进程 stdout，窗口仍然不开。
+
+    拿不到 helper 时退回裸调用：那种情形没有运行时树，也就没有窗口可抑制。
+    """
+    command = parity_command(pristine, shard)
+    if winconsole is None:
+        return subprocess.run(command, cwd=pristine, env=env).returncode
+    return winconsole.run_passthrough(command, cwd=pristine, env=env)
+
+
 def main():
     parser = argparse.ArgumentParser(description='CI 等价条件复跑（issue #61）')
     parser.add_argument('--ref', default='HEAD', help='要复跑的 ref（默认 HEAD）')
@@ -241,14 +280,13 @@ def _parity(args, sha):
             return 2
         print(f'parity: ref {sha} → {pristine}')
         print(f'parity: WATER_GROUP_HOME={home}（空数据根，无 config.json / 私有库）')
-        result = subprocess.run(parity_command(pristine, args.shard), cwd=pristine, env=clean_env(home))
-        if result.returncode == 0:
+        code = run_gates(pristine, args.shard, clean_env(home))
+        if code == 0:
             label = f'分片 {args.shard}' if args.shard else '全部分片'
             print(f'PASS: parity 通过（{label}，干净 checkout + 空数据根）')
             return 0
-        print(f'FAIL: parity 未通过（{Path(str(pristine / "scripts" / "run_gates.py")).name} '
-              f'退出 {result.returncode}）')
-        return 1 if result.returncode == 1 else 2
+        print(f'FAIL: parity 未通过（{Path(str(pristine / "scripts" / "run_gates.py")).name} 退出 {code}）')
+        return 1 if code == 1 else 2
     finally:
         if args.keep:
             print(f'保留现场：worktree={pristine} home={home}')

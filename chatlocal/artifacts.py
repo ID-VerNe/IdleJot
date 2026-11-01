@@ -74,28 +74,10 @@ def register_message(db, message, mid, files):
            d['filename'],d['extension'],d.get('size'),message['timestamp'],json.dumps(d,ensure_ascii=False),now,now))
 
 
-def is_file_ack(db, prior, message, files):
-    """Observed WX outgoing FileMessage rewrites a nonzero server ID after upload.
-
-    Only an already-live row with the exact native locator (checked by caller),
-    owner, timestamp, text, filename, size and MD5 can acquire the final ID.
-    """
-    if not prior or message['platform']!='wechat' or prior['is_self']!=1 or message['is_self']!=1:
-        return False
-    if (prior['sender_id']!=message['sender_id'] or prior['timestamp']!=message['timestamp'] or
-        prior['content']!=message['content'] or not str(message['source_id']).isdigit() or int(message['source_id'])<=0):
-        return False
-    if not db.execute('SELECT 1 FROM live_events WHERE message_id=?',(prior['id'],)).fetchone():return False
-    before=[json.loads(r[0]) for r in db.execute('SELECT metadata_json FROM artifact_sources WHERE message_id=? ORDER BY id',(prior['id'],))]
-    if not files or len(before)!=len(files):return False
-    return all(old.get('md5') and old.get('size') is not None and
-        all(old.get(k)==new.get(k) for k in ('filename','extension','size','md5')) for old,new in zip(before,files))
-
-
 def source_scope(plan=None, filters=None):
     from .retrieval import date_bound
     f=filters or {};where=['1=1'];args=[]
-    platforms=plan.platforms if plan else ['qq','wechat']
+    platforms=plan.platforms if plan else ['qq']
     where.append('s.platform IN ('+','.join('?' for _ in platforms)+')');args+=platforms
     if plan and plan.snapshot_max_id is not None:
         where.append('(s.message_id IS NULL OR s.message_id<=?)');args.append(plan.snapshot_max_id)
@@ -175,10 +157,11 @@ class Artifacts:
             '只返回文件元数据，未下载或解析正文。QQ消息附件不是完整群目录。')
 
     def _roots(self,platform):
+        if platform!='qq':return []
         try:
-            meta=json.loads((DATA/('qq-snapshot-info.json' if platform=='qq' else 'wechat-snapshot-info.json')).read_text('utf-8'))
-            account_root=Path(meta['source']).parent if platform=='qq' else Path(meta['source_db']).parent
-            return [account_root/'nt_data/File'] if platform=='qq' else [account_root/'msg/file']
+            meta=json.loads((DATA/'qq-snapshot-info.json').read_text('utf-8'))
+            account_root=Path(meta['source']).parent
+            return [account_root/'nt_data/File']
         except (OSError,KeyError,ValueError):return []
 
     def local_candidate(self,row,*,binary=False):

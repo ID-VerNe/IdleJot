@@ -194,12 +194,22 @@ def run_cases(cases, *, setup=None, prefix=True, catch=True):
     marker wording, and a per-suite ``setup()`` call before the loop. Those
     three are the parameters; the loop is this function.
 
-    Each case returns truthy = pass, falsy = fail. With ``catch=True`` a case
-    that raises is recorded as a failure (with the exception) instead of
-    aborting the suite -- a broken gate must count as red, not silently skip
-    the rest (issue #62). ``prefix=True`` prints ``pass_marker``/``fail_marker``
-    in the ``checkmark`` style (``✓``/``✗``) used by the gates that report in
-    Chinese; ``prefix=False`` uses the ``PASS``/``FAIL`` English wording.
+    Each case returns ``True`` = pass; **anything else = fail**. With
+    ``catch=True`` a case that raises is recorded as a failure (with the
+    exception) instead of aborting the suite -- a broken gate must count as
+    red, not silently skip the rest (issue #62). ``prefix=True`` prints
+    ``pass_marker``/``fail_marker`` in the ``checkmark`` style (``✓``/``✗``)
+    used by the gates that report in Chinese; ``prefix=False`` uses the
+    ``PASS``/``FAIL`` English wording.
+
+    **判据是 ``got is True``，不是 truthy**（issue #144 PR #359 复核）。写
+    ``return ok or f"…"`` 是最自然的失败详情写法，而它在 truthy 判据下**恒为
+    绿**：失败时返回的是非空说明字符串，被当成通过往上打 ``✓``。这类假绿不会
+    有异常、不会有日志，只能在变异体下才现形——``check_wake_audit.py`` 的 19
+    条用例里有 13 条就这么绿过。``check_trigger_mode.py`` /
+    ``check_multigroup_isolation.py`` 自带的 ``main()`` 早就是 ``got is True``，
+    本函数现在与它们同一口径；非 ``True`` 的返回值当失败详情打印，别的套件
+    继续用 ``return ok or f"…"`` 也不会再假绿。
     """
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -211,17 +221,22 @@ def run_cases(cases, *, setup=None, prefix=True, catch=True):
     bad = 0
     for fn in cases:
         try:
-            ok = fn()
+            got = fn()
         except Exception as exc:  # noqa: BLE001  门禁自己坏了也算红
             if not catch:
                 raise
             print(f"{fail_marker}{fn.__name__}: {type(exc).__name__}: {exc}")
             bad += 1
             continue
-        if ok:
+        if got is True:
             print(f"{pass_marker}{fn.__name__}")
         else:
             print(f"{fail_marker}{fn.__name__}")
+            if isinstance(got, str) and got:
+                for line in got.rstrip("\n").splitlines():
+                    print(f"    {line}")
+            elif got is not True and got is not False:
+                print(f"    return {got!r}")
             bad += 1
     print(tail_ok if not bad else f"{bad} 项失败" if prefix else f"{bad} case(s) failed")
     return 1 if bad else 0

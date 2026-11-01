@@ -20,13 +20,16 @@ CI 与本地同一个入口：`.github/workflows/ci.yml` 只调用本脚本，�
 - **并发单位是一条门禁，不是 CI 分片**。分片是给多机 matrix 摊时间用的：`gates.json`
   里一个分片 11–30 条，本机单进程按分片并发等于串行（`--jobs 10` 跑 `reply` 分片
   实测 162s vs 串行 156s）。CI 的「同片串行、片间并行」只属于 CI matrix，本机不照搬；
-- **`EXCLUSIVE` 单独收尾**：会起真实本树进程、靠全机 WMI 认进程的门禁，以及**自己就在
-  测量时间**的门禁（`check_run_gates_parallel`：并发环境会改写它的测量结果），在所有
-  并发门禁跑完之后独占跑，不与任何门禁重叠；
+- **`EXCLUSIVE` 单独收尾**：会起真实本树进程、靠全机 WMI 认进程的门禁（目前只有
+  `check_listener_rehang`）在所有并发门禁跑完之后独占跑，不与任何门禁重叠；
 - **结果始终按清单顺序返回**，并行只改完成先后，不改结果表形状（`summary_text` 与
   `GITHUB_STEP_SUMMARY` 都依赖它）；`[n/总]` 的序号也按清单位置编，不按完成先后；
 - `--fail-fast` 在并行下只阻止**后续门禁启动**，已在跑的门禁跑完——中途杀掉子门禁会
-  留下半写的临时目录，让下一次归因更难。
+  留下半写的临时目录，让下一次归因更难；
+- **`--jobs` 钳到 CPU 数**（见 `effective_jobs`）。写 `--jobs 19` 不会真开 19 条：
+  每条门禁都是一个子进程（端到端门禁自己还会再起子进程），并发度超过核数只会把
+  调度开销吃成纯亏（`static` 19 条并发实测 73.8s，其中独占收尾 66s）。钳制不改变
+  「显式开关」的性质，只是不让它变成超配；实际生效值如实打进片头与 `--help`。
 
 片内默认全跑并汇总（issue #60：一次红灯要看全貌），`--fail-fast` 才提前收手。
 环境里有 `GITHUB_STEP_SUMMARY` 时把逐条结果写进 job 摘要，本机没有该变量时跳过。
@@ -46,24 +49,29 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / 'scripts' / 'gates.json'
+
+# 本脚本常在无控制台的父进程下跑（`pythonw`、编辑器内的任务、CI 的作业包装），而它拉起的
+# 每条门禁都是控制台程序——这正是"桌面闪一下黑框"的形状（issue #353，承接 #39 / #319）。
+# 抑制只在一个地方拼写，所以这里 import 运行时树里的 helper，而不是本地再抄一份标志。
+#
+# 但**不能硬依赖**它：`check_run_gates_parallel` 会在临时目录里搭一棵只含 `scripts/` 的
+# 假树来跑本文件（夹具刻意不带运行时树），硬 import 会让那个门禁当场 `ModuleNotFoundError`。
+# 跑门禁是本职，抑制是加固——拿不到 helper 就照常跑（那种情形下没有窗口要抑制也无妨），
+# 而不是拒绝启动。
+sys.path.insert(0, str(ROOT / 'water-group' / 'daemon'))
+try:
+    import winconsole  # noqa: E402  -- 位置依赖上面这行 sys.path
+except ImportError:  # 夹具树/裁剪安装里没有运行时树：退回「直接跑」，不假装加固
+    winconsole = None
 BUCKETS = ('ci', 'manual', 'stale', 'dead', 'support')
 PASSED, FAILED, SKIPPED = '通过', '失败', '未执行'
 
-# 并行档里必须独占跑的门禁（issue #317）。
-#
-# * `check_listener_rehang`：会起**真实的**本树 `listen.py` 子进程，再靠全机 WMI
-#   （`Get-CimInstance Win32_Process`）按命令行认出它、最后 `taskkill /T /F`
-#   收树（`check_listener_rehang/budget.py:640-667`、`ownership.py:303-345`、
-#   `water-group/daemon/wg_up_probe.py:99-138`）。WMI 查询是全机的，另一条门禁同时起/杀
-#   本树进程会让它的「前提不成立」断言假红。
-# * `check_run_gates_parallel`（issue #347）：它测的就是「并行有没有真的省时间」——
-#   丢进线程池里跑，泳道被别的门禁占着，桩门禁的起跑时刻和墙钟都跟着变，量出来的是
-#   调度环境而不是被测实现。与 `check_listener_rehang` 同一类：**并发环境本身会改变
-#   测量结果**。它也起真 `run_gates.py` 子进程（自己的临时树），跑的期间会让同池门禁
-#   的时间读数整体偏移。
-#
-# 认名不认档：清单里改个 shard 不该悄悄放开。
-EXCLUSIVE = frozenset({'check_listener_rehang', 'check_run_gates_parallel'})
+# 并行档里必须独占跑的门禁（issue #317）。它们会起**真实的**本树 `listen.py` 子进程，
+# 再靠全机 WMI（`Get-CimInstance Win32_Process`）按命令行认出它、最后 `taskkill /T /F`
+# 收树（`check_listener_rehang/budget.py:640-667`、`ownership.py:303-345`、
+# `water-group/daemon/wg_up_probe.py:99-138`）。WMI 查询是全机的，另一条门禁同时起/杀
+# 本树进程会让它的「前提不成立」断言假红。认名不认档：清单里改个 shard 不该悄悄放开。
+EXCLUSIVE = frozenset({'check_listener_rehang'})
 
 
 def load_manifest():
@@ -135,16 +143,51 @@ def plan_parallel(rows):
     return lanes, exclusive
 
 
+def effective_jobs(requested):
+    """把 `--jobs` 收进这台机器真能用的并发度：`min(requested, cpu_count)`（issue #317）。
+
+    每条门禁都是一个独立子进程，端到端门禁（`reply` 分片那一片）自己还会再起子进程，
+    所以「同时跑几条」受核数约束，超出的部分只是排队等核、外加线程池的调度开销。
+    `--jobs 19` 在 8 核机上实测 73.8s，而其中独占收尾一条就 66s——并行那部分本来就
+    薄，再超配纯亏。
+
+    边界：`requested <= 1` 原样返回（串行不开池，不在这里钳）；`cpu_count()` 拿不到
+    （极少数平台/受限容器返回 `None` 或 0）时回落 `requested`，宁可照用户说的跑，
+    也不在这里编一个核数出来。
+
+    **它不改变「显式开关」的性质**：默认仍是 1，钳制只作用于 `>= 2`。
+    """
+    if requested <= 1:
+        return requested
+    cores = os.cpu_count() or 0
+    return min(requested, cores) if cores >= 1 else requested
+
+
 def run_one(row, printed, total):
     """跑一条门禁，返回 `(结果, 秒数)`；串行与并行共用这一份。
 
     `printed` 是这条门禁在本次执行里的序号，**按清单顺序**编，不按完成先后——
     并行下两条同时收尾也不会打出两个相同的 `[3/92]`。
+
+    子进程走 `winconsole.run_passthrough`：门禁全部是控制台程序，这个脚本又常常没有
+    控制台，裸 `subprocess.run` 会给每条门禁新开一个窗口（issue #353 用窗口钩子在真实
+    门禁链上抓到 `git.exe` 标题的控制台窗口）。
+
+    为什么不是 `run_hidden`：那个函数把**窗口**关掉，代价是子进程拿到的是一扇新的、
+    `CREATE_NO_WINDOW` 控制台，「继承我的 stdout」就指向那扇窗而不是本进程的管道——
+    调用方没有控制台时逐条门禁的输出全部丢掉（issue #91 的原形）。门禁的输出正是给人
+    看的（`[n/94] … 通过`、失败时的 traceback），所以这里要的是「关窗 + 直通」，
+    `run_passthrough` 就是为此存在的：两路合流进管道、UTF-8 解码、整块写回本进程 stdout。
     """
     tick = time.perf_counter()
-    result = subprocess.run(command_of(row), cwd=ROOT)
+    # 没有 helper 的夹具树里退回裸调用：那里没有运行时树，也就没有窗口问题的前提。
+    if winconsole is None:
+        result = subprocess.run(command_of(row), cwd=ROOT)
+        code = result.returncode
+    else:
+        code = winconsole.run_passthrough(command_of(row), cwd=ROOT)
     elapsed = time.perf_counter() - tick
-    status = PASSED if result.returncode == 0 else FAILED
+    status = PASSED if code == 0 else FAILED
     print(f'[{printed}/{total}] {row["name"]} {status} ({elapsed:.1f}s)', flush=True)
     return status, elapsed
 
@@ -267,6 +310,7 @@ def write_summary(results, shard, elapsed):
 def run_ci(manifest, shard=None, fail_fast=False, jobs=1):
     rows = shard_rows(manifest, shard)
     label = shard or '全部分片'
+    jobs = effective_jobs(jobs)
     mode = '串行' if jobs <= 1 else f'并行 {jobs}'
     print(f'门禁 {len(rows)} 条，分片 {label}，{mode}，顺序来自 scripts/gates.json')
     results, elapsed = run_rows(rows, fail_fast, jobs)
@@ -286,7 +330,8 @@ def main():
     parser.add_argument('--fail-fast', action='store_true', help='见到第一个失败就停（默认片内全跑）')
     parser.add_argument('--list', action='store_true', help='打印档位计数、分片与 ci 顺序')
     parser.add_argument('--jobs', type=int, default=1, metavar='N',
-                        help='最多 N 条门禁同时跑（默认 1 = 串行；归因红门禁时保持 1）')
+                        help='最多 N 条门禁同时跑（默认 1 = 串行；归因红门禁时保持 1；'
+                             'N 超过本机 CPU 数时按 CPU 数跑，片头打印实际生效值）')
     args = parser.parse_args()
     if args.jobs < 1:
         print(f'FAIL: --jobs 必须 >= 1，收到 {args.jobs}')

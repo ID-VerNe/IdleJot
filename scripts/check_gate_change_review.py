@@ -61,7 +61,7 @@ PATTERNS = (
     '.githooks/*',  # issue #107：钩子是门禁执行入口；fnmatch 的 * 跨 /，嵌套路径一并覆盖
 )
 HEADING = re.compile(r'^##[ \t]+门禁改动[ \t\r]*$', re.MULTILINE)
-NEXT_HEADING = re.compile(r'^##[ \t]+\S', re.MULTILINE)
+NEXT_HEADING = re.compile(r'^#{1,2}[ \t]+\S', re.MULTILINE)
 
 # issue #324：独立复核闸门的生效上界。基线早于该时刻（或基线不可得）的 PR
 # 属于「闸门建立之前」，复核行只提示不判红——本 PR 自身也是其中之一。
@@ -72,6 +72,8 @@ REVIEW_LINE = re.compile(r'^\s*(?:[-*+]\s+)?' + re.escape('*') + r'{0,2}\s*独�
 # 长的在前：APPROVE 是 APPROVED 的前缀，短串先判会把 APPROVED 认成 APPROVE。
 VERDICTS = ('REQUEST_CHANGES', 'APPROVED', 'APPROVE')
 DIVIDER = re.compile(r'^\s*(?:-{3,}|\*{3,}|_{3,})\s*$')
+# PR 正文的收尾链接行（`Refs #324` / `Closes #1, #2`）：不带判据，可与分隔线同等看待。
+FOOTER_LINE = re.compile(r'^\s*(?:Refs|Closes|Fixes)\b', re.IGNORECASE)
 
 
 def changed_files(base):
@@ -98,7 +100,13 @@ def gate_chain(files):
 
 
 def gate_section(body):
-    """取 `## 门禁改动` 段正文；没有该段时返回 None。"""
+    """取 `## 门禁改动` 段的直接内容（issue #324）。
+
+    `## 门禁改动` 段到下一个**同级或更高级**标题（`##` / `#`）为止；段内的 `###`
+    子标题仍算本段——引用块（`> **职责边界**`）、`###` 小节之后跟着的
+    `Refs #NN` 都是正文证据，属于本段，不能把它们排除在「复核行须在段末」之外，
+    否则正文一收尾就恒被这份判定漏看。
+    """
     match = HEADING.search(body)
     if not match:
         return None
@@ -155,6 +163,8 @@ def review_order_problem(section):
 
     返回第一处「排在复核行之后」的实质内容行（去掉外层空白）；合规时返回 None。
     段里没有复核行时也返回 None——缺结论由 review_record() 判，不在这里重复报。
+    分隔线与纯 `Refs #NN` 收尾行不算实质内容：它们不带任何判据、也不构成证据，
+    只有它们排在复核之后时正文仍是「先证据、后结论」。
     """
     if section is None:
         return None
@@ -162,7 +172,10 @@ def review_order_problem(section):
     order = [i for i, line in enumerate(lines) if REVIEW_LINE.match(line)]
     if not order:
         return None
-    tail = [line for line in lines[order[-1] + 1:] if line and not DIVIDER.match(line)]
+    tail = [
+        line for line in lines[order[-1] + 1:]
+        if line and not DIVIDER.match(line) and not FOOTER_LINE.match(line)
+    ]
     return tail[0] if tail else None
 
 
@@ -351,6 +364,29 @@ def self_test():
                     '**独立复核**：APPROVE\n\n---\n')
     lowered = section_of('改了断言', '独立复核：approved')
 
+    # #324 回归：`Refs #NN` / 引用块 / `###` 小节都在 `## 门禁改动` 段内，不是段外。
+    # 复核行必须排在它们之后才叫「段末」——这正是真实 PR 正文的收尾形状。
+    refs_after = ('## 门禁改动\n\n'
+                  '- `scripts/check_x.py`：改了断言\n\n'
+                  '**独立复核**：APPROVE\n\n'
+                  'Refs #324\n')
+    refs_last = ('## 门禁改动\n\n'
+                 '- `scripts/check_x.py`：改了断言\n\n'
+                 '> **职责边界**：只水群\n'
+                 '> 发现即立单\n\n'
+                 '### 复核要点\n\n'
+                 '- 判据方向正确\n\n'
+                 'Refs #324\n\n'
+                 '**独立复核**：APPROVE\n\n'
+                 '---\n\n'
+                 '## 测试\n\n'
+                 '- 下一段的内容不算本段\n')
+    heading_cut = ('## 门禁改动\n\n'
+                   '- `scripts/check_x.py`：改了断言\n\n'
+                   '**独立复核**：APPROVE\n\n'
+                   '## 测试\n\n'
+                   '- 下一段的内容不算本段\n')
+
     expect('review_record 认出 PENDING', review_record(pending)[1], None)
     expect('review_record 认出 APPROVED 优先于 APPROVE',
            review_record(approved_last)[1], 'APPROVED')
@@ -364,6 +400,14 @@ def self_test():
     expect('review_order_problem 复核在前报出后续行',
            review_order_problem(evidence_after), '- 三种组合证据：见评论')
     expect('review_order_problem 段首就是复核行（无后续）', review_order_problem(approve_early), None)
+    expect('review_order_problem 复核后的纯 Refs 收尾不算实质内容',
+           review_order_problem(gate_section(refs_after)), None)
+    expect('review_order_problem 复核后的证据行仍算实质内容',
+           review_order_problem(gate_section(evidence_after)), '- 三种组合证据：见评论')
+    expect('review_order_problem 引用块 / ### 段落内的复核仍算段末',
+           review_order_problem(gate_section(refs_last)), None)
+    expect('review_order_problem 同级 ## 截断本段',
+           review_order_problem(gate_section(heading_cut)), None)
 
     expect_rc('闸门：PENDING 红', touched, pending, 1, signature='尚未贴出结论', gated=True)
     expect_rc('闸门：同形 APPROVE 在段末绿', touched, approve_last, 0, gated=True)
@@ -372,6 +416,8 @@ def self_test():
     expect_rc('闸门：自审形状（结论后面还有证据）红', touched, evidence_after, 1,
               signature='复核结论排在正文证据之前', gated=True)
     expect_rc('闸门：分隔线收尾仍绿', touched, divider_tail, 0, gated=True)
+    expect_rc('闸门：纯 Refs 收尾仍绿', touched, refs_after, 0, gated=True)
+    expect_rc('闸门：引用块 / ### 之后写在段末绿', touched, refs_last, 0, gated=True)
     expect_rc('闸门：搭段但漏列文件仍红', touched, section_partial, 1, signature='漏列', gated=True)
     # 同一批夹具在闸门生效前（gated=False）恢复旧口径：只校验段 + 漏列，不因复核缺席变红。
     expect_rc('生效前：PENDING 放行（旧口径）', touched, pending, 0)

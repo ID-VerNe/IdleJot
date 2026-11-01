@@ -41,7 +41,7 @@ if str(_SHIM) not in sys.path:
 # scripts/ files are started *by the backend at runtime*, so they are runtime
 # code that merely lives outside the packages. Scanning the whole directory
 # would fire on dozens of deliberate diagnostic spawns; scanning none of it
-# leaves these three unguarded for the day one of them shells out to ffmpeg.
+# leaves these unguarded for the day one of them shells out to ffmpeg.
 #
 # This is a *confirmed snapshot*, not the source of truth (issue #329):
 # `derive_workers()` re-reads the runtime tree on every run and both directions
@@ -50,7 +50,6 @@ if str(_SHIM) not in sys.path:
 # or was deleted. Keep the trailing comment -- it is what a reviewer reads.
 RUNTIME_WORKERS = frozenset({
     'scripts/parse_artifact.py',       # chatlocal/artifacts.py:294
-    'scripts/list_client_accounts.py',  # chatlocal/client_accounts.py:39
     'scripts/voice_source.py',          # chatlocal/voice.py:189
 })
 
@@ -284,8 +283,8 @@ def _roots(tree):
 
     * `ROOT = Path(__file__).resolve().parent.parent` -- `chatlocal/config.py:5`,
       the same value as this gate's `ROOT`;
-    * `from .config import ROOT` -- how `chatlocal/artifacts.py:14`,
-      `client_accounts.py:7` and `voice.py:11` get it.
+    * `from .config import ROOT` -- how `chatlocal/artifacts.py:14` and
+      `voice.py:11` get it.
 
     Any other leading name could be a temporary directory, a vendored tree or an
     unrelated variable; resolving it would invent a worker and skip a real one,

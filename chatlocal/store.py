@@ -5,7 +5,7 @@ import sqlite3
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 
 from .config import DB, DATA, ROOT, local_path, resolve_path
 from .normalize import TZ, decode_export, display_time, normalize, stable_key
@@ -33,7 +33,14 @@ class Store:
             self._migrate(db)
 
     def _migrate(self, db):
-        """Create and upgrade the schema. Order matters; never reorder steps."""
+        """Create and upgrade the schema. Order matters; never reorder steps.
+
+        `messages.platform` still accepts `'wechat'` (#350). That is deliberate:
+        `WATER_GROUP_ONLY_PLAN` §5.2 forbids breaking the table shape, so an
+        existing database keeps importing and reading unchanged. Nothing in this
+        repo writes the value any more -- every platform check on the write path
+        is narrowed to `qq`, so the enum is history, not capability.
+        """
         sqlite_initialize(db, wal=True)
         db.executescript('''
               CREATE TABLE IF NOT EXISTS sources(
@@ -64,8 +71,10 @@ class Store:
         if 'original_content' not in columns:db.execute('ALTER TABLE messages ADD COLUMN original_content TEXT')
         from .sync_state import initialize
         initialize(db)
-        from .import_scope import initialize as initialize_scope
-        initialize_scope(db)
+        # Was `import_scope.initialize()` until that module was deleted (#350); the
+        # counter it created is still the id allocator for imported messages.
+        db.execute('CREATE TABLE IF NOT EXISTS message_counter(id INTEGER PRIMARY KEY CHECK(id=1),value INTEGER NOT NULL)')
+        db.execute('INSERT OR IGNORE INTO message_counter SELECT 1,coalesce(max(id),0) FROM messages')
         from .live_state import initialize as initialize_live
         initialize_live(db)
         from .artifacts import initialize as initialize_artifacts
@@ -88,7 +97,7 @@ class Store:
         with sqlite_connect(self.path, timeout=30, foreign_keys=True) as db:
             yield db
 
-    def import_file(self, path, platform='', conversation='', self_ids='',load_stickers=True, *, sync=None, live=None, discovery=False, batch=None, complete_job=None):
+    def import_file(self, path, platform='', conversation='', self_ids='',load_stickers=True, *, sync=None, live=None, discovery=False, batch=None):
         if not isinstance(load_stickers,bool):raise ValueError('加载表情包必须为开或关')
         path = local_path(path)
         if path.suffix.lower() not in ('.json', '.jsonl', '.ndjson'):
@@ -118,7 +127,6 @@ class Store:
         # must never detach normalized messages from their provenance hash.
         head, records, kind = decode_export(archive)
         parsed, skipped, seen = [], 0, Counter()
-        native_locators={}
         for pointer, raw in records:
             try:
                 message = normalize(raw, head, kind, platform, conversation, self_ids)
@@ -137,8 +145,6 @@ class Store:
             key = stable_key(message, seen[fingerprint])
             seen[fingerprint] += 1
             parsed.append((key, pointer, message))
-            if kind=='wechatauto' and head.get('identity_method') and raw.get('source_db') and raw.get('source_table') and raw.get('local_id'):
-                native_locators[pointer]=json.dumps([head.get('wxid'),PureWindowsPath(str(raw['source_db'])).as_posix(),raw['source_table'],int(raw['local_id'])])
         added, duplicate, enriched, placeholders = 0, 0, 0, 0
         with self.connect() as db:
             db.execute('INSERT OR IGNORE INTO sources VALUES(?,?,?,?,?,?,?)',
@@ -147,44 +153,19 @@ class Store:
             next_id=max(db.execute('SELECT value FROM message_counter WHERE id=1').fetchone()[0],
                         db.execute('SELECT coalesce(max(id),0) FROM messages').fetchone()[0])
             for key, pointer, message in parsed:
-                locator=native_locators.get(pointer)
-                native=(message['platform'],message['conversation_id'],locator)
                 # Automatic overlap/reconciliation must not resurrect records
                 # the user removed. Explicit historical import may restore them.
                 if sync is not None or live is not None or discovery:
                     if db.execute('SELECT 1 FROM deleted_message_keys WHERE dedup_key=?',(key,)).fetchone():
                         skipped+=1
                         continue
-                    if locator and db.execute('SELECT 1 FROM deleted_native_ids WHERE platform=? AND conversation_id=? AND locator=?',native).fetchone():
-                        skipped+=1
-                        continue
                 else:
                     db.execute('DELETE FROM deleted_message_keys WHERE dedup_key=?',(key,))
-                    if locator:db.execute('DELETE FROM deleted_native_ids WHERE platform=? AND conversation_id=? AND locator=?',native)
                 message=dict(message)
                 files=message.pop('files',[])
                 voice=message.pop('voice',None)
                 source_content=message['content']
                 old = db.execute('SELECT * FROM messages WHERE dedup_key=?', (key,)).fetchone()
-                if locator:
-                    prior=db.execute('SELECT m.* FROM messages m JOIN message_native_ids n ON n.message_id=m.id WHERE n.platform=? AND n.conversation_id=? AND n.locator=?',native).fetchone()
-                    # Legacy exports may predate native aliases. Match their
-                    # exact local-ID/time fallback, never names or text alone.
-                    legacy_key=stable_key(dict(message,source_id=f"local:{json.loads(locator)[3]}:{message['timestamp']}"))
-                    prior=prior or db.execute('SELECT * FROM messages WHERE dedup_key=?',(legacy_key,)).fetchone()
-                    if (sync is not None or live is not None or discovery) and db.execute('SELECT 1 FROM deleted_message_keys WHERE dedup_key=?',(legacy_key,)).fetchone():
-                        skipped+=1
-                        continue
-                    if prior and old and prior['id']!=old['id']:raise ValueError('同一微信本地消息已有两个身份，请核对旧导入；本批未写入。')
-                    if prior and not old:
-                        from .artifacts import is_file_ack
-                        file_ack=is_file_ack(db,prior,message,files)
-                        if not file_ack and (not prior['source_id'].startswith('local:') or not message['source_id'].isdigit() or int(message['source_id'])<=0):
-                            raise ValueError('微信本地消息身份发生冲突；本批未写入。')
-                        # Content/time validation below is in this transaction;
-                        # a failed acknowledgement rolls the key update back.
-                        db.execute('UPDATE messages SET dedup_key=?,source_id=? WHERE id=?',(key,message['source_id'],prior['id']))
-                        old=db.execute('SELECT * FROM messages WHERE id=?',(prior['id'],)).fetchone()
                 entries=message.pop('media',[])
                 # A newer export can lose the local file and label an old GIF
                 # as an unavailable generic image. Retain known classification.
@@ -269,7 +250,6 @@ class Store:
                     from .voice import register,reindex
                     register(db,mid,voice,is_new=old is None,automatic=sync is not None or live is not None or discovery)
                     reindex(db,mid)
-                if locator:db.execute('INSERT OR IGNORE INTO message_native_ids VALUES(?,?,?,?)',(*native,mid))
                 if live is not None and not old:
                     from .live_state import record
                     record(db,mid,live)
@@ -292,9 +272,6 @@ class Store:
             if live is not None:
                 from .live_state import commit
                 commit(db,live,added,next_id)
-            if complete_job:
-                from .import_pipeline import complete_job as finish_job
-                finish_job(db,complete_job)
             if batch is not None:
                 receipt=dict(imported=added,duplicate=duplicate,enriched=enriched,skipped=skipped,total=len(records),
                     unknown_self=sum(m['is_self'] is None for _,_,m in parsed),source_hash=digest,labels_updated=labels_updated)
@@ -338,18 +315,6 @@ class Store:
             return [dict(r) for r in db.execute('''SELECT platform,conversation_id,
               max(conversation) AS conversation,count(*) AS count FROM messages
               GROUP BY platform,conversation_id ORDER BY platform,conversation''')]
-
-    def latest_wechat_coverage(self):
-        """Coverage of the latest successfully imported export, not a pending file."""
-        with self.connect() as db:
-            rows=db.execute("SELECT archive FROM sources WHERE format='wechatauto' ORDER BY imported_at DESC").fetchall()
-        for row in rows:
-            try:
-                payload=json.loads(local_path(row['archive']).read_text(encoding='utf-8-sig'))
-                coverage=payload.get('coverage')
-                if isinstance(coverage,dict):return coverage
-            except (OSError,ValueError):continue
-        return None
 
     def latest_qq_coverage(self):
         """Settings of the last imported automatic QQ export, not a pending file."""

@@ -1,1 +1,1 @@
-"""Local QQ/WeChat evidence search."""
+"""Local QQ evidence search."""

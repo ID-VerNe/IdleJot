@@ -1,7 +1,7 @@
 # 控制台开窗门禁（`check_no_console_child`）的扫描边界
 
-本文件说明 `scripts/check_no_console_child/`（入口 `_entry.py`）为什么扫哪些、不扫哪些，尤其解释
-**第三方 vendored 源码（`tools/`）** 这件事（issue #323，源自 #39 / #319）。
+本文件说明 `scripts/check_no_console_child/`（入口 `_entry.py`）为什么扫哪些、不扫哪些（issue #323
+源自 #39 / #319；原 vendored 扫描范围已随微信读取路径在 #350 一并撤销，见 §3）。
 门禁自身的规则原文在模块 docstring 里，这里只讲边界与取舍。
 
 ## 1. 这个门禁防什么
@@ -17,85 +17,43 @@
 |---|---|---|
 | `water-group/` / `water_group/` / `chatlocal/` / `server_wg.py` | 是 | — |
 | `scripts/` 下**后端运行时会拉起**的少数 worker（`RUNTIME_WORKERS`，issue #319；#329 起由 AST 从运行时树派生，不再手工维护） | 是（只是住在 scripts/ 外面） | 整个 `scripts/` 大多数是 CI 与人工诊断，人工跑的时候弹个黑框不是 bug |
-| `tools/` 下的 `VENDORED_SOURCES`（issue #323） | 是（安装后由后端调用） | 见 §3 |
+| `tools/` 下的 `VENDORED_SOURCES`（issue #323，已在 #350 撤销） | 不再扫 | 见 §3 |
 
 判据只认"名字"：`creationflags` 里必须出现 `NO_WINDOW` / `CREATE_NO_WINDOW`，`0` 和
-`CREATE_NEW_PROCESS_GROUP` 都不算。`getattr(subprocess, "CREATE_NO_WINDOW", 0)` 也算——
-vendored 代码不能 import 本仓的 helper，这就是它唯一的正确写法（`db.py` 早就这么写）。
+`CREATE_NEW_PROCESS_GROUP` 都不算。`getattr(subprocess, "CREATE_NO_WINDOW", 0)` 也算——它是
+「没有 helper 可用时」的唯一正确写法。
 
-## 3. 为什么 `tools/` 不能进 CI 判红范围
+## 3. vendored 扫描范围已撤销（#350）
 
-`tools/` 整树受 `.gitignore` 保护，`git ls-files tools` 是 0。
+#323 曾经把 `tools/wechat-reader/wechatauto/media.py` 登记进 `VENDORED_SOURCES`，并为它写了一份
+安装期补丁 `patch_wechat_media`。**这两样都随微信读取路径一起删掉了**（#350）：微信通道不再是本版
+的一部分，`tools/wechat-reader` 不再被安装、不再被调用，去扫一段永远不会执行的第三方字节没有意义。
 
-1. **CI 上它根本不存在**。CI 的 checkout 里没有 `tools/`，`check_pr_parity.py` 的干净
-   worktree 里也没有。任何"文件不存在就红"的写法都会让门禁在 CI 上永远红。
-2. **它是第三方快照，不是我们维护的代码**。补丁在安装期用 `scripts/reader_patches.py`
-   打到本地副本上，仓库里只有补丁，没有打完补丁的文件。
+随之撤销的有：三态输出（已扫-干净 / 已扫-违规 / **未扫**）、`VENDORED_SOURCES` 表、`scan_vendored()`、
+补丁表 `reader_patches.VENDORED_PATCHES`、驱动 `scripts/apply_reader_patches.py`，以及门禁自测里
+「清单与补丁表双向对账」那一段。「没扫必须说出来」这条教训没有失效，只是**前提没了**——没有需要扫的
+第三方树，就不存在「没扫」这种状态。
 
-所以门禁采取**三态**，而不是二态（干净 / 红）：
+## 4. 判据没有跟着范围一起退休
 
-| 状态 | 什么时候 | 输出 | 退出码 |
-|---|---|---|---|
-| 已扫-干净 | 文件在，且每个 spawn 都带抑制标志 | `✓ vendored 树已扫（同一套判据）：<路径>` | 0 |
-| 已扫-违规 | 文件在，有裸 spawn | 逐条列出 `路径:行号  代码行`，随后一行 `→ …先跑 python scripts/apply_reader_patches.py…` | 1 |
-| **未扫** | 文件不在（CI、干净 worktree、没装 reader） | `· vendored 树未扫：<路径>（<打它的补丁>）—— 本机没有这份第三方源码……不是「已检查干净」` | 0 |
+范围撤了，**规则本身还在**：`creationflags` 仍必须写出 `NO_WINDOW` / `CREATE_NO_WINDOW`，
+`0` 与 `CREATE_NEW_PROCESS_GROUP` 仍不算。门禁自测里保留了那条正例夹具——一段形状与 #323 那次
+一模一样的「无 helper 可用、就地拼 `getattr`」写法——它钉的是**判据**，不是那个文件。将来若再引入
+第三方树，判据现成，只需把新范围接回扫描入口。
 
-第三行是这个 issue 的核心：**"没扫"必须说出来，不能表现得像"扫过且干净"**。
-#323 的病根就是门禁对 `tools/` 从来没有意见，而"没有意见"在输出里和"干净"长得一模一样。
+反过来，这个门禁现在**也不再**有任何 `path: 补丁` 的对应关系要维护：`reader_patches.py` 里剩下的
+QQ 补丁不属于本门禁的扫描范围，改动它们不会、也不应该让这个门禁变红。
 
-**第二行的违规和本仓代码的违规不是同一种红（issue #337）**。vendored 字节只能被补丁改写，
-不能手改；正确的修法是跑驱动把补丁打上去，**不是**把那行从 `VENDORED_SOURCES` 里删掉——
-那是撤销 #323。所以违规块末尾会追加一行指引，把该跑的命令和"别移出清单"一起说清。
-指引行只是导航，判据和退出码都没变：仍然是红的，仍然是 1。
-
-> #337 的来历：`patch_wechat_media` 存在了整个版本周期却**没有任何调用方**（唯一的 import
-> 在门禁自测里），`scripts/install_readers.py` 又从未提交过，于是本机的 `media.py` 一直是裸
-> `subprocess.run`。门禁报红是对的，红得却像"我们自己的运行时代码坏了"，而唯一的正解是打补丁。
-> 现在补丁表 `reader_patches.VENDORED_PATCHES` 同时被驱动和门禁自测读取（§4），
-> "有补丁没人打"与"要扫的文件没进清单"都会让自测直接红。
-
-## 4. vendored 代码为什么就地拼 `getattr`，而不走 helper
-
-`water-group/daemon/winconsole.py` 与 `chatlocal/platform_process.py` 是本仓的模块。第三方树
-（`tools/wechat-reader/wechatauto/`）是上游代码的副本，`import chatlocal...` 在那里既装不上、
-也会让补丁与上游差异变得不可审计。因此**规则 3（`CREATE_NO_WINDOW` 只在两个 helper 里拼写）
-只作用于运行时树**，vendored 文件豁免；代价是补丁必须写死这一行形状，并由门禁的 vendored 扫描
-（§3 第二行）保证它确实在。
-
-对应补丁：`scripts/reader_patches.py: patch_wechat_media`，只改
-`tools/wechat-reader/wechatauto/media.py` 里 `_wxgf_to_jpg` 的 ffmpeg 调用，加一行
-`creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),`，并在文件头加一行
-`# Tulpa console-window flag v1 (scripts/reader_patches.py).` 作幂等哨兵
-（重复安装不会重复插入；锚点漂移则抛 `ValueError`，不猜）。
-
-### 4.1 打补丁用驱动，不要手改（issue #337）
-
-补丁与它要改的文件之间的对应关系只写在一处：`reader_patches.py` 底部的 `VENDORED_PATCHES`
-（每行 `path` / `patch` / `reason`）。驱动从这张表读，门禁自测也读它做双向对账，
-所以加一份新的 vendored 补丁只需在表里加一行：
-
-```bash
-# 报告本机 vendored 副本的状态（退出码：有文件需要补丁 = 1，全好或没装 = 0）
-uv run python scripts/apply_reader_patches.py --check
-
-# 真的打上去：幂等，原文件备份到 <file>.tulpa-bak（已存在则不覆盖）
-uv run python scripts/apply_reader_patches.py
-```
-
-驱动不会下载任何东西、不会创建 `tools/`，也不猜漂移的锚点——锚点对不上就以非零退出、
-文件逐字节保持原样。**本机有 `tools/` 时，门禁红了先跑 `--check`**：它区分"需要补丁"
-（跑驱动即可解决）与"锚点漂移"（要人工对照上游 diff 复核补丁），两者退出码都是 1 但
-说法不同。补完后再跑一次门禁，应当从"已扫-违规"变成"已扫-干净"。
+`RUNTIME_WORKERS` 里的 `scripts/list_client_accounts.py` 也随 #350 一起删了条目（原注释指向的
+`chatlocal/client_accounts.py:39` 已不存在）。这条是**派生对账**兜住的：登记了却没人再起会报
+`unstarted`，把那一行加回去今天就会红——门禁自己会拒绝一个过期的名单，不需要人手记住。
 
 ## 5. 已知未覆盖的边界
 
 - **`tools/qq-reader` 的 spawn 不判**：`qq_db.py`、`_snapshot.py`、`_macos.py` 里的未加固 spawn
   都在 Linux / macOS 上游路径上，Windows 走不到。强行判定会给将来真正的 POSIX 移植制造假红；
   真要判，应当在那条路径真正启用时用 `# console-gate: posix-only` 之外的方式单独处理。
-- **`VENDORED_SOURCES` 是显式清单，不扫目录**（与 `RUNTIME_WORKERS` 不同：#329 之后后者由 AST
-  派生并双向对账）。新增 vendored 文件仍需要手工登记一行；漏登记的表现是
-  "未扫"里**没有**它（等于又回到 #323 之前的状态），因此登记新第三方树时请同时确认它在不在清单里。
-  自 #337 起，两张表之间**已经**有机器判据：`VENDORED_SOURCES` 里每一行都必须在
-  `reader_patches.VENDORED_PATCHES` 里有同名补丁，补丁表里也不许有清单外的孤儿——任一边漏登记，
-  门禁自测直接红。机器管不到的是最后一步："`tools/` 里真的装了这棵树，所以它才该进清单"。
-- **只扫 `.py` / `.pyw`**：vendored 的二进制、批处理不在此列。
+- **`RUNTIME_WORKERS` 由 AST 派生、双向对账**（#329）：代码里新起一个未登记的 worker、登记了却
+  不再起、路径求不出来，三种都红。撤销 vendored 范围后，这里不再有「手工维护清单、漏登记就静默不扫」
+  的第二张表。
+- **只扫 `.py` / `.pyw`**：二进制、批处理不在此列。

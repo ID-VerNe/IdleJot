@@ -1,11 +1,16 @@
 """Small reproducible adaptations to the pinned, read-only upstream modules.
 
-The functions below are pure `bytes -> bytes` transforms; the table at the bottom
-(`VENDORED_PATCHES`) says which file each one belongs to, and
+The functions below are pure `bytes -> bytes` transforms, and
 `scripts/apply_reader_patches.py` is the only thing that writes them to disk.
-Keeping the table here means a patch and its target can never drift apart
-(issue #337: `patch_wechat_media` existed for a whole release without any caller,
-so the vendored file was never actually patched on this machine).
+
+The `VENDORED_PATCHES` table this module used to carry is gone (#350): its only
+row targeted the WeChat reader, which is no longer vendored or supported, so
+there is nothing left to apply. The transforms below are still kept because the
+QQ reader is patched from them by name.
+
+Every `patch_wechat_*` transform was removed with the WeChat path; `patch_wechat_db`
+had no caller even before that (nothing ever wired it into a table), and it
+referred to `chatlocal.wechat_keys`, a module this change deletes.
 """
 
 def patch_qq_configured_root(data):
@@ -121,60 +126,6 @@ def patch_qq_query_diagnostic(data):
     return data.replace(before,after)
 
 
-def patch_wechat_db(data):
-    before=b'''            if len(keys) >= len(self._db_files):
-                break
-        return keys
-
-    def _collect_key_candidates'''
-    after=b'''            if len(keys) >= len(self._db_files):
-                break
-        if len(keys) < len(self._db_files):
-            from chatlocal.wechat_keys import recover_legacy_keys
-            keys.update(recover_legacy_keys(self, keys))
-        return keys
-
-    def _collect_key_candidates'''
-    # The downloaded upstream bytes have LF line endings.
-    if data.count(before)!=1:raise ValueError('WeChat extraction changed; review legacy-key fallback')
-    notice=b'# Modified by Tulpa contributors: bounded legacy key recovery and account-root discovery; see scripts/reader_patches.py.\n'
-    data=data.replace(before,after)
-    start=data.index(b'def _locate_account_root(')
-    end=data.index(b'\ndef auto_detect_db_dir(',start)
-    discovery=data[start:end]
-    # E:\\ is absolute; stripping its separator produces the drive-relative E:.
-    for name in (b'root',b'cand'):
-        before=name+b' = '+name+b'.rstrip("\\\\/")'
-        if discovery.count(before)!=1:
-            raise ValueError('WeChat directory discovery changed; review drive-root preservation')
-        discovery=discovery.replace(before,name+b' = os.path.normpath('+name+b')')
-    return notice+data[:start]+discovery+data[end:]
-
-
-def patch_wechat_media(data):
-    """Keep ffmpeg from flashing a console window when transcoding wxgf (issue #323).
-
-    Vendored code cannot import winconsole/platform_process, so the flag is spelled
-    inline -- the same shape db.py already uses (db.py:1062, db.py:1287). Unlike
-    patch_wechat_db this one is idempotent: the installer may be re-run against an
-    already-patched tree, and a marker in the bytes is what makes that safe.
-    """
-    marker = b'# Tulpa console-window flag v1 (scripts/reader_patches.py).\n'
-    if marker in data:
-        if data.count(marker) != 1:
-            raise ValueError('Duplicate WeChat media adaptation')
-        return data
-    before = b'capture_output=True, timeout=30,\n'
-    # The downloaded upstream bytes have LF line endings.
-    if data.count(before) != 1:
-        raise ValueError('WeChat wxgf ffmpeg call changed; review console-window flag')
-    indent = data[:data.index(before)].rsplit(b'\n', 1)[-1]
-    if indent.strip():
-        raise ValueError('WeChat wxgf ffmpeg call changed; review console-window flag')
-    after = before + indent + b'creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),\n'
-    return marker + data.replace(before, after)
-
-
 def patch_qq_helper(data):
     # One pure window function used by our historical export; do not permit
     # WITH/RECURSIVE, arbitrary functions/tables, writes or extension loading.
@@ -191,22 +142,3 @@ def patch_qq_directory_tables(data):
     if data.count(before)!=1:raise ValueError('QQ directory allowlist changed')
     if b'        "profile_info_v5",' in data:return data
     return data.replace(before,after)
-
-
-# Which patched function belongs to which vendored file, relative to the repo root.
-#
-# This is the single place that says "run this on that file" (issue #337): before
-# it existed, `patch_wechat_media` had no caller anywhere in the repository and
-# `tools/wechat-reader/wechatauto/media.py` silently stayed unpatched. Adding a
-# patch for a new vendored file means adding a row here, and
-# `scripts/apply_reader_patches.py` picks it up with no further wiring.
-#
-# `reason` is what the applying driver prints when it has to explain itself, so it
-# names the symptom, not the function.
-VENDORED_PATCHES = (
-    {
-        'path': 'tools/wechat-reader/wechatauto/media.py',
-        'patch': patch_wechat_media,
-        'reason': 'wxgf→jpg 的 ffmpeg 转码会给控制台子进程开一个黑框（issue #319/#323）',
-    },
-)

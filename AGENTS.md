@@ -475,7 +475,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 37 | `mcp` | `check_mcp.py` | MCP 协议层契约：真实 MCP HTTP + 隔离源夹具，从不发 QQ 消息 |
 | 38 | `mcp` | `check_mcp_onebot.py` | OneBot 设置到工具可见性再到 HTTP notice 读取（隔离夹具） |
 | 39 | `mcp` | `check_mcp_chat_output.py` | 轮询输出截断、游标与版本刷新语义 |
-| 40 | `mcp` | `check_mcp_chat_turns.py` | 对话轮次生命周期与原生引用（19 项并发与防竞争检查） |
+| 40 | `mcp` | `check_mcp_chat_turns` | 对话轮次生命周期与原生引用（19 项并发与防竞争检查）。#320 §B：单文件 964 行拆成 `scripts/check_mcp_chat_turns/` 包（dialogue_window/stop_revoke），入口名不变、对 gates.json 与 CI 透明 |
 | 41 | `mcp` | `check_mcp_chat_dialogue_window.py` | mention_only 对话窗口跨 wait 调用与进程重启存活、本机回复重开窗口、跳批只推游标不置 delivered（#217） |
 | 42 | `mcp` | `check_mcp_chat_prompts.py` | 提示词装配与人格卡：目录发现、缓存、体积上限与社交状态（#64） |
 | 43 | `mcp` | `check_mcp_picker.py` | 平台过滤先于分页、会话搜索与参数校验（#64） |

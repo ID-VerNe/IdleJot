@@ -223,9 +223,9 @@
    "why": "轮询输出截断、游标与版本刷新语义"
   },
   {
-   "name": "check_mcp_chat_turns.py",
+   "name": "check_mcp_chat_turns",
    "shard": "mcp",
-   "why": "对话轮次生命周期与原生引用（19 项并发与防竞争检查）"
+   "why": "对话轮次生命周期与原生引用（19 项并发与防竞争检查）。#320 §B：单文件 964 行拆成 `scripts/check_mcp_chat_turns/` 包（dialogue_window/stop_revoke），入口名不变、对 gates.json 与 CI 透明"
   },
   {
    "name": "check_mcp_chat_dialogue_window.py",

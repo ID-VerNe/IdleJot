@@ -6,7 +6,7 @@ import time
 from . import reply_timing as timing
 from .mcp_chat_media import image_ref
 from .onebot import OneBotError
-from .onebot_segments import at as at_segment, card_summary, kind_of, label, reply as reply_segment, unsupported
+from .onebot_segments import at as at_segment, card_text, kind_of, link_fields, reply as reply_segment, unsupported
 from .onebot_segments import UNSUPPORTED_TOTAL_CHARS
 
 MAX_NODES=100  # QQ 单条合并转发的上限，实测 get_forward_msg 一次全量返回（issue #8）
@@ -259,6 +259,10 @@ class ChatDetails:
 
     def render(self,segments,media,stamp,allow_images=True,quote_message_id=None,location=None,read=None):
         result=[];parts=[]
+        # 一条消息共享的链接预算（issue #311）：入库侧由 `receive` 的 raw_budget 管，
+        # 引用/转发节点在这里自成一条消息——不给预算的话，三十张卡片的老行回填能
+        # 把 content 顶过 MAX_TEXT，占位被硬切在半路（`]` 都没了，唤醒行剥不掉）。
+        link_budget={}
         for index,seg in enumerate(segments):
             # Old persisted forward nodes used OneBot-shaped segments.
             if 'data' in seg:
@@ -290,10 +294,20 @@ class ChatDetails:
                 # issue #165：未知段说得出是什么，而不是只剩一句「非文本消息」。
                 # `unsupported` 段带 kind（和可能的 raw），历史行里的中文标签
                 # 归一成 unknown——那是「没记下类型」，不是一种类型。
-                body=card_summary(seg.get('raw')) if kind=='unsupported' else ''
-                label_text=label(seg.get('kind') if kind=='unsupported' else kind)
-                parts.append('['+label_text+('：'+body if body else '')+']')
-                result.append(dict(seg) if kind=='unsupported' else dict(type='unsupported',kind=kind_of(kind)))
+                # issue #311：占位改由 card_text() 统一拼（标题 + 跳转地址）；
+                # #311 之前落库的行没有 `url` 字段，这里从 raw 现算补出来——
+                # 否则「修好之后的新卡片有链接、老卡片没有」，同一个入口两种答案。
+                degraded=kind=='unsupported'
+                source=seg.get('raw') if degraded else None
+                if degraded:
+                    stored=dict(seg)
+                    if not stored.get('url'):
+                        stored.update(link_fields(stored.get('kind'),source,link_budget))
+                    parts.append(card_text(stored.get('kind'),source,stored))
+                    result.append(stored)
+                else:
+                    parts.append(card_text(kind,source))
+                    result.append(dict(type='unsupported',kind=kind_of(kind)))
         return dict(content=''.join(parts)[:MAX_TEXT],segments=result)
 
     def render_nodes(self,nodes,media,stamp,allow_images=True,quote_message_id=None):

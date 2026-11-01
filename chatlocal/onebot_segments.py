@@ -15,7 +15,10 @@ issue #165: 白名单之外的段（卡片 / 小程序 / 分享 / 位置 / 戳�
   ``raw_truncated``）；
 * :func:`label` 只决定 **content 里给人看的那几个字**，绝不回流到 ``type``；
 * :func:`card_summary` 从 ``json`` / ``xml`` / ``share`` 段里取标题或摘要（PB），
-  取不到就返回空串，由调用方退回类型标签——不把「解析不出」写成「没有内容」。
+  取不到就返回空串，由调用方退回类型标签——不把「解析不出」写成「没有内容」；
+* :func:`card_link` 取卡片指向的跳转地址（issue #311），:func:`link_fields` 把它
+  变成段上的 ``url`` 字段，:func:`card_text` 是 content 占位的唯一构造点——
+  链接以前只躺在 ``raw`` 原文里，Agent 看得到标题却不知道它指向哪个视频。
 
 原始体用 ``raw`` 而不是 ``data``：``mcp_chat_details`` 里有一条历史兼容分支，
 把 ``{type, data}`` 当成旧版 OneBot 段展开（``dict(type=seg['type'], **seg['data'])``），
@@ -32,12 +35,19 @@ QQ_LIMIT = 30
 NAME_LIMIT = 100
 KIND_LIMIT = 32          # 段名是短标识；超长的是坏数据，不是新类型
 CARD_SUMMARY_CHARS = 40  # content 里的卡片摘要：够看出是什么，不把唤醒行占满
+LINK_LIMIT = 400         # 卡片跳转地址：够装下带一串参数的分享链接，也不许撑爆 payload
 
 # 单条消息里所有降级段原始体的合计上限。入库 payload 有 20000 字符的整体封顶
 # （mcp_chat.receive 末尾），逐段 2000 而不合计的话，十条卡片就能把整条消息的
 # segments 挤成空列表——修一个丢字段的 bug 换一个丢整条消息的 bug。
 UNSUPPORTED_TOTAL_CHARS = 4000
 UNSUPPORTED_RAW_CHARS = READ_PREVIEW_CHARS  # 单段：与「交给 Agent 的一段正文」同额
+
+# 一条消息里所有段链接字段的合计上限（独立复核指出）：单段 400 而不合计的话，
+# 二十张卡片就能把 payload 顶过 `mcp_chat.receive` 末尾的 20000 字封顶，
+# `segments` 被整个清空——那正是 #165 PA 用 raw 预算防住的「修一个丢字段的 bug
+# 换一个丢整条消息的 bug」。400 × 5 张卡片，够真实消息用。
+LINK_TOTAL_CHARS = 2000
 
 # content 里给人看的标签。**不进** segments[].type（issue #165 的病根）。
 LABELS = {
@@ -55,6 +65,30 @@ _XML_TAG_RE = r'<{tag}>(.*?)</{tag}>'
 _XML_TAGS = ('title', 'summary', 'des', 'prompt')
 _JSON_KEYS = ('prompt', 'summary', 'title', 'desc')
 _JSON_NESTS = ('meta', 'news', 'detail', 'card', 'data')
+
+# 会带跳转地址的段（issue #311）。视频/文件段不在此列：它们的 `url` 是带 rkey 的
+# CDN 地址，约 8 小时就过期（#200），该由 `wg_videos` 的可下载命令交出去，
+# 塞进 content 只是把一条快过期的地址写进上下文和记忆。
+CARD_KINDS = ('json', 'xml', 'share', 'music', 'markdown')
+
+# 链接字段的键名优先级。QQ 小程序的 `meta.detail_1` 同时有 `qqdocurl`（分享短链，
+# 就是群友点开的那条）与 `url`（`m.q.qq.com/a/s/…` 的小程序内部路径），前者才是
+# 「这条卡片指向哪里」的答案；`jumpUrl` 是资讯类卡片的同一件事换了个键名。
+_LINK_KEYS = ('qqdocurl', 'jumpurl', 'jump_url', 'url', 'link', 'shareurl',
+              'share_url', 'sourceurl', 'source_url')
+_LINK_RE = re.compile(r'https?://\S+$', re.I)
+# 链接的递归深度：`{"data": "<一层 JSON 字符串>"}` 这种双重编码本身就吃掉两层，
+# 再往下 `meta.detail_1.qqdocurl` 还要三层。上限给到 8 是「够深 + 仍是有限」，
+# 卡片是外部输入，不给自己开一条无界递归。
+_LINK_DEPTH = 8
+_XML_URL_TAG_RE = r'<url>(.*?)</url>'
+# 属性名单独捕获再比对（独立复核指出）：只写 `url\s*=` 没有左边界，
+# `thumburl='http://…/封面.jpg'` 里的 `url=` 同样命中，而 finditer 取最左——
+# 一张带缩略图的卡片会把封面图当成跳转地址，且它本身是 http(s)，能穿过全部过滤。
+_XML_ATTR_RE = r'([\w-]+)\s*=\s*["\']([^"\']*)["\']'
+# 链接里出现这些字符就没法安全嵌进 `[卡片：…]` 占位（`]` 会让唤醒行的占位剥离
+# 正则停在半路，把后半截 URL 留在正文里占额度），一律当解析失败。
+_LINK_BAD_CHARS = '[]<>\n\t '
 
 
 def message_id(raw):
@@ -114,6 +148,7 @@ def unsupported(raw_kind, raw_data=None, budget=None):
     空的」是两件事，读者要能分开。
     """
     segment = dict(type='unsupported', kind=kind_of(raw_kind))
+    segment.update(link_fields(raw_kind, raw_data, budget))
     body = _raw_body(raw_data)
     if not body:
         return segment
@@ -154,6 +189,76 @@ def card_summary(raw_data):
         return ''
     cleaned = found.replace('[', ' ').replace(']', ' ')
     return clip(' '.join(cleaned.split()), CARD_SUMMARY_CHARS).text
+
+
+def card_link(raw_data):
+    """卡片类段指向的跳转地址（issue #311）：取第一个 http(s) 链接，取不到返回空串。
+
+    入参与 :func:`card_summary` 同款——原始 ``data`` 或落盘后的 ``raw`` 文本都能读，
+    否则「入库时有链接、补读时又没有」等于把同一个缺陷换个入口复现。
+
+    只认带 scheme 的 http/https。``m.q.qq.com/a/s/…`` 这种没有 scheme 的值一律
+    丢弃，不替它补 ``https://``：猜错的地址比没有地址更坏——Agent 会照着去读一个
+    打不开的链接，然后把「读不到」当成「内容不存在」。原文仍在 ``raw`` 里，
+    真要补读还有路。
+    """
+    return _link_from(raw_data, 0)
+
+
+def link_fields(raw_kind, raw_data, budget=None):
+    """段上的链接字段（issue #311）：``{'url': …[, 'url_truncated': True]}`` 或 ``{}``。
+
+    ``unsupported()`` 与历史行回填共用这一处，限额与截断标记因此只有一份——
+    否则两条渲染路径迟早给出两个长度。
+
+    ``budget`` 是**一条消息**共享的 ``{'link': 剩余字符数}``（与 ``raw`` 预算同一个
+    dict 走），预算耗尽就不再挂链接：链接仍能在 ``raw`` 原文里找到，而 payload
+    顶过封顶会把整条消息的 ``segments`` 清空，那比丢一个字段更糟。
+    """
+    if kind_of(raw_kind) not in CARD_KINDS:
+        return {}
+    link = card_link(raw_data)
+    if not link:
+        return {}
+    allowance = LINK_LIMIT
+    if isinstance(budget, dict):
+        if 'link' not in budget:
+            budget['link'] = LINK_TOTAL_CHARS
+        allowance = max(0, min(LINK_LIMIT, int(budget['link'])))
+        if allowance <= 0:
+            return {}
+    kept = clip(link, allowance)
+    fields = {'url': kept.text}
+    if kept.truncated:
+        fields['url_truncated'] = True
+    if isinstance(budget, dict):
+        budget['link'] = max(0, int(budget['link']) - len(kept.text))
+    return fields
+
+
+def card_text(raw_kind, raw_data, segment=None):
+    """content 里那段占位：``[卡片：标题 → https://…]``（issue #311）。
+
+    入库侧（``mcp_chat.receive``）与引用/转发节点渲染（``mcp_chat_details.render``）
+    都调这里，标题、链接、方括号的写法只有一份——#165 的教训是两条路径各写一份
+    「拼 content」，改一处漏一处。
+
+    传了 ``segment`` 就用段上**已经算好**的链接（预算已扣、截断已标），不传才现算：
+    content 说「有链接」而段上没有、或两处长度不同，都是比缺链接更难查的漂移。
+
+    链接放在标题后面而不是另起一段：content 是给人扫的一行，读者要能连着读成
+    「这条卡片是什么、指向哪里」。唤醒行里整段仍被 `strip_placeholders` 剥成
+    ``[卡片]``，链接不占正文额度。
+    """
+    text = label(raw_kind)
+    body = card_summary(raw_data)
+    if body:
+        text += '：' + body
+    fields = (link_fields(raw_kind, raw_data) if segment is None
+              else {key: segment[key] for key in ('url', 'url_truncated') if segment.get(key)})
+    if fields.get('url'):
+        text += ' → ' + fields['url'] + ('…' if fields.get('url_truncated') else '')
+    return '[' + text + ']'
 
 
 def _allowance(budget):
@@ -214,3 +319,88 @@ def _xml_summary(text):
             if value:
                 return value
     return ''
+
+
+def _link_from(value, depth):
+    """在 dict / JSON 文本 / XML 文本里找第一个跳转地址（issue #311）。
+
+    与 :func:`_summary_from` 的差别只有一处：摘要按键名找**人看的字**，链接要往下
+    钻到 ``meta.detail_1`` 这种卡片自己起的键名里，所以这里递归**所有** dict 值而
+    不是固定的几层。深度仍有上限（``_LINK_DEPTH``）——卡片是外部输入，
+    不给自己开一条无界递归。
+    """
+    if depth > _LINK_DEPTH or value is None:
+        return ''
+    if isinstance(value, dict):
+        # 键名大小写混用（`jumpUrl` / `qqdocurl` / `URL`），统一小写后再按优先级比；
+        # 本层有链接就先给本层，没有再往下钻——同一张卡片里顶层 `url` 与
+        # `detail_1.qqdocurl` 撞车时，先说卡片自己声明的那个。
+        lowered = {}
+        for key, item in value.items():
+            if isinstance(key, str):
+                lowered.setdefault(key.strip().lower(), item)
+        for key in _LINK_KEYS:
+            if key in lowered:
+                found = _clean_link(lowered[key])
+                if found:
+                    return found
+        for item in value.values():
+            found = _link_from(item, depth + 1)
+            if found:
+                return found
+        return ''
+    if not isinstance(value, str):
+        return ''
+    text = value.strip()
+    if not text:
+        return ''
+    if text.startswith('{'):
+        try:
+            return _link_from(json.loads(text), depth + 1)
+        except ValueError:
+            return ''
+    if text.startswith('<'):
+        return _xml_link(text)
+    return ''
+
+
+def _xml_link(text):
+    """XML 卡片：先认 ``<url>…</url>``，再认链接属性（`url=` / `qqdocurl=` …）。
+
+    属性必须**按名字白名单**取，不能只匹配 ``url=`` 子串：XML 卡片的属性名里
+    ``thumburl`` / ``dataurl`` / ``coverurl`` 都带 ``url`` 结尾，取最左的那个会把
+    封面图当成卡片指向的地址。取到之后按 ``_LINK_KEYS`` 的优先级挑，与 JSON 侧
+    同一套口径。
+    """
+    for match in re.finditer(_XML_URL_TAG_RE, text, re.S | re.I):
+        found = _clean_link(match.group(1))
+        if found:
+            return found
+    found = {}
+    for match in re.finditer(_XML_ATTR_RE, text, re.S | re.I):
+        name = match.group(1).strip().lower()
+        if name in _LINK_KEYS and name not in found:
+            link = _clean_link(match.group(2))
+            if link:
+                found[name] = link
+    for key in _LINK_KEYS:
+        if key in found:
+            return found[key]
+    return ''
+
+
+def _clean_link(raw):
+    """反转义 + 校验，产出一个能直接交给 Agent 的地址；不合格返回空串。
+
+    JSON 里的 ``\\/`` 与 ``\\u0026``、XML 里的 ``&amp;`` 都是同一条链接的不同转义
+    形态，不还原的话 Agent 拿到的地址是打不开的（``https:\\/\\/b23.tv\\/abc``）。
+    还原之后才判 scheme：``javascript:`` / ``file:`` / ``data:`` 这类一律丢弃——
+    这条字段会进 Agent 的上下文，没理由把非网页协议也递过去。
+    """
+    text = html.unescape(str(raw or '')).replace('\\/', '/')
+    text = text.replace('\\u0026', '&').replace('\\u003d', '=').replace('\\u003f', '?')
+    # 链接里不该有空白：真出现了就是「地址 + 后面粘着的文案」，取第一段。
+    text = text.split()[0] if text.split() else ''
+    if not text or any(char in text for char in _LINK_BAD_CHARS):
+        return ''
+    return text if _LINK_RE.match(text) else ''

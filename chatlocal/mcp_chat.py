@@ -22,7 +22,7 @@ from .mcp_chat_schemas import schemas  # noqa: F401  (issue #11 PC: facade re-ex
 from .mcp_chat_wait import ChatWaitMixin
 from .mcp_schemas import event_id, idempotency_key, session_id
 from .onebot_events import EventReceiver
-from .onebot_segments import at as at_segment, card_summary, label, message_id, name as at_name, qq as qq_id, reply as reply_segment
+from .onebot_segments import at as at_segment, card_text, message_id, name as at_name, qq as qq_id, reply as reply_segment
 from .onebot_segments import UNSUPPORTED_TOTAL_CHARS, unsupported
 from . import mcp_chat_prompts as prompts
 from .mcp_chat_turns import ChatTurns, TOOLS as TURN_TOOLS
@@ -472,9 +472,12 @@ class MCPChat(ChatWaitMixin):
                     # data 一起消失，type 还被写成中文标签。现在保真降级：type 恒为
                     # `unsupported`，kind 与受限长度的 raw 都留下来，能解析的卡片
                     # 另外把标题/摘要拼进 content（PB）。
-                    body=card_summary(data)
-                    parts.append('['+label(kind)+('：'+body if body else '')+']')
-                    segments.append(unsupported(kind,data,raw_budget))
+                    # issue #311：卡片的跳转地址也进 content（`[卡片：标题 → 链接]`），
+                    # 占位写法与引用/转发节点共用 card_text()，不在两处各拼一份；
+                    # 先建段再把段交给 card_text，链接预算只扣一次、两处长度必然一致。
+                    segment=unsupported(kind,data,raw_budget)
+                    segments.append(segment)
+                    parts.append(card_text(kind,data,segment))
         else:return
         content=''.join(parts)
         # issue #39: the upstream card/nickname can be QQ quote-bubble UI text

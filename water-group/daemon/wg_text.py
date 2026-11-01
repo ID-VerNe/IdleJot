@@ -61,7 +61,9 @@ PLACEHOLDERS = (
     # 是给人扫的一行，卡片标题那种几十字的东西不该占掉正文额度——剥成短替代，
     # 原始体与类型仍走 `--show`（`unsupported_lines`）。`[卡片…]` 在表里必须
     # 排在 `[不支持…]` 之后，两条互不重叠，顺序只为读起来顺。
-    (re.compile(r"\[卡片[^\]]*\]|\[分享[^\]]*\]|\[位置[^\]]*\]|\[名片[^\]]*\]|\[音乐[^\]]*\]"), "[卡片]"),
+    # issue #311：占位里现在还有跳转地址（最长 400 字），markdown 卡片原先不在
+    # 表里——不补这一条，一张 markdown 卡片的 URL 就能把 80 字的唤醒行吃干净。
+    (re.compile(r"\[卡片[^\]]*\]|\[分享[^\]]*\]|\[位置[^\]]*\]|\[名片[^\]]*\]|\[音乐[^\]]*\]|\[Markdown[^\]]*\]"), "[卡片]"),
     (re.compile(r"\[不支持:[^\]]*\]"), "[非文本]"),
 )
 
@@ -76,6 +78,18 @@ def clip():
         sys.path.insert(0, str(ROOT))
     from chatlocal.text_limits import clip as _clip
     return _clip
+
+
+def segments_module():
+    """`chatlocal.onebot_segments` 的延迟导入门面（同 `clip()` 范式，issue #311）。
+
+    链接与标题的解析口径只有 chatlocal 那一份：daemon 侧不另写一套正则，
+    否则「入库时的链接」与「补读时的链接」迟早是两个答案。
+    """
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from chatlocal import onebot_segments
+    return onebot_segments
 
 
 def connect_ro(path, *, timeout=5.0):
@@ -243,6 +257,10 @@ def unsupported_lines(segments):
     content 那句 `[卡片：标题]` 只说得出「是什么」；原始体留没留、留了多少，
     只有段上知道。这里逐段报「类型 + 原始体状态」，让「这条我收到的是空壳」
     变成可判断的结论——`raw_truncated` 是实话，不许改写成「无原始体」。
+
+    issue #311：卡片指向的跳转地址单独一行打出来。段上有 `url` 就用它；#311 之前
+    落库的历史行没有这个字段，回落成从 `raw` 现算——与 `card_summary(seg['raw'])`
+    在渲染侧的回落同一个范式，否则老卡片仍然只报字数、补读不到链接。
     """
     lines = []
     for segment in segments or []:
@@ -256,6 +274,13 @@ def unsupported_lines(segments):
         else:
             reason = "原始体超预算未保留" if segment.get("raw_truncated") else "无原始体"
             lines.append(f"（段 {kind}：{reason}）")
+        link = segment.get("url")
+        truncated = bool(segment.get("url_truncated"))
+        if not isinstance(link, str) or not link:
+            fields = segments_module().link_fields(kind, raw)
+            link, truncated = fields.get("url", ""), bool(fields.get("url_truncated"))
+        if link:
+            lines.append(f"链接{'（已截断）' if truncated else ''}：{link}")
     return lines
 
 

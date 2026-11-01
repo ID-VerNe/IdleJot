@@ -33,6 +33,26 @@ rows, ``[n/total]`` numbering, summary, exit code -- is what is under test:
 5. ``--jobs`` also works on a subset (``--shard``), so CI's per-shard invocation
    keeps the same semantics as the local full run.
 
+Wall-clock is a *coarse* sieve and it is judged **relative to the serial baseline
+measured in the same run** (issue #347): ``_run()`` times a whole subprocess, so
+the absolute constant ``4 x STUB_SLEEP x 0.9`` used to leave interpreter start-up
+and thread-pool dispatch out of the budget and turned correct parallel runs red on
+this machine (1.08-1.52s against a 1.08s line).
+
+The ratio is still only an indirect signal, and on a loaded machine it is a bad
+one: two lanes want two cores, so when the box is saturated the second wave gets
+half a core and ``--jobs 2`` saves 25-35% instead of 50% (measured 0.65-0.75,
+issue #339). Relaxing the check to "any faster than serial" fixes that false red
+but removes the check entirely — a de-parallelised runner still wins tens of
+milliseconds of scheduling jitter. So the two signals are split by *what they
+prove* (``_judge_parallel``): ``pairs`` proving overlap is enough on its own,
+and the ratio only decides when ``pairs`` found nothing. A run slower than its
+own serial baseline is red either way.
+
+This gate is itself in ``run_gates.EXCLUSIVE`` (issue #347): it measures parallel
+timing, so running it inside the very pool it measures would measure the pool's
+scheduling instead of the implementation.
+
     .venv/Scripts/python.exe scripts/check_run_gates_parallel.py
     .venv/Scripts/python.exe scripts/check_run_gates_parallel.py --self-test
 """
@@ -58,6 +78,9 @@ import run_gates  # noqa: E402  (only for EXCLUSIVE; the run itself is a subproc
 OVERLAP_SLACK = 0.05
 # 桩门禁睡多久。够长到让调度抖动淹没不掉重叠，又短到整套用例几秒跑完。
 STUB_SLEEP = 0.30
+# 墙钟判据的松紧（issue #347）。两条泳道跑 4 条等长桩，理论时长正好是串行的一半；
+# 运行时再打三成余量给负载抖动——越过这条线就不是「波动」了，是「没并行」。
+PARALLEL_SLACK = 1.30
 
 _STUB_TEMPLATE = '''\
 import sys, time
@@ -160,6 +183,34 @@ def _clear_traces(root):
         trace.unlink()
 
 
+def _parallel_fast_enough(serial_elapsed, parallel_elapsed):
+    """并行那一趟是否真的比串行基线省了时间（issue #347）。
+
+    判据**相对同一次运行的串行基线**，不用绝对常数。`_run()` 计的是整次子进程墙钟，
+    里面包着「解释器启动 + 导入 run_gates 全部依赖 + 线程池调度 + 每个子桩解释器启动」
+    这些与被测语义无关的固定开销：本机实测光是起 `run_gates.py --list` 就 ~0.16s，
+    每个桩子解释器 0.36–0.38s（不是 `STUB_SLEEP` 的 0.30s）。原来的绝对阈值
+    `4 × STUB_SLEEP × 0.9 = 1.08s` 把这堆开销一分不算，本机落点 1.08–1.52s 正骑在
+    线上，于是「真的并行了」被判成「没并行」（issue 里连 5 次 5 红）。
+
+    分母取 `--jobs 1` 那一趟：同样是 4 条桩、同样的解释器启动与调度开销，机器快慢
+    与空载/满载的差异在相除时被约掉，只剩「并行有没有真的把两波叠成一波」。
+
+    **它是粗筛，不是判据本身**。本机满载（同机既有 parity/门禁在跑）实测比值落在
+    0.65–0.75（#339 记录 0.65/0.72，本 PR 复现 0.75）：两条泳道各要一个核，机器被占满
+    时第二波只能分到半份 CPU 时间，于是「并行了但没省一半」。那种情况**不是实现的问题**，
+    所以调用点用 `pairs`（两条泳道在时间轴上真的重合过）兜底，只在 `pairs` 也没抓到
+    重叠时才把墙钟当证据——见 `scan()` 里 `--jobs 2` 那一段。
+
+    边界（在 docstring 里声明，不声称「任何错都红」）：一个「串行跑完 4 条、再空等
+    到正好半程」的实现能耗掉这里的额度。它拦不住，但 `pairs` 会——两条泳道从未
+    同时在场。两者组合起来才钉住并行性，本函数只做粗筛。
+    """
+    if serial_elapsed <= 0:
+        return False
+    return parallel_elapsed <= serial_elapsed / 2 * PARALLEL_SLACK
+
+
 def _summary_rows(out):
     """抽结果表（`| # | 门禁 | 结果 | 耗时 |`）里按行号排好的 `(行号, 名字, 结果)`。
 
@@ -181,6 +232,46 @@ def _summary_rows(out):
         token = cells[1].strip('`').split(' ')[0]
         rows.append((int(cells[0]), token[:-3] if token.endswith('.py') else token, cells[2]))
     return rows
+
+
+def _judge_parallel(serial_elapsed, parallel_elapsed, pairs):
+    """`--jobs 2` 这一趟算不算「真的并行了」——返回 `(是否通过, 备注, 失败原因)`。
+
+    两条证据，**分工不同、不许互相替代**（issue #347 / #339）：
+
+    * `pairs`：两条泳道在时间轴上真的重合过。这是**直接**证据，抓到就是并行；
+    * 墙钟比值：最大的一笔间接证据，只在 `pairs` 什么都没抓到时才拿来定性。
+
+    为什么不能让墙钟单独判红：机器被别的门禁占满时，第二波泳道只分到半份 CPU，
+    `--jobs 2` 只省 25-35%（本机满载实测 0.75，满负荷记录 0.65/0.72），于是真并行
+    被判成没并行——#339 当年就是撞上这个才把判据放宽成 `elapsed < serial_elapsed`。
+    但那条放宽等于取消防线：退化成一条泳道时，`--jobs 2` 照样比 `--jobs 1` 快几十
+    毫秒的调度抖动。把「谁作证」分开，两头的错都堵上。
+
+    反过来也不许让 `pairs` 吃掉墙钟的额度：`pairs` 有重叠但墙钟**慢过串行基线**，
+    那说明两次执行根本没并行到该有的程度（或者重叠判定本身坏了），仍判红。
+
+    已知边界：`pairs` 抓到重叠时，这里不再对「省了多少时间」设上界，一个「并行但
+    串行化写 trace」的实现能过。`pairs` 才是那条契约的主人，本函数只补它看不出的
+    「时间上一分没省」。
+    """
+    notes, failures = [], []
+    ratio = parallel_elapsed / serial_elapsed if serial_elapsed else 0.0
+    if parallel_elapsed >= serial_elapsed:
+        failures.append(
+            f'--jobs 2: {parallel_elapsed:.2f}s vs serial baseline {serial_elapsed:.2f}s '
+            f'-- no faster than serial at all')
+    elif not _parallel_fast_enough(serial_elapsed, parallel_elapsed):
+        if pairs:
+            notes.append(
+                f'--jobs 2 {parallel_elapsed:.2f}s is {ratio:.2f}x serial despite overlapped '
+                f'{pairs} -- machine was saturated, overlap is the evidence here')
+        else:
+            failures.append(
+                f'--jobs 2: {parallel_elapsed:.2f}s vs serial baseline {serial_elapsed:.2f}s '
+                f'-- not parallel (expected <= '
+                f'{serial_elapsed / 2 * PARALLEL_SLACK:.2f}s)')
+    return not failures, notes, failures
 
 
 def scan(root):
@@ -211,7 +302,15 @@ def scan(root):
         failures.append(f'--jobs 1: must pass, exit={code}\n{out}')
     if _overlaps(_spans(tree)):
         failures.append(f'--jobs 1: overlapped {_overlaps(_spans(tree))}')
-    notes.append(f'--jobs 1 {serial_elapsed:.2f}s')
+    # 这一趟同时充当 `--jobs 2` 的分母（issue #347）：同样 4 条桩、同样包着解释器启动
+    # 与线程池开销，只是没有并行——相除就只剩「并行省了多少」。
+    # 分母自己得先站得住：桩要是没睡够（被替换成空实现、或机器把 sleep 吞了），后面那个
+    # 比值就是个拿废基线做除数的数，两边一起变小反而更容易「通过」。
+    if serial_elapsed < 4 * STUB_SLEEP * 0.9:
+        failures.append(
+            f'--jobs 1: {serial_elapsed:.2f}s for 4 x {STUB_SLEEP}s -- stubs did not sleep '
+            f'(the parallel ratio below would divide by a bogus baseline)')
+    notes.append(f'--jobs 1 {serial_elapsed:.2f}s (baseline)')
 
     # --- 2. --jobs 2 真重叠（同分片的两条也要并起来），结果表仍按清单顺序 ---
     _clear_traces(tree)
@@ -223,16 +322,20 @@ def scan(root):
         failures.append('--jobs 2: no two gates overlapped -- parallelism is a no-op')
     if [name for _, name, _ in _summary_rows(out)] != order_expected:
         failures.append(f'--jobs 2: results not in manifest order {_summary_rows(out)}')
-    # 墙钟只做粗筛（两条泳道两波，加上解释器启动），重叠量由上面的 pairs 钉住。
-    # **并行性由 pairs 断言，墙钟不承担这条**：`--jobs 2` 与 `--jobs 1` 的差值只有
-    # `2 * STUB_SLEEP`（0.6s），而解释器启动、进程回收与整机负载极易吃掉它——满负荷
-    # 跑全量门禁时实测 1.11s/1.22s，与串行的 1.7s 只差半秒，却会被当成「没并行」
-    # 判红（issue #339）。所以这里只留一道防线：真的退化成串行（≈`--jobs 1` 的墙钟）
-    # 才判红。
-    if elapsed >= serial_elapsed:
-        failures.append(
-            f'--jobs 2: {elapsed:.2f}s for 4 x {STUB_SLEEP}s -- not parallel')
-    notes.append(f'--jobs 2 {elapsed:.2f}s, overlapped {pairs}')
+    # 墙钟只做粗筛，且**相对同一次运行的串行基线**判（issue #347）。重叠量由上面的
+    # `pairs` 钉住，这里只回答「有没有省下接近一半的时间」。
+    #
+    # 别退回绝对常数：`4 × STUB_SLEEP × 0.9` 只算桩 sleep、不算进程启动，而 `_run()`
+    # 记的是整次子进程墙钟（解释器启动 + 导入依赖 + 线程池调度 + 4 个子桩解释器起跑），
+    # 本机固定开销约 0.5s → 落点 1.08-1.52s 正骑在 1.08s 那条线上，真并行也判红。
+    # 也别退回「只要比串行快就算过」（issue #339 当时的放宽）：两条泳道退化成一条时，
+    # `--jobs 2` 照样比 `--jobs 1` 快几十毫秒的调度抖动，那条线等于没有。
+    # 两条证据怎么分工见 `_judge_parallel`。
+    _, judged_notes, judged_failures = _judge_parallel(serial_elapsed, elapsed, pairs)
+    notes.extend(judged_notes)
+    failures.extend(judged_failures)
+    notes.append(f'--jobs 2 {elapsed:.2f}s, overlapped {pairs}, '
+                 f'{elapsed / serial_elapsed if serial_elapsed else 0:.2f}x of serial')
 
     # --- 3. EXCLUSIVE 独占收尾 ---
     # 桩门禁必须与 `EXCLUSIVE` 同名才会被摘出来，所以这条只能拿 `EXCLUSIVE` 里的真名
@@ -358,6 +461,85 @@ def _self_test():
     touching = [('a', 0.0, 1.0), ('b', 1.0, 2.0)]
     if _overlaps(touching):
         print(f'SELF-TEST FAIL back-to-back runs counted as overlap: {_overlaps(touching)}')
+        return 1
+    return _self_test_timing()
+
+
+# 墙钟判据的数值对照（issue #347）：不跑子进程，直接喂 `(串行, 并行)` 两组数。
+# 分界在串行基线的一半再放三成；实测两侧：真并行 0.53-0.62x，机器满载 0.65-0.75x，
+# 退化回串行 0.95-1.0x。判据必须在「真并行」与「退化」之间分开，且不把满载当退化。
+_TIMING_CASES = [
+    # (串行, 并行, 期望「算并行」)
+    (4.00, 1.90, True),    # 4 x 0.30s 桩、真并行：理论半程 + 一点抖动
+    (2.07, 1.19, True),    # 本机空载实测（issue #347 的失败行改成相对判据后应转绿）
+    (3.92, 1.52, True),    # 本机 --jobs 1 基线那次
+    (4.00, 2.80, False),   # 省了 30%：半程的 1.4 倍，越过 PARALLEL_SLACK
+    (4.00, 3.80, False),   # 退化回串行：比值 0.95
+    (4.00, 4.00, False),   # 完全没有并行
+]
+
+# 组合语义对照（issue #347 × #339）：`pairs` 与墙钟谁作证。**逐分支**覆盖，
+# 每个「该红」都配一个「不该红」，否则改出个恒红/恒绿都能骗过自检。
+# (串行, 并行, pairs, 期望通过, 说明)
+_JUDGE_CASES = [
+    (4.00, 1.90, [('a', 'b')], True, '真并行 + 抓到重叠'),
+    (2.07, 1.19, [('a', 'b')], True, '本机空载实测点'),
+    # 满载：比值 0.75 判不过墙钟，但两条泳道确实重合过 → 不许判红（#339 的现场）
+    (2.36, 1.78, [('a', 'b')], True, '满载 0.75x，靠重叠作证'),
+    (1.70, 1.11, [('a', 'b')], True, '#339 记录的满载点 0.65x'),
+    (1.70, 1.22, [('a', 'b')], True, '#339 记录的满载点 0.72x'),
+    # 没抓到重叠、墙钟也没省时间 → 必须红（这是墙钟唯一还能当证据的场合）
+    (4.00, 3.80, [], False, '退化回串行且无重叠'),
+    (4.18, 3.93, [], False, '满载且无重叠：两条证据都没有'),
+    # 抓到重叠、但墙钟慢过串行基线 → 仍然红（不许让 pairs 吃掉墙钟的额度）
+    (2.00, 2.00, [('a', 'b')], False, '重叠但一点也不比串行快'),
+    (2.00, 2.40, [('a', 'b')], False, '重叠但比串行还慢'),
+]
+
+
+def _self_test_timing():
+    """A/B 对照：判据对「真并行 / 退化回串行」两侧都给出正确结论，且组合语义逐分支对。"""
+    failures = []
+    for serial, parallel, expected in _TIMING_CASES:
+        got = _parallel_fast_enough(serial, parallel)
+        if got != expected:
+            failures.append(
+                f'timing judge wrong for serial={serial}s parallel={parallel}s: '
+                f'got {got}, expected {expected}')
+    # 除零护栏：基线为 0 时不许当成「并行」放行。
+    if _parallel_fast_enough(0.0, 0.001):
+        failures.append('timing judge approved a run with a zero serial baseline')
+    # 组合语义：pairs 与墙钟的分工。每条都单独断言，红在哪一支一眼可见。
+    for serial, parallel, pairs, expected, label in _JUDGE_CASES:
+        passed, _notes, _failures = _judge_parallel(serial, parallel, pairs)
+        if passed != expected:
+            failures.append(
+                f'judge wrong for serial={serial}s parallel={parallel}s pairs={pairs or "none"} '
+                f'({label}): got {passed}, expected {expected}')
+    # 判据完整性自检：阈值一旦被写死成常数（就是 #347 那个 bug），这里必须跟着翻。
+    # 两边结论相同时说明判据要么退化成常数、要么和常数同形——都不许算过。
+    for serial, parallel in ((6.00, 1.52), (3.20, 1.40)):
+        if _parallel_fast_enough(serial, parallel) == (
+                parallel <= 4 * STUB_SLEEP * 0.9):
+            failures.append(
+                f'timing judge degenerates to the absolute constant at '
+                f'serial={serial}s parallel={parallel}s -- #347 regression')
+    # 组合语义不许退化成「只看 one 条证据」：把 pairs 恒为空 / 恒非空各试一遍，
+    # 结论必须随之一分为二，否则说明函数根本没在用 pairs（或根本没在用墙钟）。
+    with_pairs = _judge_parallel(2.36, 1.78, [('a', 'b')])[0]
+    without_pairs = _judge_parallel(2.36, 1.78, [])[0]
+    if with_pairs == without_pairs:
+        failures.append(
+            'judge ignores pairs: same verdict with and without overlap '
+            f'({with_pairs}) -- it is reading only one of the two signals')
+    slow_with_pairs = _judge_parallel(2.00, 2.40, [('a', 'b')])[0]
+    if slow_with_pairs:
+        failures.append(
+            'judge ignores wall clock: a run slower than the serial baseline passed '
+            'just because two gates overlapped -- #339-style blanket relaxation is back')
+    if failures:
+        for line in failures:
+            print(f'SELF-TEST FAIL {line}')
         return 1
     print('SELF-TEST OK runner parallelism A/B fixtures behaved as designed')
     return 0

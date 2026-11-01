@@ -61,6 +61,11 @@ def _load_repeater() -> Plugin:
     return module.PLUGIN
 
 
+def _load_bilibili() -> Plugin:
+    import plugins.bilibili_plugin as module
+    return module.PLUGIN
+
+
 # 名字在这里出现一次，是为了让失败也能报到具体插件上（note_error(name)）。
 LOADERS = (
     ("miyoushe", _load_miyoushe),
@@ -68,6 +73,7 @@ LOADERS = (
     ("followup", _load_followup),
     ("busboss", _load_busboss),
     ("repeater", _load_repeater),
+    ("bilibili", _load_bilibili),
 )
 
 # 事件型插件（issue #4 PD2a）：没有 ``#`` 指令，宿主在通用流程点派发命名事件。

@@ -35,6 +35,20 @@ PUBLIC_PARTS = {'documents', '文档', 'onedrive', 'tencent files', 'tencent', '
                 'msg3.0.db', 'msg2.0.db', 'userdatainfo.ini', 'userdata.ini'}
 
 
+def _hidden_kwargs():
+    """把「不开窗」两半都拼上：`CREATE_NO_WINDOW` 管分配，`STARTF_USESHOWWINDOW`
+    + `SW_HIDE` 管显示。只给前者时窗口仍可能被显示出来（issue #353 的现场就是
+    这个半吊子拼法）。本脚本要在**目标安装**的 Python 下跑，未必带着
+    `water-group/daemon/winconsole.py`，所以这里本地拼写，不 import。"""
+    kwargs = {'creationflags': getattr(subprocess, 'CREATE_NO_WINDOW', 0)}
+    if os.name == 'nt':
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        kwargs['startupinfo'] = startupinfo
+    return kwargs
+
+
 def error_info(exc):
     # Deliberately omit str(exc), source lines, locals, arbitrary paths and logs.
     result = dict(type=type(exc).__name__)
@@ -206,7 +220,7 @@ $rows=@(Get-CimInstance Win32_Process -Filter "Name='QQ.exe' OR Name='QQNT.exe'"
 })
 ConvertTo-Json -InputObject $rows -Compress'''
     result = subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',command],
-        capture_output=True, timeout=12, encoding='utf-8', errors='replace', creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        capture_output=True, timeout=12, encoding='utf-8', errors='replace', **_hidden_kwargs())
     if result.returncode:return dict(state='query_failed',processes=[])
     return dict(state='ok',processes=json.loads(result.stdout))
 

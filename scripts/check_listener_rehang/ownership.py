@@ -16,6 +16,7 @@ from ._common import (
     PRIVATE_HOME, _PRE_WGH, _PRE_IWGH, _live_private_home,
     CASES,
     listen, reply, up, wg_budget, wg_up_probe,
+    kill_tree, git_hidden,
 )
 
 
@@ -138,8 +139,7 @@ def 别的树里的监听不算已有监听():
                       and plain in pids and plain in specs)
         finally:
             for proc in procs:
-                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                               capture_output=True)
+                kill_tree(proc.pid)
     return ok
 
 
@@ -338,8 +338,7 @@ def 本树门禁临时监听不算已有监听():
                     and plain in pids and plain in specs)
         finally:
             for proc in procs:
-                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                               capture_output=True)
+                kill_tree(proc.pid)
 
 
 @case
@@ -429,8 +428,7 @@ def 嵌套worktree里的监听不算已有监听():
                     and mine in pids and mine in specs)
         finally:
             for proc in procs:
-                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                               capture_output=True)
+                kill_tree(proc.pid)
             shutil.rmtree(slot, ignore_errors=True)
 
 
@@ -454,10 +452,10 @@ def 非约定路径的注册worktree不算已有监听():
     nested = Path(tempfile.mkdtemp(prefix="nested-", dir=str(ROOT / ".tmp")))
     procs = []
     try:
-        add = subprocess.run(["git", "-c", "core.quotepath=false", "worktree",
-                              "add", "--detach", str(nested)],
-                             cwd=str(ROOT), capture_output=True, text=True,
-                             encoding="utf-8", errors="replace", timeout=120)
+        add = git_hidden(["-c", "core.quotepath=false", "worktree",
+                          "add", "--detach", str(nested)],
+                         cwd=str(ROOT), text=True,
+                         encoding="utf-8", errors="replace", timeout=120)
         if add.returncode != 0:
             print(f"  git worktree add 失败：{(add.stderr or add.stdout).strip()}")
             return False
@@ -483,10 +481,8 @@ def 非约定路径的注册worktree不算已有监听():
         return foreign not in pids and foreign not in specs
     finally:
         for proc in procs:
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                           capture_output=True)
-        subprocess.run(["git", "worktree", "remove", "--force", str(nested)],
-                       cwd=str(ROOT), capture_output=True, timeout=60)
-        subprocess.run(["git", "worktree", "prune"],
-                       cwd=str(ROOT), capture_output=True, timeout=60)
+            kill_tree(proc.pid)
+        git_hidden(["worktree", "remove", "--force", str(nested)],
+                   cwd=str(ROOT), timeout=60)
+        git_hidden(["worktree", "prune"], cwd=str(ROOT), timeout=60)
         shutil.rmtree(nested, ignore_errors=True)

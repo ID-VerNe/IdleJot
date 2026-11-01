@@ -1,4 +1,5 @@
 """Process identities and owned children on Linux; no shell or privilege changes."""
+import copy
 import os
 from pathlib import Path
 import signal
@@ -10,6 +11,40 @@ import sys
 # box issue #39 is about. Every spawn in this package goes through one of the two
 # helpers below so the flag is written once, not once per call site.
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+
+# The flag above governs whether a console is *allocated*; it does not govern
+# whether one is *shown* (issue #319, measured 2026-11-01). The display state is
+# the other half, and it is what removes "which console program is this" from the
+# question entirely:
+SW_HIDE = 0
+STARTF_USESHOWWINDOW = getattr(subprocess, 'STARTF_USESHOWWINDOW', 0)
+
+
+def _hidden_startupinfo(startupinfo=None):
+    """A STARTUPINFO asking for a hidden window, or None off Windows.
+
+    Copies rather than shares the caller's struct: two concurrent spawns must not
+    write the show-state into one object, and a caller that set `dwFlags` or
+    `lpDesktop` keeps it. Every other field is left as it was.
+    """
+    if os.name != 'nt':
+        return startupinfo
+    info = copy.copy(startupinfo) if startupinfo is not None else subprocess.STARTUPINFO()
+    info.dwFlags |= STARTF_USESHOWWINDOW
+    info.wShowWindow = SW_HIDE
+    return info
+
+
+def _hidden_kwargs(kwargs):
+    """`kwargs` with both halves of the window suppression applied.
+
+    `startupinfo` is overwritten rather than defaulted: `setdefault` would keep
+    the caller's struct as-is, and a caller that had one would then get the flag
+    without the show-state -- the exact hole issue #319 left open.
+    """
+    kwargs['creationflags'] = kwargs.get('creationflags', 0) | NO_WINDOW
+    kwargs['startupinfo'] = _hidden_startupinfo(kwargs.get('startupinfo'))
+    return kwargs
 
 
 def linux_identity(pid):
@@ -36,16 +71,15 @@ def run_hidden(args, **kwargs):
     """`subprocess.run` for a one-shot console child: no window of its own.
 
     Parsers and account detectors are children we only wait for, so they need the
-    flag but not the ownership wrapper. POSIX passes creationflags=0, which the
-    stdlib accepts.
+    flags but not the ownership wrapper. POSIX passes creationflags=0 and no
+    startupinfo, which the stdlib accepts.
     """
-    kwargs['creationflags'] = kwargs.get('creationflags', 0) | NO_WINDOW
-    return subprocess.run(args, **kwargs)
+    return subprocess.run(args, **_hidden_kwargs(kwargs))
 
 
 def owned_popen(args, *, memory_bytes=0, **kwargs):
     if os.name == 'nt':
-        return subprocess.Popen(args, creationflags=NO_WINDOW, **kwargs)
+        return subprocess.Popen(args, **_hidden_kwargs(kwargs))
     wrapper = Path(__file__).with_name('posix_child.py')
     # Isolate this stdlib-only bootstrap: its directory contains collections.py,
     # which must never shadow Python's collections during interpreter startup.

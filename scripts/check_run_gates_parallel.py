@@ -60,6 +60,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -81,6 +82,9 @@ STUB_SLEEP = 0.30
 # 墙钟判据的松紧（issue #347）。两条泳道跑 4 条等长桩，理论时长正好是串行的一半；
 # 运行时再打三成余量给负载抖动——越过这条线就不是「波动」了，是「没并行」。
 PARALLEL_SLACK = 1.30
+# 片头那一行（`run_gates.run_ci` 打进控制台的那句）。捕获组取**实际生效的并发度**：
+# 断言钉的是这个数字，不是「输出里出现过 并行」。
+BANNER_RE = re.compile(r'门禁\s+\d+\s+条.*?(?:并行\s+(\d+)|(串行))')
 
 _STUB_TEMPLATE = '''\
 import sys, time
@@ -132,12 +136,15 @@ def _build_tree(root, names, shard='only'):
     return root
 
 
-def _run(root, args, timeout=180):
+def _run(root, args, timeout=180, console_only=False):
     """以子进程跑真 `run_gates.py`，返回 `(退出码, 结果表原文, 秒数)`。
 
     结果表**只写 `$GITHUB_STEP_SUMMARY`**，本机 stdout 上只有 `[n/total] …` 行
     （那是跑完瞬间打的，并行下完成先后天然乱序）。所以这里给每次运行塞一个
     临时 summary 文件、跑完读回来——断言的就是 CI 真正看到的那个契约面。
+
+    `console_only=True` 时改回 `(退出码, 控制台原文, 秒数)`：片头（`并行 N` / `串行`）
+    是打到控制台的，summary 里没有；要断言它就取这一份（issue #317）。
     """
     runner = root / 'scripts' / 'run_gates.py'
     runner.write_text(RUNNER.read_text(encoding='utf-8'), encoding='utf-8')
@@ -154,7 +161,29 @@ def _run(root, args, timeout=180):
     elapsed = time.perf_counter() - tick
     console = (proc.stdout or '') + (proc.stderr or '')
     table = summary.read_text(encoding='utf-8') if summary.is_file() else ''
-    return proc.returncode, table or ('NO SUMMARY\n' + console), elapsed
+    body = console if console_only else (table or ('NO SUMMARY\n' + console))
+    return proc.returncode, body, elapsed
+
+
+def _banner_line(console):
+    """片头那行（`并行 N` 或 `串行`），找不到返回 `None`。"""
+    for line in console.splitlines():
+        if BANNER_RE.search(line):
+            return line.strip()
+    return None
+
+
+def _banner_width(console):
+    """片头报的并发度：`并行 N` 取 N，`串行` 取 1，没片头返回 `None`。
+
+    用捕获组取数字而不是判子串：`"并行 2" in text` 挡不住「片头写 并行 999、
+    事后补一行 并行 2」这种输出，那种输出对读者与坏实现同害（#151 的老坑）。
+    """
+    line = _banner_line(console)
+    if line is None:
+        return None
+    match = BANNER_RE.search(line)
+    return int(match.group(1)) if match.group(1) else 1
 
 
 def _spans(root):
@@ -441,6 +470,45 @@ def scan(root):
     if [name for _, name, _ in _summary_rows(out)] != ['stub_a', 'stub_b', 'stub_c', 'stub_d']:
         failures.append(f'--shard --jobs: order drifted {_summary_rows(out)}')
     notes.append(f'--shard only --jobs 4 {elapsed:.2f}s')
+
+    # --- 6. --jobs 钳到 CPU 数（issue #317 追评）---
+    # 超配不报错、只是不生效；但「钳了几条」必须在**界面契约**上看得见：几核机、
+    # 每条门禁一个子进程，二者差得越远，写 `--jobs 999` 的人越该知道实际跑了几条。
+    tree = _build_tree(base / 'clamp', ['stub_a', 'stub_b'])
+    code, banner, _elapsed = _run(tree, ['ci', '--jobs', '999'], console_only=True)
+    effective = run_gates.effective_jobs(999)
+    cores = os.cpu_count() or 0
+    if code != 0:
+        failures.append(f'--jobs 999: must still pass, exit={code}\n{banner}')
+    if not (1 <= effective <= max(cores, 1)):
+        failures.append(f'--jobs 999: effective {effective} is outside the machine ({cores} cores)')
+    if effective != min(999, cores or 999):
+        failures.append(f'--jobs 999: effective {effective} is not min(999, {cores} cores)')
+    # 钉的是**片头那一行的实际生效值**，不是「输出里出现过 并行」——后者在
+    # `--jobs 999` 报成 `并行 2` 时照样成立。
+    if _banner_width(banner) != effective:
+        failures.append(
+            f'--jobs 999: the banner must report the effective width {effective}, got '
+            f'{_banner_width(banner)!r} (banner line: {_banner_line(banner)!r})')
+    # 对照组：不许把「钳制」说成「按你要的跑」。片头写 999 就是假话。
+    if f'999' in (_banner_line(banner) or ''):
+        failures.append(
+            f'--jobs 999: banner echoed the requested width instead of the effective one: '
+            f'{_banner_line(banner)!r}')
+    # 对照组 2：串行档（默认）不许被钳制逻辑改成并行——`effective_jobs(1) == 1`。
+    code, banner, _elapsed = _run(tree, ['ci', '--jobs', '1'], console_only=True)
+    if code != 0:
+        failures.append(f'--jobs 1: must still pass, exit={code}\n{banner}')
+    if _banner_width(banner) != 1:
+        failures.append(
+            f'--jobs 1: serial must stay serial, banner said {_banner_line(banner)!r}')
+    if run_gates.effective_jobs(0) != 0:
+        failures.append(
+            f'effective_jobs(0) = {run_gates.effective_jobs(0)} -- a non-positive width is '
+            f'the caller\'s value, not something to clamp up')
+    notes.append(
+        f'--jobs 999 clamped to 并行 {effective} ({cores} cores); '
+        f'--jobs 1 stayed 串行; effective_jobs(0)=0')
     return failures, notes
 
 
@@ -537,12 +605,44 @@ def _self_test_timing():
         failures.append(
             'judge ignores wall clock: a run slower than the serial baseline passed '
             'just because two gates overlapped -- #339-style blanket relaxation is back')
+    # 钳制判据与墙钟判据各管一路，两边都跑完再统一报——中间提前 return 会让
+    # 「墙钟坏了」把钳制的问题一起盖住，得改两次才发现第二处。
+    failures.extend(_self_test_clamp())
     if failures:
         for line in failures:
             print(f'SELF-TEST FAIL {line}')
         return 1
     print('SELF-TEST OK runner parallelism A/B fixtures behaved as designed')
     return 0
+
+
+def _self_test_clamp():
+    """`effective_jobs` 的数值对照（issue #317 追评）：钳制只许作用在既有的显式开关上。
+
+    三条边界各配一个反例，免得改出个「恒返回 cpu_count」（会把 `--jobs 1` 擅自变成
+    并行）或「恒返回 requested」（钳制名存实亡）都能骗过自检。
+    """
+    failures = []
+    cores = os.cpu_count() or 1
+    cases = [
+        (1, 1),                     # 默认/显式串行：原样，绝不放大
+        (0, 0),                     # 非法值也原样返回，由 main() 报错，这里不替它兜
+        (999, min(999, cores)),     # 超配：钳到核数
+        (2, min(2, cores)),         # 正常并行档
+    ]
+    for requested, expected in cases:
+        got = run_gates.effective_jobs(requested)
+        if got != expected:
+            failures.append(
+                f'effective_jobs({requested}) = {got}, expected {expected} (machine has {cores})')
+    # 判据完整性：钳制必须真的依赖核数——改成恒返回 requested 时，超配那一条要翻。
+    if run_gates.effective_jobs(10 ** 6) - run_gates.effective_jobs(2) == 10 ** 6 - 2:
+        failures.append('effective_jobs ignores the core count: clamping is a no-op')
+    # 也不许反过来把串行放大：恒返回 cpu_count 的实现会在这里翻红。
+    if run_gates.effective_jobs(1) != 1:
+        failures.append(
+            f'effective_jobs(1) = {run_gates.effective_jobs(1)}: --jobs 1 must stay serial')
+    return failures
 
 
 def run(root):

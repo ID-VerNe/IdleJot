@@ -28,7 +28,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
+from check_fixture_support import pin_conversation, pin_state_env, scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False)
 
 TMP = scratch_dir(prefix="wg_image_")
@@ -37,9 +37,14 @@ STATE = TMP / "state"
 (STATE / "images").mkdir(parents=True)
 SID = "session-fixture"
 SELF = "10001"
+GROUP = "123"
 
 os.environ["TULPA_WG_DB"] = str(DB)
 pin_state_env(STATE)  # state 两腿都钉（#281：IDLEJOT 先于 TULPA，单钉一条会被外部穿透）
+# 本会话只管 GROUP：不钉的话，本机 config.json 恰好只有一个启用群时 wg_isolation
+# 会落到 config:唯一启用群，唤醒行用例里没有 conversation_id 的事件被当成外群滤空
+# （issue #316）。钉了之后本机与干净 checkout 走同一条路。
+pin_conversation(f"{SELF}:group:{GROUP}", STATE)
 
 import followup  # noqa: E402
 import up  # noqa: E402
@@ -217,12 +222,39 @@ def 追问行带图片提示():
             and f"look.py --event {EID_MEDIA} " not in text)
 
 
-@case
-def 唤醒行端到端带图片提示():
-    """watch.py 唤醒行：图片后缀必须跟在正文后面印出来。"""
+@contextlib.contextmanager
+def pinned_conversation(group):
+    """临时把本会话钉到 ``group``（反向自检用）：env 与 <state> 两腿一起改。"""
+    import wg_isolation
+    saved = {key: os.environ.get(key) for key in wg_isolation.CONVERSATION_ENV}
+    file = STATE / wg_isolation.CONVERSATION_FILE
+    existed = file.read_text(encoding="utf-8") if file.exists() else None
+    try:
+        pin_conversation(f"{SELF}:group:{group}", STATE)
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        if existed is None:
+            file.unlink(missing_ok=True)
+        else:
+            file.write_text(existed, encoding="utf-8")
+
+
+def run_watch(group=None):
+    """写唤醒事件并进程内跑一次 ``watch.main()``，返回 ``(输出, 退出码)``。
+
+    ``group`` 是反向自检用的临时会话群；默认走夹具钉死的那一个（issue #316）。
+    事件自带 ``conversation_id``（#255：缺键一律当外群，夹具不该靠「缺键恰好
+    被放行」通过），能不能被叫醒只取决于会话钉在哪个群。
+    """
     (STATE / "wg_events.jsonl").write_text(json.dumps({
         "id": EID_WAKE, "sender": "群友丁", "content": "[图片] 看这个",
         "timestamp": NOW_MS, "is_self": False,
+        "conversation_id": f"{SELF}:group:{GROUP}",
         "segments": [{"type": "image", "image_index": 0}, {"type": "at", "qq": SELF}],
     }, ensure_ascii=False) + "\n", encoding="utf-8")
     real = wg_up_wake.config
@@ -231,15 +263,27 @@ def 唤醒行端到端带图片提示():
     argv = sys.argv
     sys.argv = ["watch.py", "--timeout", "2", "--replay"]
     buf = io.StringIO()
+    pin = pinned_conversation(group) if group else contextlib.nullcontext()
     try:
-        with contextlib.redirect_stdout(buf):
+        with pin, contextlib.redirect_stdout(buf):
             code = watch.main()
     finally:
         sys.argv = argv
         wg_up_wake.config = real
-    text = buf.getvalue()
-    return (code == 0 and "WAKE" in text
-            and f"look.py --event {EID_WAKE} --index 0" in text)
+    return buf.getvalue(), code
+
+
+@case
+def 唤醒行端到端带图片提示():
+    """watch.py 唤醒行：图片后缀必须跟在正文后面印出来。"""
+    text, code = run_watch()
+    if not (code == 0 and "WAKE" in text
+            and f"look.py --event {EID_WAKE} --index 0" in text):
+        return False
+    # 反向自检（issue #316）：钉到别的群时这条必须消失，否则等于把 #164 的读侧
+    # 过滤关掉，本用例再也不会红。退出码是 2（TIMEOUT）——没人 @ 本群，静默才是对的。
+    other, _ = run_watch(group="999")
+    return "WAKE" not in other and f"--event {EID_WAKE} " not in other
 
 
 # ---------------------------------------------------------------- issue #310

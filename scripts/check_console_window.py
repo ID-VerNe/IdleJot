@@ -17,7 +17,7 @@ one of the last two; a hit therefore means "something spawned an unflagged
 console program", which is exactly the shape `check_no_console_child.py` forbids
 statically.
 
-    uv run python scripts/check_no_console_child.py     # the static gate
+    uv run python scripts/check_no_console_child/_entry.py     # the static gate
     uv run python scripts/check_console_window.py --minutes 30
     uv run python scripts/check_console_window.py --self-test
 

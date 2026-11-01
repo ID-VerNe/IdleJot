@@ -27,8 +27,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 import check_fixture_support as fs  # noqa: E402  (issue #169 PE: path 注入收口)
-from check_fixture_support import pin_state_env, scratch_dir  # noqa: E402
+from check_fixture_support import pin_conversation, pin_state_env, scratch_dir  # noqa: E402
 fs.bootstrap_paths(scripts=False, root=False)
+
+# 夹具事件与会话都钉在这个群上：不钉的话，本机 config.json 恰好只有一个启用群时
+# `wg_isolation.resolve()` 落到 `config:唯一启用群`（`wg_isolation.py:84`），夹具的
+# 行全被判成外群——读侧 `rows_of()` 滤空、写侧 `target_group()` 抛 `CrossGroup`，
+# 随机器上的私有配置从全绿翻成 5 红（issue #334，#316/#322 是同一个坑）。
+FIXTURE_CONV = "10001:group:123"
 
 # state 目录必须在 import reply 之前钉走：`wg_send_failure.LEDGER` 是 import 期
 # 求值的（`state_dir() / "wg_send_failure.json"`），而 issue #145 之后
@@ -38,6 +44,10 @@ fs.bootstrap_paths(scripts=False, root=False)
 # 但两腿都钉才与全仓其余门禁同口径，priority 规则进代码不进注释。
 _PINNED_STATE = scratch_dir(prefix="wg_pending_state_")
 pin_state_env(_PINNED_STATE)
+# 会话身份同位置钉住（issue #334）：`reply.list_wakes()` / `unanswered()` 经
+# `wg_isolation.rows_of()` 只认本会话群，没钉死时读侧不过滤、钉错群时全滤空——
+# 两种都让这个门禁测的不是被测行为，而是「这台机器恰好有几个启用群」。
+pin_conversation(FIXTURE_CONV, _PINNED_STATE)
 
 import up  # noqa: E402  (门面；补丁见下，issue #37 起要打到 wg_up_wake)
 import wg_up_wake  # noqa: E402  (issue #37 PC: 唤醒判定的真实调用点)
@@ -64,11 +74,11 @@ def case(fn):
 def rows():
     return [
         {"id": 9001, "timestamp": FRESH, "is_self": False,
-         "sender": "甲", "content": "@小鲸鱼 在吗", "conversation_id": "10001:group:123"},
+         "sender": "甲", "content": "@小鲸鱼 在吗", "conversation_id": FIXTURE_CONV},
         {"id": 9002, "timestamp": OLD, "is_self": False,
-         "sender": "乙", "content": "@小鲸鱼 旧话题", "conversation_id": "10001:group:123"},
+         "sender": "乙", "content": "@小鲸鱼 旧话题", "conversation_id": FIXTURE_CONV},
         {"id": 9003, "timestamp": 0, "is_self": False,
-         "sender": "丙", "content": "@小鲸鱼 没有时间戳", "conversation_id": "10001:group:123"},
+         "sender": "丙", "content": "@小鲸鱼 没有时间戳", "conversation_id": FIXTURE_CONV},
     ]
 
 
@@ -211,6 +221,10 @@ def unanswered_滤掉过期唤醒():
 def run_reply(args, state_dir):
     env = dict(os.environ)
     pin_state_env(state_dir, env=env)  # state 两腿都钉给子进程（#281）
+    # 会话身份也要钉给子进程（issue #334）：子进程里 `wg_isolation.resolve()` 同样会落到
+    # `config:唯一启用群`，于是 `target_group()`（`wg_isolation.py:186`）把夹具的 9001/9002
+    # 判成跨群、把 9999 判成「不能确认属于本群」，三条用例全红且原因与待回时效无关。
+    pin_conversation(FIXTURE_CONV, state_dir, env=env)
     # reply.py 走 ensure_utf8_stdio，写出的是 UTF-8；解码钉在 run_python 里
     # （issue #240：裸 text=True 按宿主 locale=cp936 解，stdout 变成 None）。
     return fs.run_python([str(ROOT / "water-group" / "daemon" / "reply.py"), *args],
@@ -223,15 +237,33 @@ def make_state():
     (state / "wg_session.txt").write_text("session-fixture", encoding="utf-8")
     lines = [
         {"id": 9001, "timestamp": FRESH, "is_self": False, "sender": "甲",
-         "content": "新的 @", "conversation_id": "10001:group:123",
+         "content": "新的 @", "conversation_id": FIXTURE_CONV,
          "onebot_message_id": "555001"},
         {"id": 9002, "timestamp": OLD, "is_self": False, "sender": "乙",
-         "content": "旧的 @", "conversation_id": "10001:group:123",
+         "content": "旧的 @", "conversation_id": FIXTURE_CONV,
          "onebot_message_id": "555002"},
     ]
     (state / "wg_events.jsonl").write_text(
         "\n".join(json.dumps(r, ensure_ascii=False) for r in lines) + "\n", encoding="utf-8")
     return state
+
+
+def write_fixture_events():
+    """把夹具的三条事件写到磁盘事件流上（issue #334）。
+
+    `run_reply` 的流程里，`reply.event_target()` 走的是 `wg_event_ref._ref_from_events()`
+    ——它读**磁盘**的 `wg_events.jsonl`（`reply.read_events()`），不是 `patch_up` 换掉的
+    `up.events` 桩。改前这个门禁没发现，因为会话未钉死时 `wg_isolation.target_group()`
+    直接放行 `found=None`，`event_target` 一次都没被真正问过（假绿）。钉死之后它才被问到，
+    于是「事件流里查不到这条」= 拒绝，三条用例翻红。夹具两边必须是同一份。
+
+    返回写出的路径。调用方不需要它，返回值只是为了让「写到了钉死的 state 里、
+    不写实机 `~/.water-group`」这件事在需要时断言得出来。
+    """
+    path = _PINNED_STATE / "wg_events.jsonl"
+    path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows()) + "\n",
+                    encoding="utf-8")
+    return path
 
 
 @case
@@ -254,10 +286,97 @@ def 新鲜唤醒不受影响():
 
 
 @case
-def 不在事件流里的id不误伤():
-    # 追问闲聊被 mention_only 滤掉，压根不在 wg_events.jsonl，不能判过期
+def 不在事件流里的id一律拒():
+    """「不在事件流里」不等于「可以放行」：钉死群下它归属不明，必须拒。
+
+    这条以前断言 ``"拒绝" not in proc.stdout``，靠的是会话**没钉死**——
+    ``target_group``（``wg_isolation.py:178-200``）在未钉死时原样返回 ``found``，
+    钉死之后同一条路径会抛 ``CrossGroup``。钉死是把 #164 的护栏真正打开，不是回退，
+    所以断言跟着改成护栏的语义：**拒绝、且拒绝理由说的是归属不明（不是过期）**。
+    「过期判定不拿没有的行开刀」由其余用例的 id 都在事件流里来保证。
+    """
+    write_fixture_events()
     proc = run_reply(["9999", "测试", "--no-quote"], make_state())
-    return "拒绝" not in proc.stdout
+    return (proc.returncode == 1
+            and "拒绝" in proc.stdout
+            and "不能确认这条属于本群" in proc.stdout
+            and "过期" not in proc.stdout)
+
+
+# ---------- 会话钉死的真对照（issue #334） ----------
+
+
+@contextlib.contextmanager
+def pinned_to(conversation):
+    """临时把本会话钉到 ``conversation``：env 与 <state> 两腿一起改，退出原样还原。"""
+    import wg_isolation
+
+    saved = {key: os.environ.get(key) for key in wg_isolation.CONVERSATION_ENV}
+    file = _PINNED_STATE / wg_isolation.CONVERSATION_FILE
+    existed = file.read_text(encoding="utf-8") if file.exists() else None
+    try:
+        pin_conversation(conversation, _PINNED_STATE)
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        if existed is None:
+            file.unlink(missing_ok=True)
+        else:
+            file.write_text(existed, encoding="utf-8")
+
+
+@case
+def 会话钉死不靠本机配置():
+    """issue #334：本会话群必须来自 pin（``env:`` / ``file:``），不能是 ``config:``。
+
+    这条是「真对照」的前半句：断言 ``--list`` 抬头里的群来源。改前在本机实机
+    config（恰好一个启用群）下这里是 ``config:唯一启用群``，夹具行全被滤空——
+    「输出里恰好没有 WARN」证明不了任何事，来源才证明得了。
+
+    第 2 个断言直接问 ``rows_of()``：夹具三条行一条不少地活过读侧过滤。
+    改前在这个位置是「未钉死 → 不过滤 → 也是 3」，所以它单独证明不了什么；
+    和上一句的 ``config:`` 缺失、以及下一条钉到别群翻空合起来才是完整的对照。
+    """
+    import wg_isolation
+
+    patch_up(rows())
+    try:
+        with pinned_to(FIXTURE_CONV):
+            write_fixture_events()
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                reply.list_wakes()
+            got = wg_isolation.rows_of(reply.read_events())
+        text = buf.getvalue()
+    finally:
+        restore_config()
+    pinned_source = any(f"group:{FIXTURE_CONV.rsplit(':', 1)[-1]}（{prefix}" in text
+                        for prefix in ("env:", "file:"))
+    return pinned_source and "config:" not in text and len(got) == len(rows())
+
+
+@case
+def 钉到别群时唤醒要消失():
+    """反向自检：钉到别的群时夹具那条唤醒必须一条都看不到。
+
+    否则等于把 #164 的读侧过滤关掉，前一条用例就永远是绿的——issue #334 的
+    整个教训就是「绿」必须能被打翻。
+    """
+    patch_up(rows())
+    try:
+        with pinned_to("10001:group:999"):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                reply.list_wakes()
+            quiet = buf.getvalue()
+            got = reply.unanswered([9001])
+    finally:
+        restore_config()
+    return "id=9001" not in quiet and got == []
 
 
 def main():

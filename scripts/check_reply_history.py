@@ -205,6 +205,38 @@ def 截断与_dropped_through_都在表头说出来():
             and wg_context.wg_clock.now_line() in text)
 
 
+def context(**kwargs):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = wg_context.show_context(**kwargs)
+    return code, buf.getvalue()
+
+
+@case
+def context_要多了要说只取到几条():
+    # issue #130 的复现命令 2：`--context 2000` 以前表头照念入参，读者看不出
+    # 实际只拿到几条。夹具里本会话有 11 条，但第 7 条是 `synthetic`（不进
+    # `chat_inbox` 的阅读视图，见 `recent_chatter` 的 `data.get("synthetic")`），
+    # 另一会话那条也不算——真正能读到的只有 10 条，要 2000 就该如实说 10。
+    code, text = context(limit=2000)
+    head = text.splitlines()[0] if text else ""
+    return (code == 0
+            and head.startswith("# 最近 10 条")
+            and "要了 2000 条只取到 10 条" in head
+            and f"会话只留最近 {wg_context.CONTEXT_SCAN} 条或更少" in head)
+
+
+@case
+def context_要得不多就不念截断披露():
+    # 反例对照：要 5 条、库里够 5 条时**不该**出现这句——否则披露会变成噪音，
+    # 读者很快学会忽略它，真截断时也就看不见了。
+    code, text = context(limit=5)
+    head = text.splitlines()[0] if text else ""
+    return (code == 0
+            and head.startswith("# 最近 5 条")
+            and "只取到" not in head)
+
+
 @case
 def 空窗口说清楚而不是打一屏空白():
     code, text = out(limit=100, since=1792509999000, until=1792509999999)

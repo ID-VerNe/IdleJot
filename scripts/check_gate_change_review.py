@@ -18,15 +18,19 @@
 4. 自审判据（issue #324）：`## 门禁改动` 段的实质内容必须在复核行**之前**，
    复核行排到段末。先写结论后补证据是自审的形状；
 5. 没有 PR 上下文（本机 parity / 无 base）时打印 SKIP 并通过；**显式声明**
-   `GATE_CHANGES=1` / `--gate-changes` 时不再 SKIP——`push` 事件没有 base
-   （`base...HEAD` 会退化成空集），直接推 `slim` 绕过 PR 的口子只能靠这条守住；
-   base 非法、diff 失败等无法判断的情况 fail-closed。
+   `GATE_CHANGES=1` / `--gate-changes` 时不再 SKIP：有 base（push 事件的
+   `before`）就算改动集——合并进 `slim` 的 push 天然落在这里，改动已过 PR
+   闸门，照常放行并留痕；**没有 base 则改动集不可得，fail-closed**
+   （`base...HEAD` 在无 base 时退化成空集，直接推上来绕过 PR 的口子只能靠这条
+   守住）。base 非法、diff 失败等无法判断的情况同样 fail-closed。
 
     uv run python scripts/check_gate_change_review.py --base origin/slim --body-file pr.md
     uv run python scripts/check_gate_change_review.py --gate-changes --body-file pr.md
 
 CI 由 `.github/workflows/ci.yml` 注入 `PR_BASE_SHA` / `PR_BODY` / `PR_NUMBER`
-（仅 pull_request 有值）与 `GATE_CHANGES`（`push` 事件按本仓口径给出）。
+（仅 pull_request 有值）、`GATE_CHANGES`（push 事件为 `1`），以及 `PR_BASE_SHA`
+的 push 回退值 `github.event.before`——push 也有 base 可算，所以合并后的 push
+不会因为「读不到正文」被误判成红。
 
 **时点边界（#324）**：闸门上界是 `APPROVED_AT`。`base` 无从得知（`--gate-changes`
 显式声明）或基线早于上界时，这条 PR 属于「闸门建立之前」，复核行按 `<PENDING>`
@@ -375,9 +379,7 @@ def self_test():
     expect_rc('生效前：漏列仍红（旧口径）', touched, section_partial, 1, signature='漏列')
     expect_rc('生效前：正文不可得仍红（旧口径）', touched, None, 1)
 
-    # main() 无 base 但显式声明时 touched 是个占位串，正文里必须能对上它才算交代。
-    expect_rc('显式声明无 base：正文没交代占位仍红', ['(无 base：显式声明了)'], section_ok, 1,
-              signature='漏列')
+    # main() 无 base 但显式声明时 fail-closed（不冒充漏列），这条由 main 分支保证。
 
 
     expect('gate_applies 基线晚于上界', gate_applies('2026-11-03T00:00:00Z'), True)
@@ -423,9 +425,13 @@ def main():
             print('FAIL: 门禁改动段校验无法完成（fail-closed）。')
             return 1
     else:
-        # 无 base 但显式声明：拿不到 diff 就不知道改了什么，fail-closed 要求逐个交代。
-        touched = ['(无 base：显式声明了 GATE_CHANGES / --gate-changes，但改动集不可得)']
-        print('  WARN 没有 PR base，按显式声明走闸门；改动集不可得，正文须自行逐个交代')
+        # 无 base 但显式声明（push 事件直接推 slim）：拿不到 diff 就不知道改了什么，
+        # 也就无法核对正文是否逐个交代——fail-closed，但把话说清楚，不冒充「漏列」。
+        print('  FAIL 显式声明了门禁链改动（GATE_CHANGES / --gate-changes），但没有 PR base')
+        print('     改动集不可得 → 无法核对 `## 门禁改动` 段是否逐个交代；')
+        print('     直接推 slim 绕过 PR 时，请走 PR（CI 会注入 PR_BASE_SHA）')
+        print('FAIL: 门禁改动段校验无法完成（fail-closed）。')
+        return 1
 
     # issue #324 时点边界：PR 创建时间优先（CI 按 pull_request.number 现取），
     # 取不到时退回基线（`base...HEAD` 的 base 提交时间）。
@@ -438,7 +444,20 @@ def main():
     if head != 'HEAD':
         print(f'  info 对照 head={head}')
 
-    code, lines = check(touched, body_from_args(args), gated=gated)
+    body = body_from_args(args)
+    if declared and not number and body is None and touched:
+        # push 事件：有 base 可算改动集，但没有 PR、因此没有正文可读。
+        # 合并进 slim/main 的 push 天然落在这里（改动已经过 PR 闸门），照常放行；
+        # 直接推到受保护分支以外要留痕，但通行与否由分支保护决定，不在本门禁伪判。
+        print(f'  note 非 PR 上下文（GATE_CHANGES=1）：改动集含 {len(touched)} 个门禁链改动，'
+              '无正文可读，按已过 PR 闸门放行')
+        for path in touched:
+            print(f'     门禁链改动：{path}')
+        print('     PR 前的首推请走 PR：正文带 `## 门禁改动` 与独立复核结论')
+        print('PASS: 非 PR 上下文，门禁链改动的披露由 PR 闸门负责。')
+        return 0
+
+    code, lines = check(touched, body, gated=gated)
     for line in lines:
         print(line)
     return code

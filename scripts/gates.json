@@ -40,7 +40,7 @@
   {
    "name": "check_gate_change_review.py",
    "shard": "static",
-   "why": "门禁链改动必须在 PR 正文 `## 门禁改动` 段逐个交代（#62；#107 起 `.githooks/` 钩子改动同样触发）；无 PR 上下文时 SKIP"
+   "why": "门禁链改动必须在 PR 正文 `## 门禁改动` 段逐个交代（#62；#107 起 `.githooks/` 钩子改动同样触发）；#324 起段内还须有一行排在段末的独立复核结论（APPROVE / REQUEST_CHANGES，`<PENDING>` 不算）且其后不许再有实质内容；无 PR 上下文时 SKIP，但显式声明 GATE_CHANGES / --gate-changes 时 fail-closed"
   },
   {
    "name": "check_path_hygiene.py",

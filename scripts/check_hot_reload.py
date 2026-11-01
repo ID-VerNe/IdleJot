@@ -368,13 +368,16 @@ def check_wait_budget():
     assert "$hasWait" not in code and "$cliArgs +=" not in code, \
         "reload.ps1 不应再有 --wait 补发逻辑（已删，issue #230）"
 
-    # 反例：旧默认 120 必须被判超预算（钉住复发——任何把默认改回 120 的改动会让这条变红，
-    # 而 reload.py 的 default 断言会先一步挡住）。
-    assert wg_budget.over_budget(120) is True, "120 应被判超预算（issue #230 反例）"
+    # 反例：**吃满宿主超时**必须被判超预算——任何预算取值都成立（issue #313 之前这里
+    # 写死 `over_budget(120)`，而 120 只是「常见默认」，一旦按宿主放宽就不是上限了，
+    # 这条会假红）；`WAIT_BUDGET` 恰好是余量之内的最大值，反过来必须判「没超」。
+    assert wg_budget.over_budget(wg_budget.AGENT_TOOL_TIMEOUT) is True, \
+        "吃满宿主超时应被判超预算（issue #230 反例）"
     assert wg_budget.over_budget(wg_budget.WAIT_BUDGET) is False, \
         "WAIT_BUDGET 不应被判超预算"
     print(f"  ok  等待预算：reload.py --wait 默认 = wg_budget.WAIT_BUDGET "
-          f"({wg_budget.WAIT_BUDGET})，reload.ps1 不补发字面量，over_budget(120) 为真")
+          f"({wg_budget.WAIT_BUDGET})，reload.ps1 不补发字面量，"
+          f"over_budget({wg_budget.AGENT_TOOL_TIMEOUT}) 为真")
 
 
 def check_exclusions():

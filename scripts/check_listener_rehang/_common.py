@@ -55,7 +55,7 @@ if str(_scripts) not in sys.path:
     sys.path.insert(0, str(_scripts))
 
 import check_fixture_support as fs  # noqa: F401,E402  (先钉数据根，见 issue #79/#89)
-from check_fixture_support import temp_dir  # noqa: E402
+from check_fixture_support import isolated_env, temp_dir  # noqa: E402
 fs.bootstrap_paths()
 
 DAEMON = ROOT / "water-group" / "daemon"
@@ -71,7 +71,11 @@ import wg_up_probe  # noqa: E402  (issue #94 新用例轮询原始匹配行要�
 
 # 外部测试变量会把 state 又指回实机，这里必须清掉，只留临时数据根。
 ISOLATING_VARS = ("IDLEJOT_WG_STATE", "TULPA_WG_STATE", "IDLEJOT_WG_DB",
-                  "IDLEJOT_WG_MEMORY_DB")
+                  "IDLEJOT_WG_MEMORY_DB",
+                  # issue #313：等待预算可被宿主覆盖。门禁必须测**默认**预算，
+                  # 否则在长超时宿主里跑门禁，`--timeout {WAIT_BUDGET}` 这类
+                  # 「恰好等于预算」的样本会随宿主漂移。
+                  "WG_AGENT_TOOL_TIMEOUT")
 ACCOUNT = "10001"
 GROUP = "1:group:123"
 
@@ -116,6 +120,20 @@ def child_env(home):
     for name in ISOLATING_VARS:
         env.pop(name, None)
     return env
+
+
+def child_budget():
+    """子进程实际生效的等待预算（`AGENT_TOOL_TIMEOUT`, `WAIT_BUDGET`）。
+
+    `child_env()` 会把 `WG_AGENT_TOOL_TIMEOUT` 剥掉，所以**不管门禁自己是在什么
+    环境下跑起来的**，子进程读到的都是默认 120/90。用例一旦拿父进程 import 期的
+    `wg_budget.WAIT_BUDGET` / `listen.DEFAULT_TIMEOUT` 去对照子进程的输出，就会在
+    被覆盖过的宿主里漂移（issue #313：`WG_AGENT_TOOL_TIMEOUT=300` 时 4 条用例红）。
+    默认预算只在 `wg_budget` 里定义一次，这里直接从源码的默认值算，不另抄一份。
+    """
+    default = int(getattr(wg_budget, "DEFAULT_AGENT_TOOL_TIMEOUT",
+                          wg_budget.AGENT_TOOL_TIMEOUT))
+    return default, default - int(wg_budget.SEND_BUDGET)
 
 
 def run_script(home, script, *args, timeout=120):

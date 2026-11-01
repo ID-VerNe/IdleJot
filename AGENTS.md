@@ -82,6 +82,26 @@
 **仓外的私有规则 `~/.water-group/rules/*.md` 同样在扫**（issue #87）——它不在仓内，
 但「动手前先读」的最高权威文档不能教超预算的取值。
 
+**宿主超时更长时可以放宽（issue #313）**：上面那组数是「常见宿主」的默认假设，不是硬事实。
+工具调用超时能开到 300s 以上的宿主（Angigravity 等），用环境变量把预算整体抬高即可：
+
+```bash
+WG_AGENT_TOOL_TIMEOUT=300 .venv/Scripts/python.exe water-group/daemon/listen.py --timeout 300
+```
+
+`AGENT_TOOL_TIMEOUT` 取 `WG_AGENT_TOOL_TIMEOUT`、`WAIT_BUDGET` 由它减 `SEND_BUDGET` 派生，
+所以 300 → 常驻周期 270。**这是成对动作**：脚本侧设了 300，宿主侧也必须真给到 300s 以上
+（`timeout=300000+`），只改一边等于把「静默被砍」原样留着。监听自己的 `--timeout` 上限是
+`AGENT_TOOL_TIMEOUT` 本身（300 就是它的天花板，不是 270——270 是 `--wait` 的额度，
+`--wait` 睡完还要发送，所以要多留 30s）。**不设就是 120/90**，不会被任何
+配置隐式抬高。取值超出 `[SEND_BUDGET+1, MAX_AGENT_TOOL_TIMEOUT=3600]` 或不是整数时回落 120，
+并在 stderr 打一行 `WARN`（空串按未设处理、不告警）；`reply.py` / `listen.py` 的打印与 WARN
+一律现读 `wg_budget.X`，不读 import 期快照。预算窄到 `SHORT_WAIT` 以下时
+`wg_budget.shorter_wait()` 只给 `--no-wait`（不存在「真更短」的出口，不拿同一个数冒充）。
+它**不**进 `config.json`：预算是「这一台宿主这一次会话的能力」，写在配置里会被复制到能力更弱的机器上。
+门禁一律在默认预算下跑（`check_listener_rehang` 的 `child_env` 清掉该变量），覆盖路径由
+专门用例显式注入变量来测。
+
 **状态行看得见预算（issue #86）**：`up.py --status` 的「监听」行会报出每个监听**实际的**
 `--timeout`（从命令行读，不是从源码推的），超预算的那个带 ⚠ 点名——修复前起的旧监听
 （远超预算的旧默认值）在状态里一眼看得出，不必再另跑一条 PowerShell 查 WMI。
@@ -440,7 +460,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 2 | `static` | `check_gate_manifest.py` | 元门禁：磁盘 check_*.py、本清单、AGENTS §5.1 生成段与 ci.yml 分片矩阵四者零漂移 |
 | 3 | `static` | `check_gate_change_review.py` | 门禁链改动必须在 PR 正文 `## 门禁改动` 段逐个交代（#62；#107 起 `.githooks/` 钩子改动同样触发）；#324 起段内还须有一行排在段末的独立复核结论（APPROVE / REQUEST_CHANGES，`<PENDING>` 不算）且其后不许再有实质内容；无 PR 上下文时 SKIP，但显式声明 GATE_CHANGES / --gate-changes 时 fail-closed |
 | 4 | `static` | `check_path_hygiene.py` | 路径卫生：运行时数据不许从仓库根推导（防 #14 复发） |
-| 5 | `static` | `check_no_console_child.py` | 子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发）；#319 起范围含后端在运行时拉起的 scripts/ worker（RUNTIME_WORKERS 白名单），范围本身也被自检钉住——worker 改名即红，不会静默漏扫 |
+| 5 | `static` | `check_no_console_child.py` | 子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发）；#319 起范围含后端在运行时拉起的 scripts/ worker（RUNTIME_WORKERS 白名单），范围本身也被自检钉住——worker 改名即红，不会静默漏扫；#323 起 vendored 树（VENDORED_SOURCES，如 tools/wechat-reader 的 ffmpeg 调用）在同一套判据下扫描，文件不存在时报「未扫」而不是假装干净 |
 | 6 | `static` | `check_listen_passthrough.py` | 唤醒内容不被 listen.py 吞掉（#91） |
 | 7 | `static` | `check_listener_rehang` | 监听空窗：退出必带重挂指令、回复默认续挂、过期唤醒不静默、退出留痕且空窗可由只读入口报出（#69/#112） |
 | 8 | `static` | `check_gap_disclosure` | 停机窗口缺口披露：后端不在的那段时间漏了什么事后说得出来，up.py --status / reply.py --list / listen.py NO_WORK 三处只读入口报出窗口内漏 N 条、@ 本机 M 条，不再报告一切正常（#114）。#283：单文件 958 行 advisory 拆成 `scripts/check_gap_disclosure/` 包（_fixture/cases），入口名不变、对 gates.json 与 CI 透明 |

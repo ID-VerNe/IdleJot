@@ -68,6 +68,11 @@ async def protocol(url, first, second, ui, service, store, folder):
         # "another QQ conversation" rather than "another platform". The assertion
         # keeps its original job: B sees its own conversation and nothing of A's.
         other = await call(b, 'read_conversation', {'platform':'qq','conversation_id':'private','limit':5})
+        # A tool-call failure (the write-lock race in `begin_call` shows up here
+        # as `{'error': ...}` with no `messages` key) is a different failure from
+        # "the boundary leaked", and saying so explicitly keeps a flaky lock from
+        # being read later as "qq scoping broke".
+        assert 'messages' in other, ('read_conversation returned no page -- likely the access-db write lock, not a scope leak', other)
         assert len(other['messages'])==1 and other['messages'][0]['platform']=='qq', other
         assert not (await call(b,'search_messages', {'query':'课程设计'}))['messages']
         sql = await call(a, 'query_communication_db', {'sql':'SELECT count(*) FROM agent_messages'})

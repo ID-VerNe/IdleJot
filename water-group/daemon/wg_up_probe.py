@@ -23,6 +23,10 @@ import time
 from pathlib import Path
 
 import winconsole  # noqa: E402  (探针与 taskkill 都是控制台程序，开窗抑制走它，issue #39)
+# 端口表也是控制台程序（issue #39 的黑框规则不区分谁在跑），所以一律经 run_hidden。
+# 在模块顶层引入，调用点因此读作 `run_hidden(...)` 而不是 `winconsole.run_hidden`：
+# 门禁把它当普通函数名桩掉即可，不必连 winconsole 一起替换（issue #336）。
+from winconsole import run_hidden  # noqa: E402
 
 # 本 checkout 的仓库根（issue #94）：监听探针用它把「别的 worktree / 门禁临时起的
 # listen.py」排除出去。探针层不认识配置，但认识自己住在哪棵树里是分内事。
@@ -341,20 +345,43 @@ def port_owners(ports=None):
     whose command line no longer says what it is (a restarted child that re-exec'd,
     a wrapper) still holds the port, and the port is what `start-bot.pyw` uses to
     decide the stack is alive.
+
+    Calls `run_hidden`（`from winconsole import` 的模块级名字）: `netstat` 同样是
+    控制台程序，issue #39 的黑框规则不因为它「顺便要读输出」就豁免——`run_hidden`
+    只压窗口、照样把 stdout 交回来。写成模块级普通名字是为了让桩能落在调用点上：
+    `wg_up_probe.run_hidden = stub` 就是这一行真正调用的那个函数。以前 callsite 藏进
+    `winconsole.run_hidden`，外部桩（`subprocess.run` 或 `winconsole`）落在空处，
+    端口表被读成空的，就是 issue #336。
+    """
+    owners, _ = port_owners_status(ports)
+    return owners
+
+
+def port_owners_status(ports=None):
+    """`(owners, readable)` —— `port_owners` 加上「这张表到底读没读成」。
+
+    `port_owners` 返回的 `{}` 有两种来源：真的没人监听，和查询压根没跑到/失败了。
+    不许把半次停止报成干净的地方要把两者分开，而空 dict 装不下这个区别（issue #336）。
+    `readable` 在跑不起或解析不出 `netstat` 时为 False；就算表里一条都不匹配我们的
+    端口，只要读成了，`readable` 仍是 True。
     """
     try:
-        raw = winconsole.run_hidden(["netstat", "-ano"], capture_output=True,
-                                    timeout=15).stdout or b""
+        raw = run_hidden(["netstat", "-ano"], capture_output=True,
+                         timeout=15).stdout or b""
     except Exception:  # noqa: BLE001
-        return {}
+        return {}, False
+    lines = raw.decode("utf-8", "ignore").splitlines()
+    # An unreadable table (no header, no TCP rows) is not evidence of a free port.
+    if not any("LISTENING" in line or "Local Address" in line for line in lines):
+        return {}, False
     wanted = tuple(f":{port}" for port in (ports or STOP_PORTS))
     owners = {}
-    for line in raw.decode("utf-8", "ignore").splitlines():
+    for line in lines:
         parts = line.split()
         if len(parts) >= 5 and parts[3] == "LISTENING" and parts[1].endswith(wanted):
             if parts[4].isdigit():
                 owners.setdefault(parts[4], []).append(parts[1])
-    return owners
+    return owners, True
 
 
 def wait_ports_free(seconds, ports=None):

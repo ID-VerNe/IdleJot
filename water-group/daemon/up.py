@@ -70,6 +70,7 @@ from wg_up_probe import (  # noqa: E402,F401  (分节 PA：进程/端口探测)
     parse_timeout,
     port_open,
     port_owners,
+    port_owners_status,
     self_pids,
     stack_pids,
     supervisor_pids,

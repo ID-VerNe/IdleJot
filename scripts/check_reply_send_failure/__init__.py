@@ -195,23 +195,29 @@ def 等待预算_边界与唯一出处():
     拿它当 `allowance < need` 的操作数就把 `90 > 89.6` 读成「90 不大于 90」，
     判成等得起、睡 90s，叠加 0.4s 已用 + 30s 发送就超出宿主 120s。
     """
-    allowed, _ = wg_send_failure.wait_plan(wg_budget.WAIT_BUDGET - wg_send_failure.UNMUTE_MARGIN)
-    refused, lines = wg_send_failure.wait_plan(
-        wg_budget.WAIT_BUDGET - wg_send_failure.UNMUTE_MARGIN + 1)
+    b = wg_budget.WAIT_BUDGET
+    allowed, _ = wg_send_failure.wait_plan(b - wg_send_failure.UNMUTE_MARGIN)
+    refused, refused_lines = wg_send_failure.wait_plan(
+        b - wg_send_failure.UNMUTE_MARGIN + 1)
     # 形参 budget 必须真的参与判定，不能只进文案（复核遗留 2）；elapsed 同理。
     tight, _ = wg_send_failure.wait_plan(30, budget=30)   # need=35 > 预算 30
-    spent, _ = wg_send_failure.wait_plan(60, elapsed=30)
+    # 已用的秒数从**整次调用剩余额度**里扣：need=b-5 落在「已用 10s 后」的额度外、
+    # 「没用过」的额度内。不写死 60/65——宿主把预算放宽到 270 时那对数字不再成立
+    # （issue #313）。
+    spent, _ = wg_send_failure.wait_plan(b - wg_send_failure.UNMUTE_MARGIN, elapsed=10)
     # issue #224：已用 0.4s 时真实剩余 89.6，need=90 不该塞进去。
     # 85+5=90（need=90）在剩余 89.6 内塞不进 → None；84+5=89（need=89）塞得进 → 89。
     ceil_skipped, _ = wg_send_failure.wait_plan(
-        wg_budget.WAIT_BUDGET - wg_send_failure.UNMUTE_MARGIN, elapsed=0.4)
+        b - wg_send_failure.UNMUTE_MARGIN, elapsed=0.4)
     one_short, _ = wg_send_failure.wait_plan(
-        wg_budget.WAIT_BUDGET - wg_send_failure.UNMUTE_MARGIN - 1, elapsed=0.4)
-    return (allowed == wg_budget.WAIT_BUDGET and refused is None and tight is None
+        b - wg_send_failure.UNMUTE_MARGIN - 1, elapsed=0.4)
+    # 文案里的秒数必须跟着**实际预算**走，不能写死 90（issue #313：预算被宿主
+    # 覆盖到 270 时，写死的 90 会让这条断言在长超时宿主里恒红）。
+    return (allowed == b and refused is None and tight is None
             and spent is None
             and ceil_skipped is None            # need=90 > remaining=89.6 → 不硬等
-            and one_short == wg_budget.WAIT_BUDGET - 1   # mute=84 → need=89 塞得进，返回 need
-            and any(f"超出单次调用等待预算 {wg_budget.WAIT_BUDGET}s" in ln for ln in lines))
+            and one_short == b - 1   # mute=84 → need=89 塞得进，返回 need
+            and any(f"超出单次调用等待预算 {b}s" in ln for ln in refused_lines))
 
 
 @case
@@ -228,7 +234,8 @@ def 补发_超预算不硬等():
     finally:
         wg_send_failure.SLEEP = real
     return (code == 1 and sleeps == [] and sends == 1
-            and "超出单次调用等待预算 90s" in out)
+            # 文案里的秒数跟着实际预算走，不写死 90（issue #313）。
+            and f"超出单次调用等待预算 {wg_budget.WAIT_BUDGET}s" in out)
 
 
 @case

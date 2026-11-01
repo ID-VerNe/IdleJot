@@ -18,6 +18,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parent))
 from check_fixture_support import isolated_env, temp_dir
 from fixture_server import fixture_server
 from check_mcp_reactions import ReactionBot, Events, eventually, ROOT
+from check_forward_recursion import run as forward_recursion
 from chatlocal.mcp_routes import install_mcp_routes
 from chatlocal.store import Store
 from chatlocal.mcp_chat_details import MAX_NODES
@@ -738,6 +739,12 @@ def main():
 
                         # Use the actual Client contract, with controlled read-only transport failures.
                         row=tools.chat.row(sid);cancel=threading.Event()
+                        # issue #351：转发里套转发的展开、深度上限与跨预算共享（配置闸门
+                        # 单独一组，不混进下面对 query 的替身里——那层替身看不到入库侧）。
+                        # 实现在 scripts/check_forward_recursion/（模块大小硬上限逼出来的
+                        # 拆分，不是独立门禁）：夹具、`text()` 与 MAX_NODES 都从这里注入，
+                        # 两边各写一份夹具会让「绿了但没接线」重新长回来。
+                        forward_recursion(tools.chat,row,add,packet,message,text,MAX_NODES)
                         nested_limits(tools.chat,row)
                         for failure in ('timeout','wrong-account','empty'):
                             queries=[]

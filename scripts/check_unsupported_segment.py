@@ -457,7 +457,19 @@ def case_details_link_backfill():
     out = ChatDetails.render(item, legacy, [], 0)
     assert LINK_OF_CARD_JSON in out["content"], f"历史行读不到链接：{out['content']!r}"
     assert out["segments"][0].get("url") == LINK_OF_CARD_JSON, f"历史行没补出 url：{out['segments'][0]}"
-    print(f"✓ 9b. 引用/转发节点：新旧两种卡片都带得出链接，content={out['content']!r}")
+
+    # 一次三十张老卡片：回填也吃「一条消息」的链接预算。不封顶的话 content 会被
+    # MAX_TEXT 硬切在占位中间（`]` 都没了），唤醒行剥不掉，URL 直接漏进正文。
+    fat = json.dumps({"prompt": "卡片", "meta": {"detail_1": {"qqdocurl": "https://b23.tv/" + "z" * 600}}},
+                     ensure_ascii=False)
+    many = [dict(type="unsupported", kind="json", raw=json.dumps({"data": fat}, ensure_ascii=False))
+            for _ in range(30)]
+    out = ChatDetails.render(item, many, [], 0)
+    linked = sum(len(s.get("url") or "") for s in out["segments"])
+    assert linked <= onebot_segments.LINK_TOTAL_CHARS, f"回填链接合计 {linked} 超过总预算"
+    stripped, _ = wg_text.strip_placeholders(out["content"])
+    assert "https://" not in stripped, f"占位被切断了，链接漏进唤醒行：{stripped[:80]!r}"
+    print(f"✓ 9b. 引用/转发节点：新旧两种卡片都带得出链接（合计 {linked} 字），content={out['content'][:40]!r}…")
 
 
 def case_show_reports_raw_state():

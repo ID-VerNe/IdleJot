@@ -259,6 +259,10 @@ class ChatDetails:
 
     def render(self,segments,media,stamp,allow_images=True,quote_message_id=None,location=None,read=None):
         result=[];parts=[]
+        # 一条消息共享的链接预算（issue #311）：入库侧由 `receive` 的 raw_budget 管，
+        # 引用/转发节点在这里自成一条消息——不给预算的话，三十张卡片的老行回填能
+        # 把 content 顶过 MAX_TEXT，占位被硬切在半路（`]` 都没了，唤醒行剥不掉）。
+        link_budget={}
         for index,seg in enumerate(segments):
             # Old persisted forward nodes used OneBot-shaped segments.
             if 'data' in seg:
@@ -298,7 +302,7 @@ class ChatDetails:
                 if degraded:
                     stored=dict(seg)
                     if not stored.get('url'):
-                        stored.update(link_fields(stored.get('kind'),source))
+                        stored.update(link_fields(stored.get('kind'),source,link_budget))
                     parts.append(card_text(stored.get('kind'),source,stored))
                     result.append(stored)
                 else:

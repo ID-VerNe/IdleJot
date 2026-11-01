@@ -50,7 +50,7 @@
   {
    "name": "check_no_console_child.py",
    "shard": "static",
-   "why": "子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发）"
+   "why": "子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发）；#319 起范围含后端在运行时拉起的 scripts/ worker（RUNTIME_WORKERS 白名单），范围本身也被自检钉住——worker 改名即红，不会静默漏扫"
   },
   {
    "name": "check_listen_passthrough.py",
@@ -66,6 +66,11 @@
    "name": "check_gap_disclosure",
    "shard": "static",
    "why": "停机窗口缺口披露：后端不在的那段时间漏了什么事后说得出来，up.py --status / reply.py --list / listen.py NO_WORK 三处只读入口报出窗口内漏 N 条、@ 本机 M 条，不再报告一切正常（#114）。#283：单文件 958 行 advisory 拆成 `scripts/check_gap_disclosure/` 包（_fixture/cases），入口名不变、对 gates.json 与 CI 透明"
+  },
+  {
+   "name": "check_run_gates_parallel.py",
+   "shard": "static",
+   "why": "本机门禁调度（#317）：默认仍串行（`--jobs 1`）下结果表与清单同序；`--jobs N` 按条并行且结果表仍按清单位置编号；`EXCLUSIVE`（`check_listener_rehang` 靠全机 WMI 认进程并树杀）在线程池收摊之后单独跑、不与任何泳道重叠；`--fail-fast` 只拦没启动的、在飞的不被腰斩；`--shard` 子集上 --jobs 同样生效。实测子进程跑真桩树，断言落在结果表行号上、不对 stdout 交错顺序下嘴"
   },
   {
    "name": "check_status_napcat_line.py",

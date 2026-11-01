@@ -19,6 +19,7 @@ import json
 import os
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -210,19 +211,35 @@ def 空窗口说清楚而不是打一屏空白():
     return code == 1 and "这个窗口里没有任何消息" in text
 
 
+# 时间用例的期望值一律**现算**，不写死 epoch 字面量（issue #363）：`parse_time`
+# 的语义是「按本地时区落到 epoch」，写死的字面量只在 UTC+8 那台机器上对，CI 跑在
+# UTC 上就红——那是用例写错了，不是被测代码错了。下面的 ``at`` 就是这条语义。
+
+NOW_S = 1792500000  # 2026-10-20 20:40:00（epoch 秒，与时区无关）
+
+
+def at(*args):
+    """本地时区的日历时刻 -> epoch **毫秒**（``parse_time`` 的入参/出参口径）。"""
+    return int(datetime(*args).timestamp() * 1000)
+
+
 @case
 def parse_time_返回毫秒():
     # 时间戳的单位是**毫秒**（`payload.timestamp` 就是这个单位），别返回秒。
     ms, note = wg_context.parse_time("2026-10-19 20:00:00")
-    return ms == 1792411200000 and "2026-10-19 20:00:00" in note
+    if ms != at(2026, 10, 19, 20, 0, 0) or "2026-10-19 20:00:00" not in note:
+        return False
+    # 关系式断言：同一时刻按秒算只有它的千分之一，混用单位会让窗口恒空。
+    return abs(ms - at(2026, 10, 19, 20, 0, 0) // 1000) > 1_000_000
 
 
 @case
 def parse_time_不带日期按最近一次解释并说出来():
-    now = 1792500000  # 2026-10-20 20:40:00（epoch 秒）
-    ms, note = wg_context.parse_time("03:00", now=now)
+    ms, note = wg_context.parse_time("03:00", now=NOW_S)
     # 03:00 今天已经过了（now 是 20:40），所以指今天那一次，不是明天。
-    return ms < now * 1000 and "按最近一次解释" in note
+    return (ms == at(2026, 10, 20, 3, 0, 0)
+            and ms < NOW_S * 1000
+            and "按最近一次解释" in note)
 
 
 @case
@@ -230,12 +247,35 @@ def parse_time_今天还没到的时间回退到昨天():
     # 21:30 在 2026-10-20 20:40 时还没到，只能指昨天——回落到「明天」会把窗口
     # 推到未来，`--since 21:30` 于是恒空，看起来像「窗口里没人说话」。
     # 断言必须包住异常：退化成「抛 ValueError」时前一条用例照绿，只有这里会红。
-    now = 1792500000  # 2026-10-20 20:40:00
     try:
-        ms, note = wg_context.parse_time("21:30", now=now)
+        ms, note = wg_context.parse_time("21:30", now=NOW_S)
     except ValueError:
         return False
-    return ms == 1792416600000 and "2026-10-19 21:30:00" in note
+    yesterday = at(2026, 10, 19, 21, 30, 0)
+    # 期望值现算（本地时区），另带一条与时区无关的关系式：回退的是整整一天。
+    return (ms == yesterday
+            and ms == at(2026, 10, 20, 21, 30, 0) - 24 * 3600 * 1000
+            and ms < NOW_S * 1000
+            and "2026-10-19 21:30:00" in note)
+
+
+@case
+def parse_time_的本地时区语义与时区无关():
+    # 自检：上面几条的期望值与 `parse_time` 必须是**同一条**时区语义，否则换个
+    # TZ 跑就只是两条各自偏移的错值碰巧相等。这条直接钉语义，不靠 TZ 环境变量
+    # （Windows 上 TZ 基本不吃，换时区验一遍是个假动作，issue #363）。
+    got, _ = wg_context.parse_time("2026-10-19 20:00:00")
+    local = datetime(2026, 10, 19, 20, 0, 0)
+    # 1) 形态：本地日历时刻，且换算回来仍是同一串数字（不是当 UTC 解释）。
+    back = datetime.fromtimestamp(got / 1000)
+    if back.replace(microsecond=0) != local:
+        return False
+    # 2) 与「把同一串数字当 UTC 解释」错开正好一个本地偏移；偏移为 0 时两者相等。
+    #    方向：本地比 UTC 早 N 小时，同一串数字当 UTC 解释得到的 epoch 就更大，
+    #    所以 `got - wall` 是 **-offset**（UTC+8 下 -8h）。写成 `+offset` 只在 UTC 下成真。
+    offset_ms = int(local.astimezone().utcoffset().total_seconds() * 1000)
+    wall = local.replace(tzinfo=timezone.utc).timestamp() * 1000
+    return got - wall == -offset_ms
 
 
 @case

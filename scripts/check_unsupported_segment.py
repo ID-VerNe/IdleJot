@@ -20,7 +20,11 @@ issue #165 的症状有两层，第二层比第一层更难发现：
   3. 一条消息的原始体总量封顶：30 段巨型卡片不许把整条消息的 `segments` 挤空
      （payload 有 20000 字符整体封顶，逐段不合计就等于修一个丢字段换一个丢消息）；
   4. 补读侧（`wg_text.unsupported_lines` + `strip_placeholders`）：`--show` 说得出
-     「类型 + 原始体在不在、裁没裁」，唤醒行把卡片标题剥成短替代而不占正文额度。
+     「类型 + 原始体在不在、裁没裁」，唤醒行把卡片标题剥成短替代而不占正文额度；
+  5. 卡片跳转地址（issue #311）：`card_link()` / `link_fields()` / `card_text()`
+     三层各钉一条——段上留下 `url`、content 带得出地址、`--show` 打得出来（历史
+     行从 `raw` 现算），且视频/文件段的 CDN 地址不混进这个字段（#200 归
+     `wg_videos` 的可下载命令）。
 
 AST 墓碑（第 9 项）钉住两种翻车写法不许回来：`dict(type=label)` 与
 `.get(kind,'非文本消息')`。文本扫描会被 docstring 里引用反例误伤，所以按语法树
@@ -85,6 +89,27 @@ CARD_JSON = json.dumps({
 CARD_XML = ("<?xml version='1.0' encoding='utf-8'?><msg serviceID='1'><item>"
             "<title>分享了一篇文章</title><summary>关于周末活动的说明</summary>"
             "</item></msg>")
+
+# issue #311 的三种真实形态：小程序卡片（qqdocurl 是群友点开的那条短链，`url` 是
+# 小程序内部路径且**没有 scheme**）、XML 卡片（跳转地址在 `<url>` 标签里，根节点
+# 另有一个 `url=` 属性）、以及最朴素的 share 段。
+CARD_JSON_LINK = json.dumps({
+    "app": "com.tencent.miniapp_01",
+    "prompt": "[QQ小程序]哔哩哔哩",
+    "meta": {"detail_1": {"title": "哔哩哔哩",
+                          "desc": "养大肥鱼是因为缺爱吗",
+                          "qqdocurl": "https://b23.tv/abc123?share_source=qq&ts=1",
+                          "url": "m.q.qq.com/a/s/xyz"}},
+}, ensure_ascii=False)
+
+CARD_XML_LINK = ("<?xml version='1.0' encoding='utf-8'?><msg serviceID='1' "
+                 "url='https://b23.tv/root?from=qq'><item>"
+                 "<title>分享了一个视频</title>"
+                 "<url>https://b23.tv/item?from=qq</url></item></msg>")
+
+SHARE_LINK = "https://b23.tv/share?from=qq"
+
+LINK_OF_CARD_JSON = "https://b23.tv/abc123?share_source=qq&ts=1"
 
 
 # --------------------------------------------------------------- 1. 段构造契约
@@ -160,6 +185,64 @@ def case_card_summary():
     print("✓ 4. card_summary：json/xml/share 都取得到标题，取不到返回空串")
 
 
+def case_card_link_contract():
+    """#311：卡片跳转地址取得到、取对、不猜 scheme。
+
+    取不对的两种典型：`detail_1` 里 `qqdocurl`（分享短链）与 `url`（小程序内部
+    路径）并存时取了后者；以及 JSON 的 `\\/` 转义没还原，交出去的是一个打不开的
+    地址。两种都让 Agent「拿到了链接却读不了」。
+    """
+    card_link = getattr(onebot_segments, "card_link", None)
+    assert card_link, "onebot_segments 缺少 card_link()（issue #311 的提取点）"
+    link = card_link({"data": CARD_JSON_LINK})
+    assert link == LINK_OF_CARD_JSON, f"qqdocurl 才是卡片指向的地址，实得 {link!r}"
+    # 落盘后的 raw 文本（`{"data": "<一层 JSON 字符串>"}`）也要读得出来：--show 走这条路。
+    stored = onebot_segments.unsupported("json", {"data": CARD_JSON_LINK})
+    assert card_link(stored.get("raw")) == LINK_OF_CARD_JSON, stored.get("raw")
+
+    # XML：`<url>` 标签优先于根节点属性；只有属性时也要取得到。
+    assert card_link({"data": CARD_XML_LINK}) == "https://b23.tv/item?from=qq", card_link({"data": CARD_XML_LINK})
+    attr_only = "<msg serviceID='1' url='https://b23.tv/only'><item><title>甲</title></item></msg>"
+    assert card_link({"data": attr_only}) == "https://b23.tv/only", card_link({"data": attr_only})
+
+    # share 段直接给 url；转义形态要还原成能打开的地址。
+    assert card_link({"url": SHARE_LINK}) == SHARE_LINK
+    escaped = '{"url": "https:\\/\\/b23.tv\\/esc?x=1\\u0026y=2"}'
+    assert card_link({"data": escaped}) == "https://b23.tv/esc?x=1&y=2", card_link({"data": escaped})
+    assert card_link({"data": "<msg><url>https://b23.tv/amp?a=1&amp;b=2</url></msg>"}) == \
+        "https://b23.tv/amp?a=1&b=2"
+
+    # 不猜 scheme、不递非网页协议：猜错的地址比没有地址更坏。
+    for bad in ("m.q.qq.com/a/s/xyz", "javascript:alert(1)", "file:///C:/x.mp4",
+                "data:text/html,hi", "//b23.tv/scheme-relative", ""):
+        assert card_link({"url": bad}) == "", f"{bad!r} 不该被当成跳转地址"
+    # 含 `]` 的地址会把 `[卡片：…]` 占位撑破（唤醒行剥不干净），一律丢弃。
+    assert card_link({"url": "https://b23.tv/a]b"}) == ""
+    for empty in (None, {}, {"data": ""}, {"data": "{}"}, {"data": "不是 JSON 也不是 XML"}):
+        assert card_link(empty) == "", f"{empty!r} 不该有链接"
+    print("✓ 4b. card_link：qqdocurl 优先、转义还原、XML 两形态，非 http(s) 一律丢弃")
+
+
+def case_link_fields_limits():
+    """#311：段上链接字段的限额与截断标记只有一份（`link_fields`）。"""
+    link_fields = getattr(onebot_segments, "link_fields", None)
+    assert link_fields, "onebot_segments 缺少 link_fields()（issue #311 的字段构造点）"
+    fields = link_fields("json", {"data": CARD_JSON_LINK})
+    assert fields.get("url") == LINK_OF_CARD_JSON, fields
+    assert "url_truncated" not in fields, fields
+    # 视频/文件段的 `url` 是带 rkey 的 CDN 地址（#200），不进这个字段。
+    assert link_fields("video", {"url": "https://media.example.test/v.mp4"}) == {}, \
+        "视频地址该由 wg_videos 的可下载命令交出去，不塞进 content"
+    long_url = "https://b23.tv/" + "x" * 900
+    kept = link_fields("share", {"url": long_url})
+    assert kept.get("url_truncated") is True, f"超长必须标记：{kept}"
+    assert len(kept["url"]) <= onebot_segments.LINK_LIMIT, len(kept["url"])
+    # content 占位与段字段同一个长度：两处各算一遍迟早给出两个答案。
+    text = onebot_segments.card_text("share", {"url": long_url, "title": "长链接"})
+    assert kept["url"] in text and text.endswith("]"), text
+    print(f"✓ 4c. link_fields：{onebot_segments.LINK_LIMIT} 字上限 + url_truncated，视频段不掺和")
+
+
 # --------------------------------------------------------- 2. 入库侧真实路径
 
 def build_chat():
@@ -225,6 +308,32 @@ def case_ingest_card_json():
     assert "卡片" in content, f"卡片段至少要报出类型：{content!r}"
     assert "群签到" in content, f"能解析的卡片要带标题（PB）：{content!r}"
     print(f"✓ 5. 入库 json 段：kind=json、type=unsupported、content={content!r}")
+
+
+def case_ingest_card_link():
+    """#311 主症状：入库后段上有 `url`，content 里带得出跳转地址。"""
+    chat = build_chat()
+    payload = receive(chat, [dict(type="json", data=dict(data=CARD_JSON_LINK))], 4111)
+    first = (payload.get("segments") or [{}])[0]
+    assert first.get("url") == LINK_OF_CARD_JSON, f"段上没留下跳转地址：{first}"
+    assert "url_truncated" not in first, first
+    content = payload.get("content") or ""
+    assert LINK_OF_CARD_JSON in content, f"content 里看不到卡片链接：{content!r}"
+    assert content.startswith("[卡片：") and content.endswith("]"), content
+    # 链接不许把唤醒行额度吃掉：整段占位仍被剥成短替代。
+    stripped, _ = wg_text.strip_placeholders(content)
+    assert stripped == "[卡片]", f"链接漏进了唤醒行正文：{stripped!r}"
+
+    # xml 段同型；share 段也一样。
+    xml_payload = receive(chat, [dict(type="xml", data=dict(data=CARD_XML_LINK))], 4112)
+    assert (xml_payload.get("segments") or [{}])[0].get("url") == "https://b23.tv/item?from=qq", xml_payload
+    assert "https://b23.tv/item?from=qq" in (xml_payload.get("content") or ""), xml_payload.get("content")
+
+    share_payload = receive(chat, [dict(type="share", data=dict(url=SHARE_LINK, title="分享标题"))], 4113)
+    first = (share_payload.get("segments") or [{}])[0]
+    assert first.get("url") == SHARE_LINK, first
+    assert SHARE_LINK in (share_payload.get("content") or ""), share_payload.get("content")
+    print(f"✓ 5b. 入库卡片段带 url，content={content!r}")
 
 
 def case_ingest_xml_and_unknown():
@@ -298,6 +407,23 @@ def case_forward_nodes_fidelity():
     print(f"✓ 9. 转发节点：sanitize/render 两侧都保留 kind，content={out['content']!r}")
 
 
+def case_details_link_backfill():
+    """#311：引用/转发节点里的卡片也要带链接，历史行（无 `url` 字段）现场补出来。"""
+    item = ChatDetails.__new__(ChatDetails)
+    fresh = [dict(type="unsupported", kind="json", raw=json.dumps({"data": CARD_JSON_LINK}, ensure_ascii=False),
+                  url=LINK_OF_CARD_JSON)]
+    out = ChatDetails.render(item, fresh, [], 0)
+    assert LINK_OF_CARD_JSON in out["content"], f"节点内卡片没带链接：{out['content']!r}"
+    assert out["segments"][0].get("url") == LINK_OF_CARD_JSON, out["segments"][0]
+
+    # #311 之前落库的行只有 raw：渲染时补出 `url`，否则同一张卡片新旧两种答案。
+    legacy = [dict(type="unsupported", kind="json", raw=json.dumps({"data": CARD_JSON_LINK}, ensure_ascii=False))]
+    out = ChatDetails.render(item, legacy, [], 0)
+    assert LINK_OF_CARD_JSON in out["content"], f"历史行读不到链接：{out['content']!r}"
+    assert out["segments"][0].get("url") == LINK_OF_CARD_JSON, f"历史行没补出 url：{out['segments'][0]}"
+    print(f"✓ 9b. 引用/转发节点：新旧两种卡片都带得出链接，content={out['content']!r}")
+
+
 def case_show_reports_raw_state():
     """PC：`--show` 说得出「类型 + 原始体在不在、裁没裁」。"""
     lines = wg_text.unsupported_lines([
@@ -318,6 +444,28 @@ def case_show_reports_raw_state():
     print("✓ 10. --show 的段说明：类型 + 原始体完整/已截断/超预算未保留/无原始体")
 
 
+def case_show_prints_link():
+    """#311：`--show` 打出跳转地址；老行（无 `url`）从 raw 现算，超长要标截断。"""
+    fresh = dict(type="unsupported", kind="json", raw='{"prompt":"哔哩哔哩"}',
+                 url=LINK_OF_CARD_JSON)
+    joined = "\n".join(wg_text.unsupported_lines([fresh]))
+    assert f"链接：{LINK_OF_CARD_JSON}" in joined, f"--show 没打出链接：{joined!r}"
+
+    # 历史行：只有 raw，没有 url 字段。
+    legacy = dict(type="unsupported", kind="json",
+                  raw=json.dumps({"data": CARD_JSON_LINK}, ensure_ascii=False))
+    joined = "\n".join(wg_text.unsupported_lines([legacy]))
+    assert f"链接：{LINK_OF_CARD_JSON}" in joined, f"历史行补读不到链接：{joined!r}"
+
+    truncated = dict(type="unsupported", kind="share", url="https://b23.tv/xyz", url_truncated=True)
+    assert "链接（已截断）：https://b23.tv/xyz" in "\n".join(wg_text.unsupported_lines([truncated]))
+
+    # 没有链接的段不许凭空多出一行。
+    plain = dict(type="unsupported", kind="poke", raw='{"type":"poke","id":"1"}')
+    assert "链接" not in "\n".join(wg_text.unsupported_lines([plain])), "没有链接的段不该印链接行"
+    print("✓ 10b. --show：新行用 url 字段、老行从 raw 现算，超长标「已截断」")
+
+
 def case_wake_line_keeps_budget():
     """唤醒行：卡片标题剥成短替代，不占正文额度；旧占位仍认。"""
     body = "[卡片：群签到小助手，今天已签到 3 人]" + "正文" * 40
@@ -329,7 +477,14 @@ def case_wake_line_keeps_budget():
     # 旧记录里的占位仍要剥（兼容），否则历史唤醒行会突然变长。
     assert wg_text.strip_placeholders("[非文本消息]正文")[0] == "[非文本]正文"
     assert wg_text.strip_placeholders("[表情]正文")[0] == "[非文本]正文"
-    print("✓ 11. 唤醒行占位表：卡片/不支持段剥成短替代，旧占位仍认")
+    # #311：占位里带上了最长 400 字的跳转地址，每一种卡片形态都必须剥干净——
+    # 漏一种，那张卡片的 URL 就把 80 字的唤醒行吃光。
+    for kind, head in (("json", "卡片"), ("share", "分享"), ("music", "音乐"), ("markdown", "Markdown")):
+        with_link = onebot_segments.card_text(kind, {"title": "标题", "url": "https://b23.tv/" + "x" * 300})
+        stripped, original = wg_text.strip_placeholders(with_link + "正文")
+        assert stripped == "[卡片]正文", f"{head} 占位的链接漏进了唤醒行：{stripped!r}"
+        assert original == len(with_link) + 2, (head, original)
+    print("✓ 11. 唤醒行占位表：卡片/不支持段剥成短替代，旧占位仍认，带链接的也剥干净")
 
 
 # ------------------------------------------------------------- 4. 墓碑（AST）
@@ -375,6 +530,20 @@ def case_no_chinese_type_in_source():
     print("✓ 12. 墓碑：源码里没有 dict(type=label)、没有中文标签兜底 kind")
 
 
+def case_placeholder_single_source():
+    """墓碑（#311）：content 占位只有 `card_text()` 一份，两条渲染路径不许各拼一套。
+
+    #165 的教训是同一件事写两遍必然漂移（入库有标题、补读没有）。链接进来了
+    更容易漂：谁都想在自己那段里顺手 `+' → '+url`。
+    """
+    for rel in ("chatlocal/mcp_chat.py", "chatlocal/mcp_chat_details.py"):
+        source = (ROOT / rel).read_text(encoding="utf-8")
+        assert "card_text(" in source, f"{rel} 没走 card_text()（#311 占位唯一构造点）"
+        for smell in ("'：'+body", "' → '+", "\" → \"+"):
+            assert smell not in source, f"{rel} 又自己拼了卡片占位（#311 墓碑）：{smell}"
+    print("✓ 13. 墓碑：卡片占位只经 card_text()，两条渲染路径没有第二份拼法")
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -386,14 +555,20 @@ def main():
         ("原始体按 clip 裁并标记", case_raw_clipping),
         ("原始体预算耗尽如实说", case_budget_exhausted),
         ("卡片摘要（json/xml/share）", case_card_summary),
+        ("卡片跳转地址提取（#311）", case_card_link_contract),
+        ("段上链接字段的限额（#311）", case_link_fields_limits),
         ("入库 json 段保真", case_ingest_card_json),
+        ("入库卡片段带跳转地址（#311）", case_ingest_card_link),
         ("入库 xml/poke/未知段保真", case_ingest_xml_and_unknown),
         ("任何段 type 都不是中文标签", case_no_chinese_type_anywhere),
         ("一条消息的原始体总预算", case_budget_caps_whole_message),
         ("合并转发节点保真", case_forward_nodes_fidelity),
+        ("引用/转发节点带链接（#311）", case_details_link_backfill),
         ("--show 报原始体状态", case_show_reports_raw_state),
+        ("--show 打出跳转地址（#311）", case_show_prints_link),
         ("唤醒行占位表兼容", case_wake_line_keeps_budget),
         ("墓碑：源码里没有中文标签当 type", case_no_chinese_type_in_source),
+        ("墓碑：卡片占位只有一份（#311）", case_placeholder_single_source),
     ]
     for label, fn in cases:
         try:

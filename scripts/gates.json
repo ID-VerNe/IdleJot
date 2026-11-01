@@ -393,6 +393,11 @@
    "why": "reply.py --context 回之前看得到群聊上下文"
   },
   {
+   "name": "check_reply_history.py",
+   "shard": "reply",
+   "why": "reply.py --history 从我上次发言到现在（#130）：边界取批内**最后一条**本机发言且打印边界之后全部行、窗口里没有本机发言时全量打印并说明、--sender 把边界换成别人且按 QQ（payload.sender_id）认而不按显示名（把本机显示名改成别人的名字后仍落到别人的那条）、--since/--until/--before 收窄窗口、--until 与 --before 同时给时取更早的并说明、--limit 真砍过时才说「边界之后共 N 条只打了最近 M 条」（窗口比 limit 小是常态、不许照搬 --context 的读侧截断披露）、dropped_through 只报原值且不与「边界」撞词头、空窗口说清楚原因；parse_time 返回毫秒、不带日期按最近一次解释并说出、认不出就报错"
+  },
+  {
    "name": "check_event_ref.py",
    "shard": "reply",
    "why": "事件 id 只有一个权威解析入口（#216）：字段名兼容（onebot_message_id/message_id）、列兜底（chat_sessions.conversation_id / chat_inbox.message_id）、来源顺序 wg_events 优先；两种「查不到」分开说；--context 的行能被 reply.py 解析到本群且自带 src=chat_inbox；批量读点（followup.since / wg_context.recent_chatter / wg_gap._local_state）与单条解析同一口径——payload 缺键时回查会话行、非对象 payload 不拖垮整批（#219）"

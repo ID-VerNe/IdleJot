@@ -8,6 +8,7 @@
 所以时间格式化统一收在这里，不让每个脚本各写一份 strftime：
 
     now_line()   "现在 2026-10-23 20:52:07 (UTC+8)"   报告顶部的锚点
+    now_ts()     此刻（epoch 秒）                      需要拿「现在」跟别的时刻比的
     stamp(ts)    "2026-10-23 20:52:07"                 需要绝对时刻的地方
     clock(ts)    "20:52:07"                            消息时间戳（沿用旧格式）
     clock_ms(ms) 同上，入参是毫秒（wg_events.jsonl 的 timestamp 单位）
@@ -77,6 +78,17 @@ def now_line():
     """报告顶部的锚点行。Agent 拿到它才能判断「今晚八点」是过去还是未来。"""
     moment = _local()
     return f"现在 {moment.strftime(FORMAT_STAMP)} ({_label(moment)})"
+
+
+def now_ts():
+    """此刻的 epoch 秒。
+
+    与 `_local()` 同源（同一只本机时钟、同一本地时区），所以 `stamp(now_ts())`
+    与 `now_line()` 里的日期时刻一致。要拿「现在」跟别的时刻比的调用方
+    （如 `--since 20:00` 的「最近一次解释」）一律从这里取，不许各处自己
+    `time.time()`——那就有了第二个「现在」，正是 issue #95 要拦的事。
+    """
+    return time.time()
 
 
 def seconds_left(deadline, now=None):

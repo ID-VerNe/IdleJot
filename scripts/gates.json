@@ -50,7 +50,7 @@
   {
    "name": "check_no_console_child.py",
    "shard": "static",
-   "why": "子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发）"
+   "why": "子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发）；#319 起范围含后端在运行时拉起的 scripts/ worker（RUNTIME_WORKERS 白名单），范围本身也被自检钉住——worker 改名即红，不会静默漏扫"
   },
   {
    "name": "check_listen_passthrough.py",

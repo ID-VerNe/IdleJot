@@ -7,6 +7,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  # issue #338：scripts/check_gate_change_review.py 按 PR 编号现取 PR 正文与创建时间
+  # （GET /repos/<slug>/pulls/<n>）。只读，够用即可。
+  pull-requests: read
 # 同一分支/PR 的新推送取消旧运行（issue #60）：不再让上一轮白烧 runner。
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -53,9 +56,11 @@ jobs:
         # issue #324：PR_NUMBER 供它现取 PR 创建时间（独立复核闸门的时点判据）；
         # push 到 slim/main 时 GATE_CHANGES=1 —— 那时没有 base，改动集不可得，
         # 该门禁不再沉默 SKIP，而是 fail-closed 提示走 PR。
+        # issue #338：不再注入 PR_BODY。`github.event.pull_request.body` 是事件快照，
+        # `gh run rerun` 重放旧事件，作者改完正文再重跑仍读到旧正文。正文由门禁按
+        # PR_NUMBER 现取（上面的 pull-requests: read 就是为它开的）。
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          PR_BODY: ${{ github.event.pull_request.body }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GATE_CHANGES: ${{ github.event_name == 'push' && '1' || '' }}

@@ -27,15 +27,25 @@
     uv run python scripts/check_gate_change_review.py --base origin/slim --body-file pr.md
     uv run python scripts/check_gate_change_review.py --gate-changes --body-file pr.md
 
-CI 由 `.github/workflows/ci.yml` 注入 `PR_BASE_SHA` / `PR_BODY` / `PR_NUMBER`
-（仅 pull_request 有值）、`GATE_CHANGES`（push 事件为 `1`），以及 `PR_BASE_SHA`
-的 push 回退值 `github.event.before`——push 也有 base 可算，所以合并后的 push
-不会因为「读不到正文」被误判成红。
+CI 由 `.github/workflows/ci.yml` 注入 `PR_BASE_SHA` / `PR_NUMBER`（仅 pull_request
+有值）、`GATE_CHANGES`（push 事件为 `1`），以及 `PR_BASE_SHA` 的 push 回退值
+`github.event.before`——push 也有 base 可算，所以合并后的 push 不会因为「读不到正文」
+被误判成红。
 
-**时点边界（#324）**：闸门上界是 `APPROVED_AT`。`base` 无从得知（`--gate-changes`
+**重跑读的是当下正文（#338）**：`github.event.pull_request.body` 是**事件快照**，
+`gh run rerun` 重放同一个事件，改完正文再重跑读到的仍是旧正文——作者补了 `## 门禁改动`
+段与复核结论，重跑照样红，只能空推一个 commit 骗新事件。所以正文的最终来源改成**现取**：
+`GET /repos/<owner>/<repo>/pulls/<n>`（`pull-requests: read`，与 `created_at` 同一次
+调用）。正文优先级 `--body-file` > `PR_BODY_FILE` > **按 `PR_NUMBER` 现取** > `PR_BODY`
+（后者只留给本机调试）。现取失败时**不**退回事件快照：改动触及门禁链就照旧红，并打印
+`正文取不到：<原因>`——拿旧正文冒充当下正文会让「已改好」与「没改」在日志里同形。
+PR 正文被清空（`body` 为 null）按「有正文、没有段」处理，与「取不到正文」分开报。
+
+**时点边界（#324）**：闸门上界是 `APPROVED_AT`。上界未到、`base` 无从得知（`--gate-changes`
 显式声明）或基线早于上界时，这条 PR 属于「闸门建立之前」，复核行按 `<PENDING>`
-视作，只打印提示不放行也不判红——闸门只管之后开的 PR。CI 按 `pull_request.number`
-现取 PR 创建时间（`GH_TOKEN` 只读 `pull_requests`，取不到时退回基线判据）。
+视作，只打印提示不放行也不判红——闸门只管之后开的 PR。`gate_applies(base, now=None)`
+把「现在」收成可注入参数，上界未到这件事因此可测（#338 顺带补的夹具）。CI 按
+`pull_request.number` 现取 PR 创建时间（`GH_TOKEN` 只读 `pull_requests`，取不到时退回基线判据）。
 
 入口处先跑 `self_test()`（issue #107 的离线夹具：PATTERNS 命中范围 + `check()`
 判定的回归，不碰 git / 网络 / 文件），把「钩子改动必须披露」钉在每次执行里。
@@ -47,6 +57,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -129,11 +140,20 @@ def parse_time(text):
         return None
 
 
-def gate_applies(base):
-    """issue #324 时点边界：基线早于上界 → 闸门不适用（None 表示基线不可得，同样不适用）。"""
+def gate_applies(base, now=None):
+    """issue #324 时点边界：基线早于上界 → 闸门不适用（None 表示基线不可得，同样不适用）。
+
+    `now` 缺省取当前时刻（UTC）。上界还没到（`APPROVED_AT` 是未来）时同样不适用：
+    闸门自那个时刻起才生效，之前开的 PR 一律按旧口径。把它显式收进判据，是为了让
+    「上界之前」这件事**可测**——不然后测的夹具只能靠改系统时钟或伪造未来提交才能
+    走到闸门分支，那不是回归夹具该依赖的东西。
+    """
     stamp = parse_time(base)
     limit = parse_time(APPROVED_AT)
     if stamp is None or limit is None:
+        return False
+    current = now or datetime.now(timezone.utc)
+    if current < limit:
         return False
     return stamp >= limit
 
@@ -179,41 +199,91 @@ def review_order_problem(section):
     return tail[0] if tail else None
 
 
-def pr_created_at(number):
-    """GitHub API 取 PR 创建时间（`pull_request.opened_at`）；取不到时返回 None。
+def fetch_pull(number, cache=None):
+    """`GET /repos/<owner>/<repo>/pulls/<n>` 的 payload；取不到时返回 None。
 
-    只读一次 `GET /repos/<owner>/<repo>/pulls/<n>`，token 从 `GH_TOKEN` / `GITHUB_TOKEN`
-    取。网络不可达 / 没 token / 解析失败一律返回 None——时点判据退回基线，
-    **绝不因为查不到时间就放行**（放行由 gate_applies 的基线判据决定）。
+    `created_at`（#324 时点边界）与 `body`（#338 现取正文）共用这一次只读调用。
+    token 从 `GH_TOKEN` / `GITHUB_TOKEN` 取。没有 number / 没 token / 没 slug /
+    网络不可达 / 解析失败一律返回 None，由调用方各自决定退回什么——本函数不猜。
     """
     if not number:
         return None
+    if cache is not None and number in cache:
+        return cache[number]
     token = os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
     slug = os.environ.get('GITHUB_REPOSITORY')
-    if not token or not slug:
-        return None
-    url = f'https://api.github.com/repos/{slug}/pulls/{number}'
-    request = urllib.request.Request(url, headers={
-        'Authorization': f'Bearer {token}',
-        'Accept': 'application/vnd.github+json',
-        'User-Agent': 'check_gate_change_review',
-    })
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            payload = json.loads(response.read().decode('utf-8', errors='replace'))
-    except Exception:  # noqa: BLE001 - 任何失败都退回基线判据，不在这里区分
-        return None
-    return payload.get('created_at') if isinstance(payload, dict) else None
+    payload = None
+    if token and slug:
+        url = f'https://api.github.com/repos/{slug}/pulls/{number}'
+        request = urllib.request.Request(url, headers={
+            'Authorization': f'Bearer {token}',
+            'Accept': 'application/vnd.github+json',
+            'User-Agent': 'check_gate_change_review',
+        })
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                payload = json.loads(response.read().decode('utf-8', errors='replace'))
+        except urllib.error.HTTPError as error:
+            payload = {'__error__': f'HTTP {error.code}'}
+        except Exception as error:  # noqa: BLE001 - 失败原因原样带给调用方，不在这里区分
+            payload = {'__error__': type(error).__name__}
+        if not isinstance(payload, dict):
+            payload = {'__error__': '响应不是对象'}
+    if cache is not None:
+        cache[number] = payload
+    return payload
 
 
-def body_from_args(args):
-    """正文优先级：--body-file > PR_BODY_FILE > PR_BODY；都没有时返回 None。"""
+def pr_created_at(number, cache=None):
+    """PR 创建时间（`created_at`）；取不到时返回 None。
+
+    时点判据退回基线，**绝不因为查不到时间就放行**（放行由 gate_applies 的基线判据
+    决定）。
+    """
+    payload = fetch_pull(number, cache)
+    if not payload or '__error__' in payload:
+        return None
+    return payload.get('created_at')
+
+
+def live_body(number, cache=None):
+    """按 PR 编号现取正文（issue #338）→ (正文, 取不到的原因)。
+
+    正文被清空（`body` 为 null）是**有正文、没有段**：返回 `('', None)`，与取不到正文
+    分开——前者由 check() 报「没有 `## 门禁改动` 段」，后者报「拿不到 PR 正文」。
+    """
+    if not number:
+        return None, '没有 PR 编号（PR_NUMBER 为空）'
+    payload = fetch_pull(number, cache)
+    if payload is None:
+        return None, '没有 token / 仓库名（GH_TOKEN、GITHUB_REPOSITORY 缺失），无法现取'
+    if '__error__' in payload:
+        reason = payload['__error__']
+        if reason == 'HTTP 403':
+            reason += '（token 缺 pull-requests: read 权限）'
+        return None, f'GET pulls/{number} 失败：{reason}'
+    body = payload.get('body')
+    return (body if isinstance(body, str) else ''), None
+
+
+def body_from_args(args, number='', cache=None):
+    """正文优先级：--body-file > PR_BODY_FILE > 按 PR_NUMBER 现取 > PR_BODY。
+
+    返回 (正文, 来源, 取不到的原因)。现取失败时**不**退回 `PR_BODY`（issue #338）：
+    那是事件快照，`gh run rerun` 重放的就是它——拿旧正文冒充当下正文，正是 #338 的
+    那个坑。`PR_BODY` 只在本机没有 PR 上下文时兜底调试。
+    """
     if args.body_file:
-        return read_body_text(args.body_file)
+        return read_body_text(args.body_file), f'--body-file {args.body_file}', None
     path = os.environ.get('PR_BODY_FILE')
     if path:
-        return read_body_text(path)
-    return os.environ.get('PR_BODY')
+        return read_body_text(path), f'PR_BODY_FILE {path}', None
+    if number:
+        body, reason = live_body(number, cache)
+        if body is not None:
+            return body, f'现取 PR #{number}', None
+        return None, '现取失败', reason
+    return os.environ.get('PR_BODY'), 'PR_BODY（事件快照，仅本机调试）', None
 
 
 def check(touched, body, gated=False):
@@ -237,7 +307,7 @@ def check(touched, body, gated=False):
 
     if body is None:
         lines.append(f'  FAIL 改动触及门禁链（{len(touched)} 个文件），但拿不到 PR 正文')
-        lines.append('     CI 需注入 PR_BODY / PR_BODY_FILE，本机用 --body-file')
+        lines.append('     CI 按 PR_NUMBER 现取（需 pull-requests: read），本机用 --body-file')
         for path in touched:
             lines.append(f'     需要交代：{path}')
         return 1, lines + ['FAIL: 门禁改动段缺失（正文不可得）。']
@@ -428,30 +498,93 @@ def self_test():
     # main() 无 base 但显式声明时 fail-closed（不冒充漏列），这条由 main 分支保证。
 
 
-    expect('gate_applies 基线晚于上界', gate_applies('2026-11-03T00:00:00Z'), True)
-    expect('gate_applies 基线恰为上界', gate_applies(APPROVED_AT), True)
-    expect('gate_applies 基线早于上界', gate_applies('2026-10-01T00:00:00Z'), False)
-    expect('gate_applies 基线不可得不适用', gate_applies(''), False)
-    expect('gate_applies 基线坏值不适用', gate_applies('not-a-sha'), False)
+    # 上界未到时一律按旧口径（与基线无关），上界之后才看基线——这条让「闸门建立前」
+    # 可测，而不是只能靠伪造未来提交 / 改系统时钟去撞。
+    before = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    after = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    # 时点判据一律显式喂 now：默认取墙钟，跑到上界那天这类用例会自己改结论。
+    expect('gate_applies 基线晚于上界', gate_applies('2026-11-03T00:00:00Z', after), True)
+    expect('gate_applies 基线恰为上界', gate_applies(APPROVED_AT, after), True)
+    expect('gate_applies 基线早于上界', gate_applies('2026-10-01T00:00:00Z', after), False)
+    expect('gate_applies 基线不可得不适用', gate_applies('', after), False)
+    expect('gate_applies 基线坏值不适用', gate_applies('not-a-sha', after), False)
+    expect('gate_applies 上界未到：新基线也不适用', gate_applies('2026-12-01T00:00:00Z', before), False)
+    expect('gate_applies 上界刚过：新基线适用', gate_applies('2026-11-02T00:00:00Z', after), True)
+
+    # issue #338：正文来源是「当下的 PR 正文」，不是事件快照。
+    # 全部离线：现取路径用预置 cache 喂 payload，不打网络。
+    class Args:
+        body_file = None
+
+    saved = {key: os.environ.pop(key, None)
+             for key in ('PR_BODY_FILE', 'PR_BODY', 'PR_NUMBER', 'GH_TOKEN',
+                         'GITHUB_TOKEN', 'GITHUB_REPOSITORY')}
+    try:
+        # 没有 PR 编号 → 退回 PR_BODY 快照（本机调试的唯一用途）
+        os.environ['PR_BODY'] = no_section
+        body, source, reason = body_from_args(Args(), '', {})
+        expect('#338 无 PR 编号退回快照', body, no_section)
+        expect('#338 快照来源如实标注', '快照' in source, True)
+        expect('#338 快照不留原因', reason, None)
+
+        # 有编号 + 现取成功 → 用现取正文，**不用**快照（这正是 #338 的坏形态）
+        os.environ.update(GH_TOKEN='t', GITHUB_REPOSITORY='o/r')
+        cache = {'9': {'body': approve_last, 'created_at': '2027-01-01T00:00:00Z'}}
+        body, source, reason = body_from_args(Args(), '9', cache)
+        expect('#338 现取优先于快照', body, approve_last)
+        expect('#338 现取来源如实标注', '现取' in source, True)
+        expect('#338 现取到的正文直接过闸门', check(touched, body, gated=True)[0], 0)
+
+        # 有编号但现取失败 → 不退回快照，正文记为不可得并带原因
+        body, source, reason = body_from_args(Args(), '9', {'9': {'__error__': 'HTTP 403'}})
+        expect('#338 现取失败不退回快照', body, None)
+        expect('#338 403 提示缺权限', 'pull-requests: read' in reason, True)
+        expect('#338 现取失败仍红', check(touched, body, gated=True)[0], 1)
+
+        # body 为 null（作者清空正文）→ 有正文、没有段；与「取不到」分开
+        body, source, reason = body_from_args(Args(), '9', {'9': {'body': None}})
+        expect('#338 正文被清空不是「取不到」', (body, reason), ('', None))
+        expect('#338 正文清空 → 段缺失', check(touched, body, gated=True)[0], 1)
+        expect('#338 正文清空报「段缺失」',
+               any('门禁改动段缺失' in line
+                   for line in check(touched, body, gated=True)[1]), True)
+
+        # created_at 与正文共用同一次调用：cache 命中即不再请求
+        expect('#338 created_at 走同一份 payload',
+               pr_created_at('9', {'9': {'created_at': '2027-01-01T00:00:00Z'}}),
+               '2027-01-01T00:00:00Z')
+        expect('#338 无编号时 created_at 为 None', pr_created_at(''), None)
+        expect('#338 没有编号时 live_body 说原因', live_body('')[1], '没有 PR 编号（PR_NUMBER 为空）')
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
     if failures:
         for line in failures:
             print(f'SELF-TEST FAIL {line}')
         raise AssertionError(f'self_test 失败 {len(failures)} 项（issue #107 / #324 夹具）')
-    print('SELF-TEST OK PATTERNS 命中范围（含 .githooks/）、check() 判定与独立复核闸门（#324）的回归夹具全部符合预期')
+    print('SELF-TEST OK PATTERNS 命中范围（含 .githooks/）、check() 判定、独立复核闸门（#324）'
+          '与正文现取（#338）的回归夹具全部符合预期')
 
 
 def main():
     self_test()
+    _main(sys.argv[1:])
 
+
+def _main(argv):
     parser = argparse.ArgumentParser(
-        description='门禁链改动必须在 PR 正文交代（issue #62 / #107 / #324）')
+        description='门禁链改动必须在 PR 正文交代（issue #62 / #107 / #324 / #338）')
     parser.add_argument('--base', help='PR 的 base ref（默认读环境变量 PR_BASE_SHA）')
-    parser.add_argument('--body-file', help='PR 正文文件（默认读 PR_BODY_FILE / PR_BODY）')
+    parser.add_argument('--body-file',
+                        help='PR 正文文件（默认读 PR_BODY_FILE，再按 PR_NUMBER 现取，最后 PR_BODY）')
     parser.add_argument('--gate-changes', action='store_true',
                         help='显式声明本次改动含门禁链（push / parity 无 base 时不许 SKIP）')
     parser.add_argument('--pr-head', help='仅作语义标注：PR 的 head sha（CI 注入 PR_HEAD_SHA）')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     base = args.base or os.environ.get('PR_BASE_SHA') or ''
     declared = args.gate_changes or os.environ.get('GATE_CHANGES') == '1'
@@ -479,19 +612,23 @@ def main():
         print('FAIL: 门禁改动段校验无法完成（fail-closed）。')
         return 1
 
-    # issue #324 时点边界：PR 创建时间优先（CI 按 pull_request.number 现取），
-    # 取不到时退回基线（`base...HEAD` 的 base 提交时间）。
-    stamp = pr_created_at(number) or base
+    # issue #324 时点边界与 issue #338 现取正文共用同一次 GET pulls/<n>。
+    cache = {}
+    stamp = pr_created_at(number, cache) or base
     gated = gate_applies(stamp)
     if gated:
         print(f'  gate 独立复核闸门生效（基线 / PR 创建于 {stamp[:10]}，不早于 {APPROVED_AT[:10]}）')
+    elif datetime.now(timezone.utc) < parse_time(APPROVED_AT):
+        print(f'  gate 独立复核闸门尚未生效（上界 {APPROVED_AT[:10]} 未到），只提示')
     else:
         print(f'  gate 独立复核闸门不适用（基线 / PR 创建早于 {APPROVED_AT[:10]} 或不可得），只提示')
     if head != 'HEAD':
         print(f'  info 对照 head={head}')
 
-    body = body_from_args(args)
-    if declared and not number and body is None and touched:
+    body, source, reason = body_from_args(args, number, cache)
+    if body is not None:
+        print(f'  info 正文来源：{source}')
+    elif declared and not number and touched:
         # push 事件：有 base 可算改动集，但没有 PR、因此没有正文可读。
         # 合并进 slim/main 的 push 天然落在这里（改动已经过 PR 闸门），照常放行；
         # 直接推到受保护分支以外要留痕，但通行与否由分支保护决定，不在本门禁伪判。
@@ -504,6 +641,10 @@ def main():
         return 0
 
     code, lines = check(touched, body, gated=gated)
+    if body is None and reason:
+        # issue #338：现取失败时 check() 照旧判红（不拿事件快照兜底），这里补上原因，
+        # 让「权限没开」「网络不通」与「正文真没写」在同一条日志里可分。
+        lines.insert(-1, f'     正文取不到：{reason}')
     for line in lines:
         print(line)
     return code

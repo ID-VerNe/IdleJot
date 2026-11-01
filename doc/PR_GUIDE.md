@@ -131,13 +131,15 @@ type/<issue 号>-p<字母>[-<数字>]-<slug>   # 多分节时，如 feat/41-pe4-
 
 机器校验由 `scripts/check_gate_change_review.py` 承担：CI 在 PR 事件读取 diff 与正文，命中门禁链却没有 `## 门禁改动` 段、或段内漏列某个被改文件，直接 fail。
 
+**重跑读的是当下正文（issue #338）**：CI 里的正文**不再**取自 `github.event.pull_request.body`——那是事件快照，`gh run rerun` 重放同一个旧事件，改完正文再重跑读到的还是旧正文，于是「补了段与结论」和「什么都没改」在日志里同形，只能靠空推一个 commit 骗出新事件。现在门禁按 `PR_NUMBER` 现取（`GET /repos/<slug>/pulls/<n>`，需要 `pull-requests: read`），所以**改完正文直接 `gh run rerun <run-id>` 即可**，不必再推空 commit。现取失败时它**不**退回快照：改动触及门禁链就照旧红，并打印 `正文取不到：<原因>`——`HTTP 403` 会提示 token 缺 `pull-requests: read`。正文被清空（`body` 为 null）按「有正文、没有段」处理，与「取不到正文」分开报，别把两件事混成一条。列表接口默认一页 30 条，所以脚本显式取 `per_page=100`：`slim` 上同时开着的 PR 超过 30 条以后，不翻页就会把正在跑的那条漏出去。
+
 **结论行必须真的写进 `## 门禁改动` 段**（issue #324）。复核结论贴在 PR **评论**里时，机器读不到——所以结论行要落进正文那一节，两处并存：
 
 - 一行以 `独立复核` 开头，同行带 `APPROVE` / `APPROVED` / `REQUEST_CHANGES`；只写 `<PENDING>` / `待复核` / 什么都写算「还没贴」，**红**。
 - 这一行必须是段内**最后一个**有实际内容的东西（分隔线、空行不算内容）。先写结论、再补断言证据是自审的形状——红。
 - 时点：闸门自 `2026-11-02` 起生效（基线或 PR 创建早于该时刻只打 hint 不判红，早于它开的 PR 不在追责范围）。
 
-红灯的语义是「**复核还没贴**」，不是「CI 坏了」：补完结论行重跑即绿。同一批验收里 PENDING 红 / 结论行在段末绿 / 结论后面还有证据红 / `REQUEST_CHANGES` 也放行（结论已贴即通过，结论内容由人读）——四种组合由脚本入口的 `self_test()` 每次执行都复跑。
+红灯的语义是「**复核还没贴**」，不是「CI 坏了」：补完结论行重跑即绿（正文现取，`gh run rerun` 就够，见上段 issue #338）。同一批验收里 PENDING 红 / 结论行在段末绿 / 结论后面还有证据红 / `REQUEST_CHANGES` 也放行（结论已贴即通过，结论内容由人读）——四种组合由脚本入口的 `self_test()` 每次执行都复跑。
 
 本机预检：
 
@@ -162,7 +164,7 @@ python scripts/check_gate_change_review.py --base origin/slim --body-file <PR �
 1. **CI 全绿**（`ci.yml` 全部门禁）。平台侧已强制：`slim` 开了分支保护，required status check 为 `checks`，CI 没绿时 GitHub 直接把合并按钮判成 `BLOCKED`——这条不再只靠自觉（issue #58）。
 2. **无冲突**：GitHub 显示可合并；有冲突不强行合——在 worktree 里 `git merge origin/slim`（或 rebase）解决，重跑门禁后再推。
 3. 适用时有 `## 基线验证` 段。
-4. **门禁链改动必须有已贴出的独立复核结论**（issue #324）：`## 门禁改动` 段里有一行 `独立复核：APPROVE / APPROVED / REQUEST_CHANGES`，且该行排在段内证据之后。`<PENDING>` 占位不算——「复核还没贴」就不合，这正是自审合并最容易滑过去的那一刻。机器判据见上节，软性文字要求见「门禁改动与独立复核」第 2 条。
+4. **门禁链改动必须有已贴出的独立复核结论**（issue #324）：`## 门禁改动` 段里有一行 `独立复核：APPROVE / APPROVED / REQUEST_CHANGES`，且该行排在段内证据之后。`<PENDING>` 占位不算——「复核还没贴」就不合，这正是自审合并最容易滑过去的那一刻。补完结论后 `gh run rerun` 即可让 CI 重读当下正文（issue #338，无需空推）。机器判据见上节，软性文字要求见「门禁改动与独立复核」第 2 条。
 
 分支保护同时禁了强推与删分支；合并后远端分支由 `delete_branch_on_merge=true` 自动清掉。三项设置各有复现命令，探测脚本 `scripts/check_repo_settings.py` 红时会直接打印：
 

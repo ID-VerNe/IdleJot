@@ -458,7 +458,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 |---|---|---|---|
 | 1 | `static` | `check_publication.py --history` | 发布门禁：凭证、个人路径、私有库 token、图片白名单与未知二进制 fail-closed；--history 另扫 commit 身份与文案 |
 | 2 | `static` | `check_gate_manifest.py` | 元门禁：磁盘 check_*.py、本清单、AGENTS §5.1 生成段与 ci.yml 分片矩阵四者零漂移 |
-| 3 | `static` | `check_gate_change_review.py` | 门禁链改动必须在 PR 正文 `## 门禁改动` 段逐个交代（#62；#107 起 `.githooks/` 钩子改动同样触发）；#324 起段内还须有一行排在段末的独立复核结论（APPROVE / REQUEST_CHANGES，`<PENDING>` 不算）且其后不许再有实质内容；无 PR 上下文时 SKIP，但显式声明 GATE_CHANGES / --gate-changes 时 fail-closed |
+| 3 | `static` | `check_gate_change_review.py` | 门禁链改动必须在 PR 正文 `## 门禁改动` 段逐个交代（#62；#107 起 `.githooks/` 钩子改动同样触发）；#324 起段内还须有一行排在段末的独立复核结论（APPROVE / REQUEST_CHANGES，`<PENDING>` 不算）且其后不许再有实质内容；#338 起正文按 PR 编号现取（`GET pulls/<n>`，需 `pull-requests: read`）而不是读 `pull_request.body` 事件快照，`gh run rerun` 才能读到改完的正文，现取失败时不退回快照而是判红并说出原因；无 PR 上下文时 SKIP，但显式声明 GATE_CHANGES / --gate-changes 时 fail-closed |
 | 4 | `static` | `check_path_hygiene.py` | 路径卫生：运行时数据不许从仓库根推导（防 #14 复发） |
 | 5 | `static` | `check_no_console_child` | 子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发）；#319 起范围含后端在运行时拉起的 scripts/ worker（RUNTIME_WORKERS 白名单），范围本身也被自检钉住——worker 改名即红，不会静默漏扫；#323 起 vendored 树（VENDORED_SOURCES，如 tools/wechat-reader 的 ffmpeg 调用）在同一套判据下扫描，文件不存在时报「未扫」而不是假装干净；#329 起这份 worker 名单由 AST 从运行时树派生并双向对账——代码里新起一个未登记的 worker、登记了却不再起、以及路径求不出来，三种都红，手写清单漏项不再可能。#329 同时也把单文件顶过 1000 行红线，按 #169 PF-2 / #283 / #285 先例拆成 `scripts/check_no_console_child/` 包（入口 `_entry.py`，`python -m scripts.check_no_console_child` 亦可），入口名不变、对 gates.json 与 CI 透明 |
 | 6 | `static` | `check_listen_passthrough.py` | 唤醒内容不被 listen.py 吞掉（#91） |

@@ -6,7 +6,7 @@ new console -- the black box that flashes on the desktop for a few hundred
 milliseconds. It is not reproducible by reading code, only by a window hook, so
 the only durable defence is a static rule plus one place that spells the flag.
 
-This gate asserts six things:
+This gate asserts eight things:
 
 1. Every `subprocess.run/Popen/call/check_output/check_call` in the runtime tree
    (`water-group/`, its `water_group/` bridge, `chatlocal/`, `server_wg.py`, and
@@ -47,8 +47,19 @@ This gate asserts six things:
    not have them: an absent file is reported as `未扫`, which is not the same
    statement as "clean" (issue #323 -- the gate used to have no opinion about
    `tools/` at all, and said so by saying nothing).
+8. The runtime-worker scope is derived from the runtime tree, not hand-maintained
+   (issue #329). Every spawn in `chatlocal/` / `server_wg.py` that passes a
+   `scripts/<name>.py` path is collected as a *derived* worker and must be listed
+   in `RUNTIME_WORKERS`; the list must not contain anything the code no longer
+   starts. Both directions fail. A spawn whose `scripts/` argument cannot be
+   resolved statically (a variable, an f-string, a `glob`) is reported as
+   undecided and must be registered explicitly: silently skipping it is how a
+   new worker stays unscanned, which is issue #319 all over again, one release
+   later. `-m chatlocal.x` is not a worker -- that file is already inside
+   `SCAN_DIRS`.
 
-    uv run python scripts/check_no_console_child.py
+    uv run python scripts/check_no_console_child/_entry.py
+    # 或：uv run python -m scripts.check_no_console_child
 """
 import ast
 import os
@@ -57,6 +68,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
+
+# 门禁按 `python scripts/<名>.py` 跑时，`__file__` 就在 `scripts/` 下；拆包后本体在
+# `scripts/<名>/__init__.py`，再往上数两级落到了 `scripts/` 本身，扫描范围会整片归零
+# （issue #329 拆包时踩到）。所以根由入口交出：`run_main()` 从**入口文件**算，本文件
+# 自己的 `__file__` 只在这条路径之外（被测 import）才用。
 ROOT = Path(__file__).resolve().parent.parent
 
 SPAWNERS = frozenset({'run', 'Popen', 'call', 'check_output', 'check_call'})
@@ -68,16 +85,6 @@ SCAN_DIRS = ('water-group', 'water_group', 'chatlocal')
 SCAN_FILES = ('server_wg.py',)
 SUFFIXES = frozenset({'.py', '.pyw'})
 
-# ...with one exception the directory rule gets wrong (issue #319): a handful of
-# scripts/ files are started *by the backend at runtime*, so they are runtime
-# code that merely lives outside the packages. Scanning the whole directory
-# would fire on dozens of deliberate diagnostic spawns; scanning none of it
-# leaves these three unguarded for the day one of them shells out to ffmpeg.
-RUNTIME_WORKERS = frozenset({
-    'scripts/parse_artifact.py',       # chatlocal/artifacts.py:294
-    'scripts/list_client_accounts.py',  # chatlocal/client_accounts.py:39
-    'scripts/voice_source.py',          # chatlocal/voice.py:189
-})
 
 # Third-party source we vendor into tools/ and patch at install time (issue #323).
 # tools/ is gitignored, so it is absent in CI and in check_pr_parity.py's clean
@@ -112,6 +119,8 @@ def iter_sources():
         base = ROOT / folder
         if not base.exists():
             continue
+        for path in sorted(base.glob('*.py')) + sorted(base.glob('*.pyw')):
+            yield path
         for path in sorted(base.rglob('*')):
             if path.suffix in SUFFIXES and '__pycache__' not in path.parts:
                 yield path
@@ -240,6 +249,7 @@ def scan_scope():
     """
     scanned = {p.relative_to(ROOT).as_posix() for p in iter_sources()}
     missing = sorted(name for name in RUNTIME_WORKERS if not (ROOT / name).exists())
+
     stale = []
     surprising = []
     for name in sorted(DIAGNOSTIC_SPAWN_OWNERS):
@@ -258,6 +268,15 @@ def scan_scope():
         if not any(True for _ in spawn_calls(tree)):
             stale.append(name)
     return missing, stale, surprising
+
+
+# 派生范围（issue #329）在包内：入口顶过 1000 行红线后按 #283 先例拆包
+# （`check_no_console_child/`，入口名不变、对 gates.json 与 CI 透明）。
+# 这里只把公开名字原样接过来，判据与本文件其余规则不搬家。
+from ._workers import (  # noqa: E402
+    RUNTIME_WORKERS, WORKER_DIR, derive_workers, self_test_worker_scope,
+    worker_scope,
+)
 
 
 def marker_positions(lines, start, end):
@@ -603,6 +622,9 @@ def self_test():
                     for name in RUNTIME_WORKERS if name not in scanned)
     if absent:
         raise AssertionError('检测器自测失败：\n  ' + '\n  '.join(absent))
+    # 范围自检只读传进来的源码快照：运行时树的范围由本文件（iter_sources）单点定义，
+    # `_workers` 不自己再走一遍目录，免得两处口径悄悄分叉
+    self_test_worker_scope(read_runtime_sources())
     return True
 
 
@@ -637,6 +659,33 @@ def scan_vendored():
         failures.append('vendored 树里这些 spawn 会给子进程开一个控制台窗口（issue #323）：')
         failures.extend(f'  {rel}:{lineno}  {line}' for rel, lineno, line, _ in violations)
     return scanned, unscanned, failures
+
+
+def read_runtime_sources():
+    """[(relative path, text)] for the runtime tree the derivation reads."""
+    sources = []
+    for path in iter_sources():
+        rel = path.relative_to(ROOT).as_posix()
+        if rel.startswith(WORKER_DIR):
+            continue  # the workers themselves start nothing (they *are* started)
+        try:
+            sources.append((rel, path.read_text(encoding='utf-8')))
+        except (OSError, UnicodeDecodeError):
+            continue
+    return sources
+
+
+def run_main(repo_root):
+    """`main()`, with `ROOT` pinned to the repository root the caller runs from.
+
+    `python scripts/<name>.py` puts the entry file in `scripts/`, two levels below
+    the root; the package body's own `__file__` sits three levels below it instead,
+    so `main()` cannot work the root out from itself (issue #329's split). Each
+    entry names the root it is actually running from.
+    """
+    global ROOT
+    ROOT = Path(repo_root).resolve()
+    return main()
 
 
 def main():
@@ -689,6 +738,18 @@ def main():
     for name in surprising:
         failures.append(f'{name} 同时在 RUNTIME_WORKERS 的扫描范围与 DIAGNOSTIC_SPAWN_OWNERS 里，二者矛盾')
 
+    unregistered, unstarted, undecided = worker_scope(read_runtime_sources())
+    for name, sites in unregistered:
+        failures.append(f'运行时树在起 {name}，但它不在 RUNTIME_WORKERS 里 —— 它是运行时代码，'
+                        f'却不在扫描范围内（issue #329）：{", ".join(sites)}'
+                        '；请登记进 RUNTIME_WORKERS 并注明父进程，再让它过规则 1')
+    for name in unstarted:
+        failures.append(f'RUNTIME_WORKERS 登记了 {name}，但运行时树里已经没有任何 spawn 起它'
+                        '（位置变了或已删除），请同步删掉这一行')
+    for site in undecided:
+        failures.append(f'{site} 把 scripts/ 下的路径交给 spawn，但无法静态求值 —— '
+                        '既不能确认它已被扫描，也不能确认它没有；请改成字面路径或明确登记')
+
     failures.extend(check_helpers())
     failures.extend(check_passthrough_visible())
 
@@ -704,6 +765,7 @@ def main():
         print('POSIX 专用分支   在调用行或其上一行写 `# console-gate: posix-only` 并说明原因')
         print('要子进程的输出    用 winconsole.run_passthrough，别指望 run_hidden 继承 stdout（issue #91）')
         print('DETACHED_PROCESS 不是窗口抑制器，运行时树里不要出现（只有 winconsole 要提它）')
+        print('运行时起新的 scripts/ worker    先把 spawn 加固（走 helper），再登记进 RUNTIME_WORKERS')
         return 1
 
     print('✓ 检测器自测通过（能抓住 issue #39 的原始写法，也能区分 flag 的值）')
@@ -717,9 +779,10 @@ def main():
               f'不是「已检查干净」')
     print('✓ run_hidden / popen_hidden / owned_popen 实跑正常')
     print('✓ run_passthrough 在无控制台父进程下仍能把子进程输出交给调用方（issue #91）')
+    print('✓ 运行时 worker 范围由运行树派生，与 RUNTIME_WORKERS 双向一致（issue #329）')
     print('\nPASS: 控制台开窗门禁通过。')
     return 0
 
 
-if __name__ == '__main__':
-    sys.exit(main())
+if __name__ == '__main__':  # `python -m scripts.check_no_console_child`
+    sys.exit(run_main(Path(__file__).resolve().parent.parent.parent))

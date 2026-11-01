@@ -48,9 +48,9 @@
    "why": "路径卫生：运行时数据不许从仓库根推导（防 #14 复发）"
   },
   {
-   "name": "check_no_console_child.py",
+   "name": "check_no_console_child",
    "shard": "static",
-   "why": "子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发）；#319 起范围含后端在运行时拉起的 scripts/ worker（RUNTIME_WORKERS 白名单），范围本身也被自检钉住——worker 改名即红，不会静默漏扫；#323 起 vendored 树（VENDORED_SOURCES，如 tools/wechat-reader 的 ffmpeg 调用）在同一套判据下扫描，文件不存在时报「未扫」而不是假装干净"
+   "why": "子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发）；#319 起范围含后端在运行时拉起的 scripts/ worker（RUNTIME_WORKERS 白名单），范围本身也被自检钉住——worker 改名即红，不会静默漏扫；#323 起 vendored 树（VENDORED_SOURCES，如 tools/wechat-reader 的 ffmpeg 调用）在同一套判据下扫描，文件不存在时报「未扫」而不是假装干净；#329 起这份 worker 名单由 AST 从运行时树派生并双向对账——代码里新起一个未登记的 worker、登记了却不再起、以及路径求不出来，三种都红，手写清单漏项不再可能。#329 同时也把单文件顶过 1000 行红线，按 #169 PF-2 / #283 / #285 先例拆成 `scripts/check_no_console_child/` 包（入口 `_entry.py`，`python -m scripts.check_no_console_child` 亦可），入口名不变、对 gates.json 与 CI 透明"
   },
   {
    "name": "check_listen_passthrough.py",

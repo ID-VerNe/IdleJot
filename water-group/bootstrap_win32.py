@@ -134,7 +134,7 @@ def start_process_detached(cmd, cwd=None, log_name=None, env=None):
     try:
         # popen_hidden owns the window flag; passing only the process-group bit
         # keeps this call site free of hand-rolled constants (see
-        # scripts/check_no_console_child.py).
+        # scripts/check_no_console_child/_entry.py).
         return winconsole.popen_hidden(
             cmd,
             cwd=cwd or str(ROOT_DIR),

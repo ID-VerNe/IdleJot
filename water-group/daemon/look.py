@@ -98,19 +98,17 @@ def pick():
     return 0
 
 
-def _inbox_id_of_events(event_id):
-    """事件流 id -> 会话库 rowid（``wg_events`` 行上的 ``inbox_id``）。
+def _event_row(event_id):
+    """事件流 id -> `wg_events` 那一行（`dict`）；不在事件流里返回 `None`。
 
-    ``chat_inbox`` 是 AUTOINCREMENT 且跨会话共用，同一条消息在两套编号里的数字
-    基本相同——但**只是基本相同**：别群先插的行会把库 rowid 推高，于是两者分叉。
-    图片索引（``wg_images``）与 ``read_chat_image`` 都用库 rowid，所以补读必须按
-    库口径去取，不能假设 ``wg_events.id`` 就等于它（issue #203）。
-    """
-    event = event_by_id(event_id)
-    try:
-        return int(event.get("inbox_id"))
-    except (TypeError, ValueError):
-        return None
+    issue #340：本文件改前自己有一份 ``event_by_id()``，而 #216 把它删掉、只留
+    `wg_event_ref.resolve_id()` 之后，调用点没有跟着改——裸数字一进来就抛
+    ``NameError``，而唤醒行打给 Agent 的补读命令全是裸数字。现在按 id 取行只走
+    `wg_event_ref.resolve_id(..., namespace=EVENT)`：**只查事件流、不做回库兜底**。
+    裸数字的契约就是事件流 id（issue #203），兜底会把库里那条另一条消息带进来；
+    要读追问行/上下文那条，调用方会让用户改写 ``q<n>``。    """
+    ref = wg_event_ref.resolve_id(event_id, namespace=wg_event_ref.EVENT)
+    return ref.payload if ref is not None else None
 
 
 def read_event(event_id, index, frames):
@@ -160,8 +158,13 @@ def look(ref, index, frames):
     """按记号补读（issue #203）：``q<n>`` 直接是库 rowid，裸数字是事件流 id。
 
     两套编号会撞号：``--event 7`` 是唤醒行第 7 条，``--event q7`` 是追问行/上下文
-    里那条闲聊。裸数字仍按改前的做法经 ``wg_events`` 反查库 rowid（历史行为不变），
-    只是现在反查不到时**说出来**，不再拿那个数字去猜库。
+    里那条闲聊。
+
+    **裸数字走哪套编号（issue #340）**：事件流行上的 ``id`` 来自 MCP 包里的
+    ``messages[].id``，而 ``chatlocal/mcp_chat.py:303,506`` 那个值就是 ``chat_inbox``
+    的 rowid（``read_chat_image``、``wg_images``、图片索引、``stop`` 的清理全都按它
+    取行）。所以裸数字先**只**在事件流里确认这条投递过，再**原样**拿它当库 rowid
+    去补读——不在事件流里就明说没有，不静默回库兜底（那正是 #203 要防的撞号）。
     """
     try:
         namespace, number = wg_event_ref.parse(ref)
@@ -170,12 +173,17 @@ def look(ref, index, frames):
         return 1
     if namespace == wg_event_ref.INBOX:
         return read_event(number, index, frames)
-    inbox = _inbox_id_of_events(number)
-    if inbox is None:
+    if _event_row(number) is None:
         print(f"事件流里没有 id={number} 的记录，对着它补读会取到无图的条目。")
         print(f"      要读追问行/上下文里的那条请写 --event q{number}")
         return 1
-    return read_event(inbox, index, frames)
+    # 库里那条已被挤掉时不能装作「读得到、只是没图」：1000 条上限以外的事件行
+    # 仍留在事件流里（issue #340）。
+    if wg_event_ref.resolve_id(number, namespace=wg_event_ref.INBOX) is None:
+        print(f"事件流里有 id={number}，但它已不在会话库里"
+              f"（{wg_event_ref.SRC_INBOX} 每条会话只留 1000 条），像素取不到了。")
+        return 1
+    return read_event(number, index, frames)
 
 
 def main(argv=None):

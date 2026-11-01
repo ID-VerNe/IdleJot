@@ -28,7 +28,7 @@ import html
 import json
 import re
 
-from .text_limits import READ_PREVIEW_CHARS, clip
+from .text_limits import EVENT_TEXT_CHARS, READ_PREVIEW_CHARS, clip
 
 ID_LIMIT = 100
 QQ_LIMIT = 30
@@ -259,6 +259,82 @@ def card_text(raw_kind, raw_data, segment=None):
     if fields.get('url'):
         text += ' → ' + fields['url'] + ('…' if fields.get('url_truncated') else '')
     return '[' + text + ']'
+
+
+def render_content(parts, segments=None, limit=EVENT_TEXT_CHARS):
+    """把逐段拼出的 content 收进 ``limit``——**切点落在段边界上**（issue #315）。
+
+    入库侧（``mcp_chat.receive``）与引用/转发节点渲染（``mcp_chat_details.render``）
+    以前各自写一份 ``''.join(parts)[:12000]``：纯字符数硬切，不看切点落在哪个段的
+    占位上，切掉收尾 ``]`` 的占位（``[卡片 → https://…]``）在唤醒行的
+    ``wg_text.strip_placeholders`` 里匹配不上，半截 URL 就原样进了正文。
+
+    所以切断按**段**走，不再按字符：
+
+    * 逐段累加；**只要后面还有段**就给分隔留一个字符，所以全量装得下时一个字符
+      都不改（走下面那条直通），只有真超限的那条路径上才在段边界留一点白；
+    * 切点落在某段中间、而这一段是**普通正文**时交给 ``text_limits.clip()``
+      （句边界 + 去尾空白），不再手写裸切片——唯一归属仍在 ``text_limits``；
+    * 切点落在**段占位**中间时整段不要：回退到上一个完好的边界。代价只是几个字的
+      标签丢了，而不是半截 URL 漏给 Agent。判断「这段是不是占位」用
+      ``wg_text.PLACEHOLDERS`` 的一行口径（开头 ``[``、不带换行），不另立一份正则。
+
+    传了 ``segments`` 时把放不下的段一并丢掉，**段清单与 content 一一对应**——
+    「content 里看不到这段」与「段上还有这段」两种说法同时出现时，下游只能二选一
+    猜。返回值是 ``(content, segments)``；不传 ``segments`` 就返回 ``(content, None)``。
+    """
+    if limit <= 0:
+        raise ValueError("render_content() needs a positive limit")
+    texts = [str(part) for part in parts]
+    whole = ''.join(texts)
+    if len(whole) <= limit:
+        return whole, (list(segments) if segments is not None else None)
+
+    kept = []      # 已经装下的段文本（截断的那一段在这里，是最后一条）
+    used = 0
+    cut_at = len(texts)
+    for index, part in enumerate(texts):
+        last = index == len(texts) - 1
+        reserve = 0 if last else 1
+        start = used + len(part)
+        if start + reserve <= limit:
+            kept.append(part)
+            used = start
+            continue
+        # 这一段装不下：只有普通正文才值得切在中间，占位一律整段丢弃。
+        room = limit - used - reserve
+        if room > 0 and not _is_placeholder(part):
+            clipped = clip(part, room)
+            if clipped.text:
+                kept.append(clipped.text)
+                used += len(clipped.text)
+        cut_at = index + 1
+        break
+
+    body = _join_segments(kept)
+    return body, (list(segments)[:cut_at] if segments is not None else None)
+
+
+def _is_placeholder(text):
+    """这一段是不是段占位（``[图片]`` / ``[卡片：标题 → 链接]``）。"""
+    return text.startswith('[') and '\n' not in text
+
+
+def _join_segments(kept):
+    """按段拼回 content：占位后面补一个空格，其余直接相接。
+
+    占位后**总**留一个空格，是因为入库 payload 有 20000 字的整体封顶
+    （``mcp_chat.receive``）、唤醒行还会按额度再切一次；紧贴的
+    ``…[卡片 → https://…]一到十点`` 一旦被切在 ``]`` 后面，读起来就是
+    一个看不出断在哪的句子。普通正文之间不补：原文里本就没有这个空格，
+    补进去会让同一句话在 content 与 ``--show`` 里长得不一样。
+    """
+    out = []
+    for index, part in enumerate(kept):
+        out.append(part)
+        if index + 1 < len(kept) and _is_placeholder(part):
+            out.append(' ')
+    return ''.join(out)
 
 
 def _allowance(budget):

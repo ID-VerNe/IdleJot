@@ -352,7 +352,109 @@ $ mcp_chat_dossier.py::query_group_notes: 75-82
 | `MemoryProfileMixin` 拆分（PF-3 收窄） | 597 span / 611 文件均在墙内，方法双向耦合紧（dossier+observe 调 `find_profile`/`_memory_view`/`_merge_memories`/`_upsert_group_memory`），拆付耦合税无体量收益；越 ADVISORY 带再单开 |
 | `scripts/` 残留 `sys.path.insert`（77 文件）/ `for x in CASES`（5 文件） | PE-1 划在范围外的特殊形态（`fixture_server` 包裹 / `(label,fn)` 元组收集 `FAILURES` / `(name,case)` 非 `@case`），逐文件核对过差异是故意的 |
 | `antigravity_dry_replay.py` 的 `ThreadingHTTPServer` + `def restrict` | WS/replay 形态特殊，是 `-19` DRY-1 收口后剩下的网络护栏持有者；迁移收益低于风险 |
-| 19 个 ADVISORY 带文件（700–1000 行） | 可见不致命，ADVISORY 的设计就是「visible, not fatal」；无一个越 1000 FAIL 线，`EXEMPTIONS` 为空 |
+| 18 个 ADVISORY 带文件（700–1000 行） | 可见不致命，ADVISORY 的设计就是「visible, not fatal」；无一个越 1000 FAIL 线，`EXEMPTIONS` 为空。**计数按 `check_module_size.py` 实测**（issue #288）：上表说的是 19，`check_module_size.py` 当场只打 18 行 ADVISORY——`check_listener_rehang` / `check_dossier_cadence` / `check_gap_disclosure` 等拆包后，原单体文件已出带，行数口径也跟着变了 |
+
+### 6.1 三个 advisory 带回读（issue #288，四文件结论 KEEP）
+
+#288 的事实前提是「第四轮审计里这三个文件**未读到底**，不盲改」。本轮逐个读完 end-to-end
+（`reply.py` 1–999、`dossier.py` 1–973、`commands.py` 1–884 全部落目），给结论。
+**三个都是 KEEP**，理由不是「行数没越墙」（那是 ADVISORY 带的设计前提，不是拆分依据），
+而是「没有干净 seam」或「拆开只增间接层」。行数按 `origin/slim@f0dc7ef` 实测，
+`check_module_size.py` 当场输出 `0 exemptions`。
+
+判据统一用 #169 PF-3 的「拆开付耦合税无体量收益」（`MemoryProfileMixin` 先例，§6 上一行），
+再加两条本轮新增的硬判据：
+
+- **seam 干净度**：切出去的那块，被留下的那半是否还要反向调它、或它是否要反向调留下的半。
+  双向都要调 = 不是 seam，是同一个变更理由被劈成两半（两处要一起改，那就更糟）。
+- **门禁的 AST/模块级依赖**：门禁是否按**字面文件名**解析这个模块的 AST、
+  是否在模块级 `import X` 后**就地改** `X.SOMETHING`。这两种依赖让「拆成包」变成门禁改动，
+  而门禁链改动要另走 `## 门禁改动`  + 独立复核（`doc/PR_GUIDE.md`）。
+
+| 文件 | 行 | 代码/注释/空行 | 结论 | 为什么 |
+|---|---|---|---|---|
+| `water-group/daemon/reply.py` | 999 | 542 / 328 / 129 | **KEEP** | 见下 reply 段 |
+| `water-group/daemon/dossier.py` | 973 | 613 / 245 / 115 | **KEEP** | 见下 dossier 段 |
+| `water-group/daemon/commands.py` | 884 | 544 / 212 / 128 | **KEEP** | 见下 commands 段 |
+
+**`reply.py` KEEP**。#288 猜的唯一 seam 是追问+续挂块（`open_followup` 616–652 /
+`wait_for_next` 655–736）。读完确认它**确实是单向的**（两块都不调 send 侧任何函数，
+只 `plugins.emit` 与 `winconsole.run_passthrough`），但拆它不划算，三条理由都有证据：
+
+1. **门禁按字面文件名解析它的 AST**：`scripts/check_listener_rehang/budget.py:243-247`
+   用 `ast.parse((DAEMON / "reply.py").read_text(...))` 找名为 `wait_for_next` 的 `FunctionDef`，
+   找不到就**返回 False（静默红）**。模块搬家 = 改这个路径常量；拆成包还得让
+   `reply.wait_for_next` 的属性链继续成立（`:275` 直接调 `reply.wait_for_next(...)`），
+   即需要一层再导出——新增的间接层只为体量，不为职责。
+2. **被拆的那块只是 121 行，留下的 878 行仍在 ADVISORY 带**：`wait_for_next` 自己
+   的 docstring（656–694）就占 39 行、正文注释占大头。拆完 `reply.py` 仍 ~880 行，
+   仍在 700+ 带，只是把「一个 999 行的文件」换成「878 + 121 两个头」。
+3. **反向依赖已经存在且是刻意的**：`water-group/daemon/wg_context.py:77` 延迟
+   `import reply`（`:75-76` 注释写明「顶层反向 import 会成环」）。再多一层模块，
+   环的形状不变但多一个节点，而 `reply.py` 的模块级再导出（`BUBBLE_GAP`/`MAX_BUBBLES`，
+   `:103-105`）已被 `check_bubble_cap.py:141`、`check_reply_context.py:167` 直接读——
+   任何拆分都要在这两处维持同一记号。
+
+已拆出、无需再动的部分（#288 证据链里已验证）：只读分支 `_run_readonly`（789–811）
+已把 `--context`/`--show`/`--list`/`--who` 全委派给 `wg_context` / `wg_text` / `wg_wakes`；
+参数表 `_build_parser`（739–786）已因「让 `main()` 读得懂」（`:742` 原文）单拎；
+气泡上限、发送失败诊断、图片校验分别收在 `wg_bubbles` / `wg_send_failure` / `wg_images`。
+剩下的 `main()`（813–995）是两条发送路径（OneBot 直发 / 计划通道）的**同一套**前置校验
+（`--max-bubbles` 越界、`--at` 全未解析、气泡拆分、`--also` 归属、图片校验），
+拆开会把「发之前先把能拒的都拒掉」这条不变式劈成两半。
+
+**`dossier.py` KEEP**。文件里有四个可辨认的关注点，读完逐个否掉：
+
+1. cadence 块（`settings` 133 / `quiet_*` 217–313 / `due_*` 344–415 / `cmd_check` 417 /
+   `cmd_tick` 458 / `cmd_dump` 514 / `cmd_digest` 534 / `cmd_mark` 581，到 604 止）——**内聚**：
+   整块只读同一个 mark 文件，`load_mark`/`save_mark`（173–193）是它自己的存储层，
+   `:181-186` 的 docstring 记着「read-modify-write」是 #162 修出来的不变式。切出去就是
+   「一个文件 + 一次搬家」，没有耦合税，但也没有职责分离（同一个变更理由）。
+2. 写入动词（`cmd_ingest` 647 / `plan_apply` 689 / `cmd_apply` 722 / `cmd_notes` 852）——
+   **与污染动词共用五个 helper**：`engine()`（607）、`event_ceiling()`（619）、
+   `resolve_group()`（626）、`read_payload()`（640）、`emit()`（780）。只看 `grep -n`
+   的调用点密度（`engine()` 被 647/750/789/818/839/852 六处调用）就能看出：谁来切，
+   这五个 helper 都得上搬家或者再导出一层，双向绑定——按上文的 seam 判据这不是 seam。
+3. 污染动词（`cmd_audit_pollution` 789 / `cmd_scrub_pollution` 818 / `cmd_restore_pollution` 839）——
+   #169 PF-3 已经把**引擎侧**的污染块搬到 `memory_pollution.py`，这三条是**CLI 壳**
+   （60 行，含参数与报告渲染），搬走等于把一条命令的入口和它的实现分在两地。
+4. `main()`（903–969）是 13 个动词的**并列一张表**，每支一行 `return cmd_*`；
+   这正是「拆分先画边界再切」（§5）要求的形态，边界已经画好了。
+
+额外一条：`check_dossier_cadence` 与 `check_dossier_ingest` / `check_pollution_scrub` /
+`check_wake_dossier` 都按**字面文件名**跑子进程或解析 AST
+（`scripts/check_dossier_ingest.py:21`、`scripts/check_pollution_scrub.py:28`、
+`scripts/check_wake_dossier.py:394`、`scripts/check_dossier_cadence/_common.py:37`），
+搬家要同步改四处（含一个包内的 `_common`），收益是 973→0 与 973→~700 的差别，
+但改动面是把三个门禁推入「门禁改动」复核流程。**不做。**
+
+**`commands.py` KEEP**。#288 猜的 seam 是 settings 块（`DEFAULTS` 59–81 + `settings_from` 276–305 +
+`_plugins_from` 203–273），抽成 `wg_settings.py`。读完确认**这个 seam 不干净**：
+
+1. **`_plugins_from` 与插件注册表是双向绑定的**：`_plugins_from`（`:231`）直接遍历
+   `PLUGINS.plugins()`、`:236` 读 `plugin.legacy_section`、`:262-263` 读
+   `plugin.options_defaults` / `plugin.normalize`。把 `_plugins_from` 搬走，它要反向
+   `import commands`（或把 `PLUGINS` 也搬走）——`PLUGINS` 在 `:103` 由
+   `plugins.load_all(...)` 在 **import 期**装配，参数里还带 `settings_provider=lambda: SETTINGS_BOX["settings"]`（`:106`）
+   与 `sender=_send_via_onebot`（`:105`，`_send_via_onebot` 又调 `send_group_msg`/
+   `segments_for`，两个都在宿主里）。这是**环形绑定**，不是 seam。
+2. **门禁在模块级 import 后就地改这四个名字**：`commands.HANDLERS`（`check_qr_login/__init__.py:355-357`
+   就地插入探针、`:373` 再整体赋回 `commands.HANDLERS = real`）、`commands.PLUGINS`
+   （`check_plugin_registry.py:61`、`check_busboss.py:320`）、`commands.SETTINGS_BOX["settings"]`
+   （`check_plugin_registry.py:224` 就地写）、`commands.LOG` / `commands.LOCK`
+   （`check_miyoushe.py:507`、`check_sixty/__init__.py:595`、`check_qr_login/__init__.py:758`、
+   `check_slash_commands.py:298`）。`:108-109` 的注释把这条写成了设计：
+   「合并成模块级名字而不是在 `resolve_reply` 里现拼：测试直接改 `commands.HANDLERS` 打桩」。
+   任何搬家都得保留这些属性链**在同一个模块对象上**，那就必须再导出一层。
+3. **多进程/一次性 CLI 都按模块取三个不同的东西**：`up.py:313-318` 取
+   `load_settings` + `PLUGINS.status_line` + `PLUGINS.emit`（`--status` 只读）、
+   `wg_up_stack.py:180` 取 `clear_stale_lock`（单实例锁，`AGENTS.md` §2.5 点名它是
+   锁路径的**唯一**归属）、`reply.py:610` 与 `watch.py:254/387` 延迟 import 取 settings。
+   拆一刀要么让 `--status` 走两次 import，要么让锁跟着 settings 一块儿搬（那是错搬）。
+4. **传输与仲裁（331–628）本身就是本文件唯一「域无关」的那半**，
+   `:20-26` 的模块 docstring 明确写了「本文件只留传输与仲裁（前缀、冷却、去重、引用、
+   凭证链路、发送），域知识一律在插件里（issue #4 PA–PC）」——**审计要给的那一刀已经
+   在 #4 里切完了**，剩下的 884 行是宿主本身。
 
 ---
 

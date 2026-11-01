@@ -15,7 +15,14 @@
 4. **孤儿登记不复用**：登记在、目录不在时必须按失败处理并提示 `prune`，不许把一棵不存在
    的树当成可复用现场（取消全局 `prune` 之后的新坑，issue #348 复核第 ② 条）；
 5. **`main()` 持锁接线**：跑真的 `check_pr_parity.main()`，锁被占期间它不许进入 `_parity`，
-   放锁之后才进——只验锁模块本身证明不了 `main()` 用上了它（issue #348 复核第 ① 条）。
+   放锁之后才进——只验锁模块本身证明不了 `main()` 用上了它（issue #348 复核第 ① 条）；
+6. **收尾不误伤别人的登记**：本门禁收尾时若表里还有**现场之外**的 `idlejot-parity-*` 登记，
+   `unregister_scene()` 必须拒绝全仓 prune、只把本现场的残留说出来。
+
+本门禁**自己不跑全仓 prune 来造现场**：`cleanup()` 明文不调 `git worktree prune`，因为那是
+全仓写操作。用例要的「真树」换一个 scratch 直接建就行；只有收尾时为了摘掉**本门禁自己**
+造出来的孤儿登记才可能 prune，且先断言那一刻表里的 `idlejot-parity-*` 条目全在本轮现场里
+（`unregister_scene()`），断言不过就不 prune、只把残留说出来。
 
 跑法：`python scripts/check_pr_parity_isolation.py`（本机手跑；它建真 worktree，量级与
 `check_pr_parity.py` 同档，所以不在 CI 分片里跑）。
@@ -67,6 +74,66 @@ def lock_cli(scene, *args):
 
 def head_sha():
     return git('rev-parse', 'HEAD').stdout.strip()
+
+
+def scene_paths(pattern):
+    """登记表里路径落在 `scene`（`pattern` 通配）内的那些条目——`git worktree list --porcelain` 的逐行产物。
+
+    匹配走**规范化后的精确前缀**，不走 `fnmatch`：`git worktree list` 打的是正斜杠路径
+    （`/` 分隔），`Path` 拼出来的是反斜杠，两边都得先 `normcase(normpath())`；
+    而 `fnmatch` 在 Windows 上不把分隔符当成可匹配字符：`<根>\a\b` 匹配不上 `<根>\a\*`。
+    """
+    out = git('worktree', 'list', '--porcelain').stdout.splitlines()
+    want_all = pattern == '*'
+    wanted = None if want_all else os.path.normcase(os.path.normpath(pattern)) + os.sep
+    hits = []
+    prefix = 'worktree '
+    for index, line in enumerate(out):
+        if not line.startswith(prefix):
+            continue
+        path = line[len(prefix):]
+        if not want_all and not os.path.normcase(os.path.normpath(path)).startswith(wanted):
+            continue
+        fields = {}
+        for follow in out[index + 1:]:
+            if not follow.strip():
+                break
+            key, _, value = follow.partition(' ')
+            fields[key] = value or True
+        hits.append((path, fields))
+    return hits
+
+
+def unregister_scene(scene):
+    """把**本门禁自己**留下的登记一条条摘掉：先 `worktree remove --force`，摘不掉的
+    （目录已经不在、登记还在）才 `prune`。
+
+    这不是「收尾顺手 prune」——`cleanup()` 明文不做全仓 prune，是因为那会清掉**别人**的
+    登记。这里 prune 的正当性只来自一个事实：那一刻表里残留的 `idlejot-parity-*` 条目
+    全部落在本轮 `mkdtemp(prefix='parity-348-')` 的现场里，而现场目录已经在上一行删掉了。
+    所以先断言「现场条目之外没有别的 idlejot-parity-* 登记」，断言不过就不 prune，
+    只把残留说出来——别人的现场一格都不碰。
+    """
+    return _unregister(scene)[0]
+
+
+def _unregister(scene):
+    """`unregister_scene()` 的本体，多回一个 `pruned` 供对照用例断言「这次到底动没动全仓」。"""
+    own = scene_paths(str(scene))
+    losers = [(path, fields) for path, fields in own if 'prunable' in fields]
+    if not losers:
+        return [], False
+    mine = {os.path.normcase(os.path.normpath(p)) for p, _ in own}
+    live = [path for path, _ in scene_paths('*') if 'idlejot-parity-' in path
+            and os.path.normcase(os.path.normpath(path)) not in mine]
+    if live:
+        print(f'WARN 现场之外还有 {len(live)} 条 idlejot-parity-* 登记，为免误伤不 prune；'
+              f'本门禁留下 {len(losers)} 条孤儿登记：{[p for p, _ in losers]}')
+        return losers, False
+    git('worktree', 'prune')
+    if scene_paths(str(scene)):
+        print(f'WARN 本门禁的孤儿登记 prune 之后仍在：{[p for p, _ in scene_paths(str(scene))]}')
+    return [], True
 
 
 def wait_for(predicate, seconds=30.0):
@@ -229,13 +296,57 @@ def case_orphan_not_reused(scene):
     check('孤儿不给路径', reused, None)
     check('孤儿原因点名 prune', 'prune' in (reason or ''), True)
     # 对照：登记与目录都在时才必须 reuse（否则上面那条 fail 什么都不证明）。
-    git('worktree', 'prune')
-    check('prune 之后登记已清', parity.is_registered(path), False)
-    status, path, _ = parity.add_worktree(sha, scratch)
-    check('prune 后重建成功', status, parity.ADD_OK)
-    third, same, _ = parity.add_worktree(sha, scratch)
+    # **不跑 `git worktree prune` 来造这棵对照树**——那是全仓写操作，正是 `cleanup()`
+    # 明文不做的事（`check_pr_parity.py:cleanup` docstring），在门禁里跑一遍等于把
+    # 别人的孤儿登记顺手清掉。换一个 scratch 直接建第二棵真树即可。
+    other = scene / 'orphan-reuse-control'
+    status, path, _ = parity.add_worktree(sha, other)
+    check('对照树建成', status, parity.ADD_OK)
+    third, same, _ = parity.add_worktree(sha, other)
     check('真树仍在时才 reuse（对照）', (third, same), ('reuse', Path(path)))
     parity.cleanup(path)
+
+
+def case_unregister_spares_others(scene):
+    """9. 收尾的孤儿清理只动本现场：现场之外还有别的 `idlejot-parity-*` 登记时必须不 prune。"""
+    print('\n[9] 收尾不误伤别人的登记')
+    sha = head_sha()
+    # 本现场的孤儿：建一棵再只拆目录（登记留在表里）。
+    status, own_path, _ = parity.add_worktree(sha, scene / 'own-orphan')
+    check('本现场的树建好', status, parity.ADD_OK)
+    shutil.rmtree(own_path)
+    check('本现场的孤儿登记还在', parity.is_registered(own_path), True)
+    # 现场之外的「别人」：换一个不在 `scene` 下的前缀，假装是另一处 parity 留下的登记。
+    stranger_root = Path(tempfile.mkdtemp(prefix='idlejot-parity-stranger-'))
+    stranger = stranger_root / 'pristine'
+    try:
+        added = git('worktree', 'add', '--detach', str(stranger), sha)
+        check('别人的树建好', added.returncode, 0)
+        shutil.rmtree(stranger)  # 只拆目录，让它的登记也变成 prunable
+        check('别人的孤儿登记还在', parity.is_registered(stranger), True)
+
+        losers, pruned = _unregister(scene)
+        check('现场之外有人时不动全仓 prune', pruned, False)
+        check('如实报出本现场的孤儿',
+              sorted(Path(p).parent.name for p, _ in losers), ['orphan-reuse', 'own-orphan'])
+        check('别人的孤儿登记原样留着', parity.is_registered(stranger), True)
+
+        # 摘掉「别人」之后，同一份现场就该能收干净——否则上面那条 WARN 只是「永远不收」。
+        # 摘的时候只删那条登记文件、不跑 `git worktree prune`：prune 是这次对照的**被测对象**，
+        # 在测试自己手里跑一遍，第 336 行就再也证明不了什么（它会被这一步提前满足）。
+        gitdir = Path(git('rev-parse', '--git-common-dir').stdout.strip()) / 'worktrees'
+        for entry in gitdir.iterdir():
+            if entry.is_dir() and (entry / 'gitdir').is_file():
+                target = (entry / 'gitdir').read_text(encoding='utf-8').strip()
+                if os.path.normcase(os.path.normpath(target)) == \
+                        os.path.normcase(os.path.normpath(str(stranger / '.git'))):
+                    shutil.rmtree(entry)
+        check('别人的登记已摘', parity.is_registered(stranger), False)
+        losers, pruned = _unregister(scene)
+        check('没有旁人时才 prune（对照）', pruned, True)
+        check('本现场的孤儿登记已清', scene_paths(str(scene)), [])
+    finally:
+        shutil.rmtree(stranger_root, ignore_errors=True)
 
 
 def case_main_holds_lock(scene):
@@ -304,15 +415,17 @@ def main():
                            ('不连坐', case_prune_spares_others),
                            ('不静默', case_cleanup_not_silent),
                            ('孤儿登记不复用', case_orphan_not_reused),
-                           ('main() 持锁接线', case_main_holds_lock)):
+                           ('main() 持锁接线', case_main_holds_lock),
+                           ('收尾不误伤别人的登记', case_unregister_spares_others)):
             guarded(name, case, scene)
     finally:
         shutil.rmtree(scene, ignore_errors=True)
+        unregister_scene(scene)
     if FAILS:
         for line in FAILS:
             print(f'FAIL {line}')
         return 1
-    print('PASS parity 现场隔离八项')
+    print('PASS parity 现场隔离九项')
     return 0
 
 

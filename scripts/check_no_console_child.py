@@ -42,6 +42,11 @@ This gate asserts six things:
    the child's stdout points at its new console, so inheriting it drops whatever
    the child printed (issue #91 -- `listen.py` reported a bare `WAKE` four times
    in a row).
+7. The vendored trees in `VENDORED_SOURCES` are scanned with the same rules when
+   they are present. They are gitignored and patched at install time, so CI does
+   not have them: an absent file is reported as `未扫`, which is not the same
+   statement as "clean" (issue #323 -- the gate used to have no opinion about
+   `tools/` at all, and said so by saying nothing).
 
     uv run python scripts/check_no_console_child.py
 """
@@ -73,6 +78,15 @@ RUNTIME_WORKERS = frozenset({
     'scripts/list_client_accounts.py',  # chatlocal/client_accounts.py:39
     'scripts/voice_source.py',          # chatlocal/voice.py:189
 })
+
+# Third-party source we vendor into tools/ and patch at install time (issue #323).
+# tools/ is gitignored, so it is absent in CI and in check_pr_parity.py's clean
+# worktree: a missing file is reported as 未扫, never as a silent skip and never as
+# a failure. A file that *is* present is scanned with the same rules as runtime code.
+VENDORED_SOURCES = {
+    'tools/wechat-reader/wechatauto/media.py':  # ffmpeg transcode of wxgf images
+        'scripts/reader_patches.py: patch_wechat_media',
+}
 
 # Diagnostic/manual scripts that spawn on purpose and are *not* runtime code.
 # Empty today (the whitelist above is precise enough); the table exists so that
@@ -147,6 +161,12 @@ def _flag_names(node):
     Names only, so `subprocess.CREATE_NEW_PROCESS_GROUP | winconsole.NO_WINDOW`
     yields both halves and an alias (`from subprocess import CREATE_NO_WINDOW`)
     still shows up as a Name.
+
+    The attribute name of `getattr(subprocess, "CREATE_NO_WINDOW", 0)` counts as a
+    name too (issue #323): vendored code cannot import the helpers, so spelling the
+    flag with getattr is its accepted shape and must read the same as an attribute
+    access. Only the getattr attribute-name argument is read -- arbitrary string
+    literals elsewhere in the expression still prove nothing.
     """
     names = []
     for sub in ast.walk(node):
@@ -154,6 +174,11 @@ def _flag_names(node):
             names.append(sub.id)
         elif isinstance(sub, ast.Attribute):
             names.append(sub.attr)
+        elif (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+              and sub.func.id == 'getattr' and len(sub.args) >= 2
+              and isinstance(sub.args[1], ast.Constant)
+              and isinstance(sub.args[1].value, str)):
+            names.append(sub.args[1].value)
     return names
 
 
@@ -487,6 +512,13 @@ SELF_TEST_CASES = (
     ('import subprocess\nNOTE = "subprocess.run([1])"\n', 0, '字符串里的示例不算调用'),
     ('import subprocess\nsubprocess.Popen(["x"], **{"shell": False})\n', 1,
      '无法静态确认的 **kwargs 必须被抓'),
+    # issue #323: vendored code cannot import the helpers, so it spells the flag with
+    # getattr; that must read the same as `subprocess.CREATE_NO_WINDOW`. A getattr for
+    # any *other* attribute still proves nothing.
+    ('import subprocess\nsubprocess.run(["x"], creationflags=getattr(subprocess, '
+     '"CREATE_NO_WINDOW", 0))\n', 0, 'getattr 取 CREATE_NO_WINDOW 放行（vendored 形状）'),
+    ('import subprocess\nsubprocess.run(["x"], creationflags=getattr(subprocess, '
+     '"CREATE_NEW_PROCESS_GROUP", 0))\n', 1, 'getattr 取别的常量不算抑制窗口'),
 )
 
 
@@ -545,6 +577,25 @@ def self_test():
     if len(bad) != 1:
         raise AssertionError('检测器自测失败：tools/wechatauto/media.py 的原始写法必须被抓'
                              '（issue #319）')
+    # issue #323: the same file, patched by reader_patches.patch_wechat_media, must
+    # come out clean through the very scanner that failed it above -- otherwise the
+    # vendored scope would be red forever on any machine that has tools/.
+    sys.path.insert(0, str(ROOT / 'scripts'))
+    from reader_patches import patch_wechat_media
+    patched_media = patch_wechat_media(media_snippet.encode('utf-8')).decode('utf-8')
+    bad, stale, _ = scan_source(patched_media)
+    if (bad, stale) != ([], []):
+        raise AssertionError('检测器自测失败：patch_wechat_media 之后 media.py 必须零违规（issue #323）')
+    if patch_wechat_media(patched_media.encode('utf-8')).decode('utf-8') != patched_media:
+        raise AssertionError('检测器自测失败：patch_wechat_media 必须幂等（重复安装不能重复插入）')
+    if 'CREATE_NO_WINDOW' not in patched_media.split('creationflags=', 1)[-1]:
+        raise AssertionError('检测器自测失败：patch_wechat_media 没有补上窗口抑制标志')
+    try:
+        patch_wechat_media(media_snippet.replace('timeout=30', 'timeout=60').encode('utf-8'))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('检测器自测失败：锚点漂移时 patch_wechat_media 必须抛 ValueError')
     # 范围自检：RUNTIME_WORKERS 里每个文件都必须真的进扫描集，改名/删除即红
     # （issue #319 的病根就在这里：判据没问题，是文件没进范围）
     scanned = {p.relative_to(ROOT).as_posix() for p in iter_sources()}
@@ -553,6 +604,39 @@ def self_test():
     if absent:
         raise AssertionError('检测器自测失败：\n  ' + '\n  '.join(absent))
     return True
+
+
+def scan_vendored():
+    """(scanned, unscanned, failures) for the VENDORED_SOURCES table.
+
+    Present files go through `scan_source` exactly like runtime code, so a
+    vendored bare spawn is a red build on a machine that has the sources. Absent
+    files are named in the output instead of being dropped -- the whole point of
+    issue #323 is that "not scanned" used to look identical to "clean".
+    """
+    scanned = []
+    unscanned = []
+    failures = []
+    violations = []
+    for rel, note in sorted(VENDORED_SOURCES.items()):
+        path = ROOT / rel
+        if not path.exists():
+            unscanned.append(f'{rel}（{note}）')
+            continue
+        try:
+            text = path.read_text(encoding='utf-8')
+            bad, dead, _ = scan_source(text, rel)
+        except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+            failures.append(f'{rel}: 无法读取（{exc}）')
+            continue
+        violations.extend((rel, *item) for item in bad)
+        failures.extend(f'{rel}:{lineno} 白名单注释已经不对应任何未加固的 spawn  {line}'
+                        for lineno, line in dead)
+        scanned.append(rel)
+    if violations:
+        failures.append('vendored 树里这些 spawn 会给子进程开一个控制台窗口（issue #323）：')
+        failures.extend(f'  {rel}:{lineno}  {line}' for rel, lineno, line, _ in violations)
+    return scanned, unscanned, failures
 
 
 def main():
@@ -608,6 +692,9 @@ def main():
     failures.extend(check_helpers())
     failures.extend(check_passthrough_visible())
 
+    vendored_scanned, vendored_unscanned, vendored_failures = scan_vendored()
+    failures.extend(vendored_failures)
+
     if failures:
         print('FAIL: 控制台开窗门禁未通过\n')
         for line in failures:
@@ -623,6 +710,11 @@ def main():
     print(f'✓ 运行时树 {flagged} 处 spawn 已收口（flag 或显式 POSIX 白名单）')
     print('✓ 运行时树里没有 DETACHED_PROCESS（它不是窗口抑制器）')
     print('✓ CREATE_NO_WINDOW 只在 winconsole / platform_process 里拼写，也没有 0x08000000 旁路')
+    for rel in vendored_scanned:
+        print(f'✓ vendored 树已扫（同一套判据）：{rel}')
+    for rel in vendored_unscanned:
+        print(f'· vendored 树未扫：{rel} —— 本机没有这份第三方源码（tools/ 受 .gitignore 保护），'
+              f'不是「已检查干净」')
     print('✓ run_hidden / popen_hidden / owned_popen 实跑正常')
     print('✓ run_passthrough 在无控制台父进程下仍能把子进程输出交给调用方（issue #91）')
     print('\nPASS: 控制台开窗门禁通过。')

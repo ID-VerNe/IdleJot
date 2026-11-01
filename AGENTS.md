@@ -460,7 +460,7 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 2 | `static` | `check_gate_manifest.py` | 元门禁：磁盘 check_*.py、本清单、AGENTS §5.1 生成段与 ci.yml 分片矩阵四者零漂移 |
 | 3 | `static` | `check_gate_change_review.py` | 门禁链改动必须在 PR 正文 `## 门禁改动` 段逐个交代（#62；#107 起 `.githooks/` 钩子改动同样触发）；无 PR 上下文时 SKIP |
 | 4 | `static` | `check_path_hygiene.py` | 路径卫生：运行时数据不许从仓库根推导（防 #14 复发） |
-| 5 | `static` | `check_no_console_child.py` | 子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发）；#319 起范围含后端在运行时拉起的 scripts/ worker（RUNTIME_WORKERS 白名单），范围本身也被自检钉住——worker 改名即红，不会静默漏扫 |
+| 5 | `static` | `check_no_console_child.py` | 子进程不开控制台窗口：运行时树 spawn 必须带抑制标志（防 #39 复发）；#319 起范围含后端在运行时拉起的 scripts/ worker（RUNTIME_WORKERS 白名单），范围本身也被自检钉住——worker 改名即红，不会静默漏扫；#323 起 vendored 树（VENDORED_SOURCES，如 tools/wechat-reader 的 ffmpeg 调用）在同一套判据下扫描，文件不存在时报「未扫」而不是假装干净 |
 | 6 | `static` | `check_listen_passthrough.py` | 唤醒内容不被 listen.py 吞掉（#91） |
 | 7 | `static` | `check_listener_rehang` | 监听空窗：退出必带重挂指令、回复默认续挂、过期唤醒不静默、退出留痕且空窗可由只读入口报出（#69/#112） |
 | 8 | `static` | `check_gap_disclosure` | 停机窗口缺口披露：后端不在的那段时间漏了什么事后说得出来，up.py --status / reply.py --list / listen.py NO_WORK 三处只读入口报出窗口内漏 N 条、@ 本机 M 条，不再报告一切正常（#114）。#283：单文件 958 行 advisory 拆成 `scripts/check_gap_disclosure/` 包（_fixture/cases），入口名不变、对 gates.json 与 CI 透明 |

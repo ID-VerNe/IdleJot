@@ -32,7 +32,6 @@ API_VERSION = 1
 # 宿主能力名。插件声明需要的，宿主持有的取交集校验。
 CAP_COMMANDS = "commands"      # 能注册 # 指令（commands 宿主）
 CAP_SEND = "send"              # 能主动发群消息（扫码结果回推一类）
-CAP_STORE = "store"            # 有独立的持久化命名空间
 CAP_WAKE = "wake"              # 能触发 Agent 唤醒（app / collector 宿主）
 CAP_TOOLS = "tools"            # 能注册 MCP 工具（app 宿主）
 CAP_CREDENTIAL = "credential"  # 有凭证解析器（米游社一类）
@@ -206,8 +205,6 @@ class Host(Protocol):
 
     def notify(self, group_id: str, qq: str, text: str) -> None:
         """@ 某人 + 文本，发到群里（扫码结果回推用）。"""
-
-    def store(self, plugin: str, name: str) -> Any: ...
 
 
 def check_capabilities(plugin: Plugin, capabilities: frozenset[str]) -> None:

@@ -4,8 +4,8 @@ The hand-written schema dictionary used to live inside ``mcp_chat.py``, mixing
 the protocol contract with the chat engine. Shared property fragments come from
 ``mcp_schemas`` (the DRY-3 canonical factories); this module only assembles
 rows and delegates to the turn schema module. Plugin-owned tools (reactions,
-language learning) are not listed here: ``mcp_tools`` fans them out through
-the app plugin registry after these rows.
+language learning, member dossiers) are not listed here: ``mcp_tools`` fans
+them out through the app plugin registry after these rows.
 """
 from .mcp_chat_limits import WAIT_TIMEOUT_SECONDS
 from .mcp_chat_turns import TURN_MAX_WAIT_SECONDS, schema as turn_schemas
@@ -61,38 +61,6 @@ def schemas(tool):
                                         description='确实需要点名的群成员 QQ 号，如消息 sender_id；发送前核对成员身份。不接受昵称或 all，和引用独立。')),
              ['session_id','text','idempotency_key']),
         tool('stop_chat_session', '立即停止本连接的持续聊天并唤醒等待者，取消尚未派发的回复；不撤销其他工具权限。已经交给 QQ 的消息无法撤回。重复停止安全。', sid, ['session_id']),
-        tool('query_member_dossier', '查询指定群友的小本本记忆与专属档案（包括外号、XP喜好、说话习惯与群内历史八卦）。返回的核心记忆是跨群主档与本群快照的并集；若上一份记忆被覆盖，会一并返回 key_memories_backup。在群友发问“你还记得我吗”、“我喜欢什么”、“你小本本记了啥”或需要精确调侃时调用。',
-             dict(identifier=dict(type='string', description='群友 QQ 号、群名片、昵称或外号（如“群友A”、“群友B”）'),
-                  group_id=dict(type='string', description='当前群号（可选，用于过滤群内专属八卦事件）'),
-                  session_id=dict(type='string', description='当前持续聊天会话编号（可选，自动推导群号）')),
-             ['identifier']),
-        tool('update_member_dossier', '更新或补充指定群友的小本本记忆与画像档案（包括核心记忆、性格特征、外号、XP喜好、角色身份等）。用于在聊天中捕捉到群友新狠料、明确偏好或被纠正称谓时，原生写入持久化记忆，无需直接操作底层数据库。',
-             dict(identifier=dict(type='string', description='群友 QQ 号、群名片、昵称或既有外号'),
-                  group_id=dict(type='string', description='当前群号（可选，用于写入群专属记忆；缺省时尝试从 session_id 推导）'),
-                  session_id=dict(type='string', description='当前持续聊天会话编号（可选，用于推导群号）'),
-                  key_memories=dict(type='array', items=dict(type='string'), description='需要记录或追加的核心记忆/黑料/事件（如“重度二次元”、“沉迷三国杀”等）'),
-                  interests=dict(type='array', items=dict(type='string'), description='群友喜好/游戏/XP领域列表'),
-                  traits=dict(type='object', description='结构化特征槽位，如 {"role": "群友角色", "trope": "反差"}'),
-                  aliases=dict(type='array', items=dict(type='string'), description='新增外号/别名列表'),
-                  tone_style=dict(type='string', description='说话口吻与风格偏好描述'),
-                  role=dict(type='string', description='在群内的角色身份（如“群主”、“管理员”、“活跃群友”）'),
-                  primary_name=dict(type='string', description='规范化主名称（可选）'),
-                  overwrite=dict(type='boolean', default=False, description='是否覆盖既有字段，默认 false 为智能追加合并。带 group_id 时只覆盖本群快照，跨群主档记忆不受影响；覆盖导致条目减少时，上一份记忆写入 key_memories_backup')),
-             ['identifier']),
-        tool('consolidate_chat_memory', '批量整合与沉淀群聊记忆。将近期对话中提取的多位群友事件、性格变化、最新梗与话题摘要一次性结构化提炼归档至持久化记忆库，免去零散调用与数据库脚本操作。',
-             dict(group_id=dict(type='string', description='目标群号（可选，若提供 session_id 可自动推导）'),
-                  session_id=dict(type='string', description='当前持续聊天会话编号（可选，用于推导群号）'),
-                  records=dict(type='array', items=dict(type='object'), description='批量群友画像提炼列表，每项包含 identifier, key_memories, interests, traits, tone_style, event(quote, context, tags) 等'),
-                  events=dict(type='array', items=dict(type='object'), description='独立群事件与八卦流水列表，每项包含 identifier, quote, context, tags 等'),
-                  summary=dict(type='string', description='本次对话整体话题总结或阶段性沉淀摘要'),
-                  notes=dict(type='array', items=dict(type='object'), description='群级结构化术语（黑话、店名、场地、群内约定），每项包含 term（术语/简称）, value（指向的含义）, kind（可选，术语类别，默认 glossary）')),
-             []),
-        tool('query_group_notes', '查询本群的结构化群级术语（黑话、店名简称、活动场地、群内约定等）。当群友提到某个黑话/简称、或你记得“记一下”过但想不起指向，用此工具按术语查回。group_id 可用 session_id 自动推导。',
-             dict(group_id=dict(type='string', description='目标群号（可选，若提供 session_id 可自动推导）'),
-                  session_id=dict(type='string', description='当前持续聊天会话编号（可选，用于推导群号）'),
-                  query=dict(type='string', description='要检索的术语或含义关键词（可选）；不填返回本群最近更新的术语'),
-                  limit=dict(type='integer', minimum=1, maximum=50, default=20, description='返回条数上限')),
-             []),
     ]
     next(s for s in rows if s['name']=='send_chat_message')['parameters']['properties']['plan_id']=dict(type='string',minLength=32,maxLength=32,description='plan_chat_reply 返回的 READY 计划；缺少时拒绝发送。')
     next(s for s in rows if s['name']=='send_chat_message')['parameters']['properties']['expression_ids']=dict(type='array',maxItems=5,uniqueItems=True,

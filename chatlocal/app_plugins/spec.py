@@ -39,7 +39,19 @@ LANGUAGE = dict(
     policy=None,
 )
 
-PLUGINS = (REACTIONS, LANGUAGE)
+DOSSIER = dict(
+    name='dossier',
+    tools=('query_member_dossier', 'update_member_dossier',
+           'consolidate_chat_memory', 'query_group_notes'),
+    # 无独立授权位：沿用 chat 授权，每次调用由 ChatDossiers 自己
+    # permission(grant) 校验；L1 画像卡与空闲消化也只按本群会话读写。
+    scope=None,
+    expression=None,
+    # 开关没有配置文件，也没有数据态：插件自判（见 DossierPlugin.enabled）。
+    policy=None,
+)
+
+PLUGINS = (REACTIONS, LANGUAGE, DOSSIER)
 
 TOOL_NAMES = frozenset(tool for item in PLUGINS for tool in item['tools'])
 SCOPE_FLAGS = tuple(item['scope'] for item in PLUGINS if item['scope'])

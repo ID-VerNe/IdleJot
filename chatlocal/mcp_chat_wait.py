@@ -43,6 +43,18 @@ class MentionState(NamedTuple):
     trimmed: bool
 
 
+def recent_payloads(chat, row, limit=20):
+    """最近 ``limit`` 条已入库消息的 payload（旧→新），给空闲消化用（issue #4 PD2c）。
+
+    以前这段查询内联在 ``wait()`` 的 idle 分支里。插件化后由插件自己过来取，
+    取数口径不变：只看本会话、按 id 倒序取尾巴、再翻回正序。
+    """
+    with chat.access.connect() as db:
+        rows = db.execute('SELECT payload FROM chat_inbox WHERE session_id=? ORDER BY id DESC LIMIT ?',
+                          (row['id'], limit)).fetchall()
+    return [json.loads(r['payload']) for r in reversed(rows)]
+
+
 class ChatWaitMixin:
     def set_dialogue_window(self,sid,until,turns):
         """把 mention_only 的对话窗口写回会话行（issue #217）。
@@ -316,12 +328,7 @@ class ChatWaitMixin:
                     kind='messages' if items else wake_kind if notices and ready else signal['kind'] if signal is not None and signal['ready'] and ready else 'idle' if ready else 'source_unavailable'
                     if kind == 'idle':
                         try:
-                            from water_group.memory_engine import get_memory_engine
-                            with self.access.connect() as _db:
-                                _recent_rows = _db.execute('SELECT payload FROM chat_inbox WHERE session_id=? ORDER BY id DESC LIMIT 20', (sid,)).fetchall()
-                            if _recent_rows:
-                                _recent_payloads = [json.loads(_r['payload']) for _r in reversed(_recent_rows)]
-                                get_memory_engine().digest_idle_batch(row['conversation_id'].split(':')[-1], _recent_payloads)
+                            self.apps.idle(row)
                         except Exception:
                             pass
                     result=dict(event=kind,session_id=sid,messages=items,read_through_id=through,

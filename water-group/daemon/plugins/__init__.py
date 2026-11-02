@@ -21,7 +21,6 @@ from plugins.base import (  # noqa: F401  (对外 re-export)
     CAP_COMMANDS,
     CAP_CREDENTIAL,
     CAP_SEND,
-    CAP_STORE,
     CAP_TOOLS,
     CAP_WAKE,
     Command,

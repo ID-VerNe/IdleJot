@@ -491,6 +491,28 @@ def _registry_drift(before, after):
     return detail
 
 
+def _dump_registry_diag(iso, nested, foreign, own, foreign_own):
+    """失败时把判据现场打进日志（issue #384）。
+
+    本地绿、CI 红时，只看「三条断言都红了」根本不知道差在哪：注册表读出来是
+    空、路径写法对不上、还是命令行被判成本树，三种原因指向的修法完全不同。
+    """
+    listing = git_hidden(["worktree", "list", "--porcelain"], cwd=str(iso),
+                         text=True, encoding="utf-8", errors="replace", timeout=60)
+    registry = [str(p) for p in wg_up_probe._registered_worktrees()]
+    print(f"  诊断：隔离仓库 {iso}")
+    print(f"  诊断：嵌套树 {nested}")
+    print(f"  诊断：porcelain rc={listing.returncode}")
+    print(f"  诊断：porcelain stdout={(listing.stdout or '').strip()}")
+    print(f"  诊断：porcelain stderr={(listing.stderr or '').strip()}")
+    print(f"  诊断：_registered_worktrees()={registry}")
+    print(f"  诊断：own={own!r} foreign_own={foreign_own!r}")
+    for pid, cmdline in wg_up_probe._match_rows("daemon[\\\\/]listen\\.py",
+                                                exclude=up.self_pids()):
+        if str(pid) == foreign:
+            print(f"  诊断：foreign cmdline={cmdline!r}")
+
+
 def _isolated_registry_probe():
     """在一次性 `git init` 仓库里复现「非约定路径的注册 worktree」（issue #384）。
 
@@ -559,6 +581,8 @@ def _isolated_registry_probe():
             problems.append("对照失效：主 checkout 未判本树，或嵌套树未被判为异树")
         if foreign in pids or foreign in specs:
             problems.append("嵌套树里的假监听被 finder 报成了「已有监听」")
+        if problems:
+            _dump_registry_diag(iso, nested, foreign, own, foreign_own)
         return True if not problems else "；".join(problems)
     finally:
         wg_up_probe.ROOT = saved_root

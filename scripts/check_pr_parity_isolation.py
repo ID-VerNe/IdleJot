@@ -17,17 +17,24 @@
 5. **`main()` 持锁接线**：跑真的 `check_pr_parity.main()`，锁被占期间它不许进入 `_parity`，
    放锁之后才进——只验锁模块本身证明不了 `main()` 用上了它（issue #348 复核第 ① 条）；
 6. **收尾不误伤别人的登记**：本门禁收尾时若表里还有**现场之外活着**的 `idlejot-parity-*`
-   树，`unregister_scene()` 必须拒绝全仓 prune、只把本现场的残留说出来；旁人只剩**孤儿
-   登记**（目录早没了）时不拦——`prune` 正是给它们准备的，谁也伤不到。
+   树，`unregister_scene()` 必须拒绝全仓 prune、只把本现场的残留说出来——这是硬断言；
+   旁人只剩**孤儿登记**（目录早没了）时才可能放行 `prune`，而这一步有前置条件：环境里
+   本来就有旁树活着时打印 `SKIP` 不判红（issue #378 C1：环境脏不该染红），干净前提下
+   仍留覆盖。
 7. **收尾本身不再制造残留（issue #378 非破坏性部分）**：收尾某一步抛 `OSError` 时后续
    步骤仍执行且失败被说出来；建树中途失败不留半截现场；`fail` 分支先摘登记再删目录
    不造孤儿登记；`--keep` 给出可复制清理命令。清理只认 `idlejot-parity-` 前缀，绝不碰
    `.tmp/wt-*` / `tulpa-*`（前缀约束落成断言，不只写在注释里）。
+8. **夹具自建自摘、登记表零差异（issue #378 卫生部分）**：用例造出的每条登记都在
+   `finally` 里用 `git worktree remove --force` **只摘自己那一条**，目录已经不在的孤儿
+   登记也一样（不把收尾寄托给全仓 `prune`，旁树活着时它本来就会被拦）；整个门禁跑完
+   后 `git worktree list --porcelain` 与 `.git/worktrees` 条目相对跑前必须逐条一致，
+   夹具漏登记就翻红。`prunable` 条数只作 WARN 级盘点（#378 自动回收的观测入口）。
 
 本门禁**自己不跑全仓 prune 来造现场**：`cleanup()` 明文不调 `git worktree prune`，因为那是
-全仓写操作。用例要的「真树」换一个 scratch 直接建就行；只有收尾时为了摘掉**本门禁自己**
-造出来的孤儿登记才可能 prune，且先断言那一刻表里**活着的** `idlejot-parity-*` 树全在本轮
-现场里（`unregister_scene()`），断言不过就不 prune、只把残留说出来。
+全仓写操作。用例要的「真树」换一个 scratch 直接建就行；收尾也不再依赖 `prune`——本门禁
+自己造出来的孤儿登记逐条 `git worktree remove --force` 摘掉（`forget_registration()`），
+`unregister_scene()` 的 `prune` 分支只在环境干净（现场之外没有活树）时才走得到。
 
 跑法：`python scripts/check_pr_parity_isolation.py`（本机手跑；它建真 worktree，量级与
 `check_pr_parity.py` 同档，所以不在 CI 分片里跑）。
@@ -147,8 +154,10 @@ def unregister_scene(scene):
     所以先断言「现场条目之外没有别的活着的 idlejot-parity-* 树」，断言不过就不 prune，
     只把残留说出来——别人的现场一格都不碰。旁人只剩孤儿登记时不拦（见 `_unregister()`）。
 
-    返回值是 `(还没摘掉的孤儿, 摘完之后本现场是否干净)`：调用方（`main()` 的收尾）不采信
-    自己的自述，只看第二个值。
+    返回值是 `(还没摘掉的孤儿, 摘完之后本现场是否干净)`：调用方（[9] 的两组对照）不采信
+    自己的自述，只看第二个值。`main()` 的收尾**不再**走这里——本门禁的登记逐条自摘
+    （`forget_registration()`），否则全仓 `prune` 会把跑前就存在的孤儿一并清掉，让
+    「跑前/跑后逐条一致」的回归断言失去意义。
     """
     return _unregister(scene)[0], _scene_clean(scene)
 
@@ -182,20 +191,24 @@ def _alive_scene(candidate, scene):
     return 'prunable' not in fields and parity._usable(candidate)
 
 
-def _scene_registry():
-    """`git worktree list --porcelain` 里每个 `idlejot-parity-*` 树 → 它的特征字段。"""
+def _worktree_fields():
+    """`git worktree list --porcelain` 里每棵树 → 它的特征字段（`prunable` 在值里）。"""
     registry = {}
     current = None
     for line in git('worktree', 'list', '--porcelain').stdout.splitlines():
         if line.startswith('worktree '):
-            path = line[len('worktree '):]
-            current = path if 'idlejot-parity-' in path else None
-            if current is not None:
-                registry[os.path.normpath(current)] = {}
+            current = line[len('worktree '):]
+            registry[os.path.normpath(current)] = {}
         elif current is not None and line:
             key, _, value = line.partition(' ')
             registry[os.path.normpath(current)][key] = value
     return registry
+
+
+def _scene_registry():
+    """`git worktree list --porcelain` 里每个 `idlejot-parity-*` 树 → 它的特征字段。"""
+    return {path: fields for path, fields in _worktree_fields().items()
+            if 'idlejot-parity-' in path}
 
 
 def _unregister(scene):
@@ -229,6 +242,85 @@ def scene_rel(scene, path):
     """把登记路径写成相对本现场的形态（`scratch/pristine`），报错与断言都用这个口径。"""
     return Path(os.path.relpath(os.path.normpath(path),
                                 os.path.normpath(str(scene)))).as_posix()
+
+
+def forget_registration(path):
+    """把登记表里 `path` 这一条**只这一条**摘掉，绝不 prune 全仓（issue #378 卫生部分）。
+
+    目录已经不在的孤儿登记同样适用：`git worktree remove --force` 会按登记表找回那条
+    记录（实测目录连同父目录都不在时也能摘掉）。返回 `None` 表示摘掉或本来就没有；
+    否则回传原因，由调用方打印可复制命令——删不净不许静默。
+    """
+    if path is None:
+        return None
+    path = Path(path)
+    if not parity.is_registered(path):
+        return None
+    result = git('worktree', 'remove', '--force', str(path))
+    if result.returncode == 0 and not parity.is_registered(path):
+        return None
+    return parity.output_of(result) or f'rc={result.returncode}，登记仍在'
+
+
+def forget_or_report(path):
+    """`forget_registration()` 的收尾包装：摘不掉就打印原因与可直接粘贴的清理命令。"""
+    reason = forget_registration(path)
+    if reason is not None:
+        print(f'WARN 夹具登记没摘掉 — {path}：{reason}', file=sys.stderr)
+        print(f'WARN 手工清理命令 — git worktree remove --force "{path}"', file=sys.stderr)
+    return reason is None
+
+
+def registry_state():
+    """真实仓库登记表的可核对快照：worktree 路径 + `.git/worktrees` 条目名。"""
+    paths = tuple(sorted(path for path, _ in scene_paths('*')))
+    base = Path(git('rev-parse', '--git-common-dir').stdout.strip())
+    if not base.is_absolute():
+        base = ROOT / base
+    entries = base / 'worktrees'
+    names = tuple(sorted(entry.name for entry in entries.iterdir())) if entries.is_dir() else ()
+    return paths, names
+
+
+def registry_diff(before, after):
+    """两次快照的差异逐条写出来；空列表 = 登记表逐条一致（issue #378 回归断言）。"""
+    old_paths, old_entries = before
+    new_paths, new_entries = after
+    problems = []
+    added = sorted(set(new_paths) - set(old_paths))
+    removed = sorted(set(old_paths) - set(new_paths))
+    if added:
+        problems.append(f'登记表多了 worktree：{added}')
+    if removed:
+        problems.append(f'登记表少了 worktree：{removed}')
+    if new_entries != old_entries:
+        problems.append(f'.git/worktrees 条目不一致：{len(old_entries)} → {len(new_entries)}，'
+                        f'差异 {sorted(set(new_entries) ^ set(old_entries))}')
+    return problems
+
+
+# prunable 盘点只看这两类前缀：`idlejot-parity-*` 是 parity 现场，`parity-348-*` 是本门禁
+# 自己的现场（issue #378 的自动回收观测入口）。
+PRUNABLE_PREFIXES = ('idlejot-parity-', 'parity-348-')
+
+
+def _has_prefix(path, prefix):
+    """路径里有没有一段以 `prefix` 开头的目录名（`.../idlejot-parity-x/dead/pristine` 也算）。"""
+    return any(part.lower().startswith(prefix) for part in PureWindowsPath(path).parts)
+
+
+def prunable_report(label):
+    """WARN 级盘点：各现场前缀还剩多少条 prunable——#378 自动回收的观测入口。
+
+    只打印、不判红：本机陈年残留是环境前提，不该把门禁染成红灯（issue #378 C1）。
+    """
+    fields = _worktree_fields()
+    for prefix in PRUNABLE_PREFIXES:
+        hits = sorted(path for path, row in fields.items()
+                      if 'prunable' in row and _has_prefix(path, prefix))
+        print(f'WARN 登记表健康度（{label}）：{prefix}* prunable {len(hits)} 条')
+        for path in hits:
+            print(f'WARN 可 prune：{path}')
 
 
 def wait_for(predicate, seconds=30.0):
@@ -323,15 +415,18 @@ def case_registration(scene):
     sha = head_sha()
     scratch = scene / 'own'
     status, path, reason = parity.add_worktree(sha, scratch)
-    check('建树状态', status, parity.ADD_OK)
-    check('登记表认得返回的路径', parity.is_registered(path), True)
-    check('返回的就是 pristine 目录', Path(path).name, 'pristine')
-    again, same, _ = parity.add_worktree(sha, scratch)
-    check('重复调用复用同一棵（不重复 add）', (again, same), ('reuse', Path(path)))
-    report = parity.cleanup(path)
-    check('收尾 ok', report.ok, True)
-    check('收尾后登记已清', parity.is_registered(path), False)
-    check('收尾后目录已清', Path(path).exists(), False)
+    try:
+        check('建树状态', status, parity.ADD_OK)
+        check('登记表认得返回的路径', parity.is_registered(path), True)
+        check('返回的就是 pristine 目录', Path(path).name, 'pristine')
+        again, same, _ = parity.add_worktree(sha, scratch)
+        check('重复调用复用同一棵（不重复 add）', (again, same), ('reuse', Path(path)))
+        report = parity.cleanup(path)
+        check('收尾 ok', report.ok, True)
+        check('收尾后登记已清', parity.is_registered(path), False)
+        check('收尾后目录已清', Path(path).exists(), False)
+    finally:
+        forget_or_report(path)
 
 
 def case_prune_spares_others(scene):
@@ -339,40 +434,48 @@ def case_prune_spares_others(scene):
     print('\n[5] 不连坐')
     sha = head_sha()
     status, mine, _ = parity.add_worktree(sha, scene / 'mine')
-    check('自己的树建好', status, parity.ADD_OK)
     theirs = scene / 'theirs' / 'pristine'
-    added = git('worktree', 'add', '--detach', str(theirs), sha)
-    check('别人的树建好', added.returncode, 0)
     try:
-        parity.cleanup(mine)
-        check('别人的树还在盘上', (theirs / 'scripts' / 'gates.json').is_file(), True)
-        check('别人的树还在登记里', parity.is_registered(theirs), True)
+        check('自己的树建好', status, parity.ADD_OK)
+        added = git('worktree', 'add', '--detach', str(theirs), sha)
+        check('别人的树建好', added.returncode, 0)
+        try:
+            parity.cleanup(mine)
+            check('别人的树还在盘上', (theirs / 'scripts' / 'gates.json').is_file(), True)
+            check('别人的树还在登记里', parity.is_registered(theirs), True)
+        finally:
+            git('worktree', 'remove', '--force', str(theirs))
     finally:
-        git('worktree', 'remove', '--force', str(theirs))
+        forget_or_report(mine)
 
 
 def case_cleanup_not_silent(scene):
     """6. 收得掉就不许报问题；登记被抹掉时必须说出来（不静默）。"""
     print('\n[6] 不静默')
     sha = head_sha()
-    status, path, _ = parity.add_worktree(sha, scene / 'gone')
-    check('树建好', status, parity.ADD_OK)
-    clean = parity.cleanup(path)
-    check('正常收尾 ok', clean.ok, True)
-    check('正常收尾不报问题（对照）', clean.problems, [])
-    check('正常收尾确实 remove 过', clean.removed, True)
+    first = second = None
+    try:
+        status, first, _ = parity.add_worktree(sha, scene / 'gone')
+        check('树建好', status, parity.ADD_OK)
+        clean = parity.cleanup(first)
+        check('正常收尾 ok', clean.ok, True)
+        check('正常收尾不报问题（对照）', clean.problems, [])
+        check('正常收尾确实 remove 过', clean.removed, True)
 
-    status, path, _ = parity.add_worktree(sha, scene / 'orphan')
-    check('第二棵树建好', status, parity.ADD_OK)
-    # 把登记抹掉（模拟上一轮硬杀留下的孤儿目录，或别处 prune 过）：此时 remove 走不下去，
-    # 收尾必须把「登记表里没有这棵树」记进 problems，而不是静默 ok。
-    git('worktree', 'remove', '--force', str(path))
-    Path(path).mkdir(parents=True, exist_ok=True)
-    (path / 'leftover.txt').write_text('x', encoding='utf-8')
-    report = parity.cleanup(path)
-    check('孤儿目录如实记账', bool(report.problems), True)
-    check('孤儿目录没走 remove 路径', report.removed, False)
-    check('孤儿目录仍被删掉', Path(path).exists(), False)
+        status, second, _ = parity.add_worktree(sha, scene / 'orphan')
+        check('第二棵树建好', status, parity.ADD_OK)
+        # 把登记抹掉（模拟上一轮硬杀留下的孤儿目录，或别处 prune 过）：此时 remove 走不下去，
+        # 收尾必须把「登记表里没有这棵树」记进 problems，而不是静默 ok。
+        git('worktree', 'remove', '--force', str(second))
+        Path(second).mkdir(parents=True, exist_ok=True)
+        (Path(second) / 'leftover.txt').write_text('x', encoding='utf-8')
+        report = parity.cleanup(second)
+        check('孤儿目录如实记账', bool(report.problems), True)
+        check('孤儿目录没走 remove 路径', report.removed, False)
+        check('孤儿目录仍被删掉', Path(second).exists(), False)
+    finally:
+        forget_or_report(first)
+        forget_or_report(second)
 
 
 def case_orphan_not_reused(scene):
@@ -380,97 +483,117 @@ def case_orphan_not_reused(scene):
     print('\n[7] 孤儿登记不复用')
     sha = head_sha()
     scratch = scene / 'orphan-reuse'
-    status, path, _ = parity.add_worktree(sha, scratch)
-    check('先建一棵真树', status, parity.ADD_OK)
-    # 只拆目录、留登记：正是上一轮被硬杀（或别处 prune 掉目录）之后的现场。
-    # 等登记真的变成 prunable 再往下走：`rmtree` 返回后 `git worktree list` 可能还认那棵树
-    # 一两个 tick（Windows 删目录是延迟生效的），不等就会看到「目录不在、但也不是孤儿」的
-    # 中间态，后面那句「孤儿不许 reuse」会误红。
-    shutil.rmtree(path)
-    check('目录已拆掉但登记还在', parity.is_registered(path), True)
-    check('登记已变成 prunable',
-          wait_for(lambda: any('prunable' in fields for _, fields in scene_paths(str(scene)))), True)
+    orphan = control = None
+    try:
+        status, orphan, _ = parity.add_worktree(sha, scratch)
+        check('先建一棵真树', status, parity.ADD_OK)
+        # 只拆目录、留登记：正是上一轮被硬杀（或别处 prune 掉目录）之后的现场。
+        # 等登记真的变成 prunable 再往下走：`rmtree` 返回后 `git worktree list` 可能还认那棵树
+        # 一两个 tick（Windows 删目录是延迟生效的），不等就会看到「目录不在、但也不是孤儿」的
+        # 中间态，后面那句「孤儿不许 reuse」会误红。
+        shutil.rmtree(orphan)
+        check('目录已拆掉但登记还在', parity.is_registered(orphan), True)
+        check('登记已变成 prunable',
+              wait_for(lambda: any('prunable' in fields for _, fields in scene_paths(str(scene)))), True)
 
-    again, reused, reason = parity.add_worktree(sha, scratch)
-    check('孤儿登记不许 reuse', again, 'fail')
-    check('孤儿不给路径', reused, None)
-    check('孤儿原因点名 prune', 'prune' in (reason or ''), True)
-    # 对照：登记与目录都在时才必须 reuse（否则上面那条 fail 什么都不证明）。
-    # **不跑 `git worktree prune` 来造这棵对照树**——那是全仓写操作，正是 `cleanup()`
-    # 明文不做的事（`check_pr_parity.py:cleanup` docstring），在门禁里跑一遍等于把
-    # 别人的孤儿登记顺手清掉。换一个 scratch 直接建第二棵真树即可。
-    other = scene / 'orphan-reuse-control'
-    status, path, _ = parity.add_worktree(sha, other)
-    check('对照树建成', status, parity.ADD_OK)
-    third, same, _ = parity.add_worktree(sha, other)
-    check('真树仍在时才 reuse（对照）', (third, same), ('reuse', Path(path)))
-    parity.cleanup(path)
+        again, reused, reason = parity.add_worktree(sha, scratch)
+        check('孤儿登记不许 reuse', again, 'fail')
+        check('孤儿不给路径', reused, None)
+        check('孤儿原因点名 prune', 'prune' in (reason or ''), True)
+        # 对照：登记与目录都在时才必须 reuse（否则上面那条 fail 什么都不证明）。
+        # **不跑 `git worktree prune` 来造这棵对照树**——那是全仓写操作，正是 `cleanup()`
+        # 明文不做的事（`check_pr_parity.py:cleanup` docstring），在门禁里跑一遍等于把
+        # 别人的孤儿登记顺手清掉。换一个 scratch 直接建第二棵真树即可。
+        other = scene / 'orphan-reuse-control'
+        status, control, _ = parity.add_worktree(sha, other)
+        check('对照树建成', status, parity.ADD_OK)
+        third, same, _ = parity.add_worktree(sha, other)
+        check('真树仍在时才 reuse（对照）', (third, same), ('reuse', Path(control)))
+        parity.cleanup(control)
+    finally:
+        # 孤儿登记目录早没了，靠 `git worktree remove --force` 逐条自摘（不 prune 全仓）。
+        forget_or_report(orphan)
+        forget_or_report(control)
 
 
 def case_unregister_spares_others(scene):
-    """9. 收尾的孤儿清理只动本现场：现场之外还有**活着**的 `idlejot-parity-*` 时必须不 prune，
-    只剩孤儿登记时不拦——两类旁人分别钉一条。"""
+    """9. 收尾的孤儿清理只动本现场：现场之外还有**活着**的 `idlejot-parity-*` 时必须不 prune
+    （硬断言）；只剩孤儿登记时才有资格放行 prune，而环境本就不干净（旁树活着）时该分支
+    打印 SKIP、不判红（issue #378 C1：环境脏不该染红）。"""
     print('\n[9] 收尾不误伤别人的登记')
     sha = head_sha()
-    # 本现场的孤儿：建一棵再只拆目录（登记留在表里）。
-    status, own_path, _ = parity.add_worktree(sha, scene / 'own-orphan')
-    check('本现场的树建好', status, parity.ADD_OK)
-    shutil.rmtree(own_path)
-    check('本现场的孤儿登记还在', parity.is_registered(own_path), True)
-    check('本现场的登记已变成 prunable',
-          wait_for(lambda: any('prunable' in fields for _, fields in scene_paths(str(scene)))), True)
-    # 现场之外的「别人」：换一个不在 `scene` 下的前缀，假装是另一处 parity 留下的登记。
+    own = scene / 'own-orphan'
+    own2 = scene / 'own-orphan-2'
     stranger_root = Path(tempfile.mkdtemp(prefix='idlejot-parity-stranger-'))
     stranger = stranger_root / 'pristine'
     stranger_dead = stranger_root / 'dead' / 'pristine'
+    status, own_path, _ = parity.add_worktree(sha, own)
     try:
+        check('本现场的树建好', status, parity.ADD_OK)
+        shutil.rmtree(own_path)
+        check('本现场的孤儿登记还在', parity.is_registered(own_path), True)
+        check('本现场的登记已变成 prunable',
+              wait_for(lambda: any('prunable' in fields for _, fields in scene_paths(str(scene)))), True)
+        # 现场之外的「别人」：换一个不在 `scene` 下的前缀，假装是另一处 parity 留下的登记。
         added = git('worktree', 'add', '--detach', str(stranger), sha)
         check('别人的树建好', added.returncode, 0)
 
-        # 先钉「活树旁人拦住 prune」：别人的树还在盘上、人可能正在里头跑，这时候动全仓不许。
-        losers, pruned = _unregister(scene)
-        check('别人的树活着时不动全仓 prune', pruned, False)
+        # 硬断言：别人的树活着时，全仓 prune 一律不许动——本现场的孤儿必须原样留着并报出来。
+        # 这一条与机器上有没有别的残留无关，任何环境都必须成立。
+        leftovers, clean = unregister_scene(scene)
+        check('别人的树活着时不动全仓 prune',
+              sorted(scene_rel(scene, p) for p, _ in scene_paths(str(scene))), ['own-orphan/pristine'])
+        check('本现场的残留被如实报出',
+              sorted(scene_rel(scene, p) for p, _ in leftovers), ['own-orphan/pristine'])
+        check('本现场没被判干净', clean, False)
         check('别人的活树原样留着', parity.is_registered(stranger), True)
 
         shutil.rmtree(stranger)  # 只拆目录，让它的登记也变成 prunable
         check('别人的孤儿登记还在', parity.is_registered(stranger), True)
 
-        # 本现场的孤儿是**这一组自己**造的那条加第 [7] 组故意留下的 `orphan-reuse`
-        # （由 `main()` 收尾的 `unregister_scene` 兜底）；别的组各自收干净了。
-        # 这里不按「整张表」笼统断言：前面某组没收干净时这里红在本组——那正是要看见的事。
-        own_orphans = sorted(scene_rel(scene, p) for p, _ in scene_paths(str(scene)))
-        check('本现场的孤儿登记只有这两条', own_orphans,
-              ['orphan-reuse/pristine', 'own-orphan/pristine'])
+        # 本现场的登记只有这一条：别的组各自在 finally 里收干净了（[7] 不再把孤儿留给本组）。
+        check('本现场的登记只有这一条',
+              sorted(scene_rel(scene, p) for p, _ in scene_paths(str(scene))), ['own-orphan/pristine'])
 
-        # 再钉「孤儿旁人不拦」：别人只剩孤儿登记时，`prune` 谁也伤不到，必须放行。
-        # 这一条是复核第 3 轮第 ① 条：旁人的判据原先不看「死活」，于是一台跑过几次 parity
-        # 的机器上永远有别人的孤儿登记，「没有旁人时才 prune」的对照永远绿不了，
-        # 「永远不 prune」被偷偷钉死。
-        # 本门禁自己的孤儿同样不算活树——算成活的就是 `prune` 拦在自己身上。
-        check('本现场的两条孤儿都不算活树',
-              [scene_rel(scene, p) for p, _ in scene_paths(str(scene)) if _alive_scene(p, scene)],
-              [])
-        losers, pruned = _unregister(scene)
-        check('旁人只剩孤儿登记时放行 prune', pruned, True)
-        check('本现场的孤儿登记已清', scene_paths(str(scene)), [])
-        check('别人的孤儿登记没被这次 prune 留着', parity.is_registered(stranger), False)
+        # 「旁人只剩孤儿登记 → 放行 prune」的前提是现场之外没有活树。本机常有硬杀留下的旁树
+        # （#378 对账：c_toyqdz / qj6vp4xk），此时这一支本来就到不了——打印 SKIP，不判红。
+        outside_live = [path for path in _scene_registry() if _alive_scene(path, scene)]
+        if outside_live:
+            print('SKIP [9] 「只剩孤儿登记时放行 prune」：前置不成立'
+                  f'（现场之外还有 {len(outside_live)} 棵 idlejot-parity-* 树活着：'
+                  f'{[Path(path).parent.name for path in outside_live]}）')
+            # 没走 prune，本现场的孤儿就地逐条自摘，给下面的对照一个干净起点。
+            forget_or_report(own / 'pristine')
+        else:
+            # 干净前提下的覆盖：prune 谁也伤不到（本现场孤立 + 旁人只剩孤儿登记）。
+            leftovers, clean = unregister_scene(scene)
+            check('旁人只剩孤儿登记时放行 prune', scene_paths(str(scene)), [])
+            check('prune 之后本现场判干净', clean, True)
+            check('别人的孤儿登记没被这次 prune 留着', parity.is_registered(stranger), False)
 
         # 对照：真的活树旁人必须拦得住——否则上面那条「放行」只是「一律放行」。
         added = git('worktree', 'add', '--detach', str(stranger_dead), sha)
         check('对照用的旁人树建好', added.returncode, 0)
-        status, own2, _ = parity.add_worktree(sha, scene / 'own-orphan-2')
+        status, own2_path, _ = parity.add_worktree(sha, own2)
         check('再造一条本现场的孤儿', status, parity.ADD_OK)
-        shutil.rmtree(own2)
+        shutil.rmtree(own2_path)
         check('本现场的孤儿登记已变成 prunable',
               wait_for(lambda: 'own-orphan-2/pristine'
                        in {scene_rel(scene, p) for p, f in scene_paths(str(scene))
                            if 'prunable' in f}), True)
-        losers, pruned = _unregister(scene)
-        check('活树旁人拦住 prune（对照）', pruned, False)
+        leftovers, clean = unregister_scene(scene)
+        check('活树旁人拦住 prune（对照）',
+              sorted(scene_rel(scene, p) for p, _ in scene_paths(str(scene))), ['own-orphan-2/pristine'])
         check('本现场的孤儿如实报出',
-              sorted(scene_rel(scene, p) for p, _ in losers), ['own-orphan-2/pristine'])
+              sorted(scene_rel(scene, p) for p, _ in leftovers), ['own-orphan-2/pristine'])
         check('活树旁人原样留着（对照）', parity.is_registered(stranger_dead), True)
     finally:
+        # 夹具自建自摘（issue #378 卫生）：本组造的登记逐条摘掉，不把收尾寄托给全仓 prune
+        # ——旁树活着时它本来就会被拦，寄托给它就一定会留残留。
+        forget_or_report(own / 'pristine')
+        forget_or_report(own2 / 'pristine')
+        forget_or_report(stranger)
+        forget_or_report(stranger_dead)
         shutil.rmtree(stranger_root, ignore_errors=True)
 
 
@@ -577,12 +700,15 @@ def case_fail_branch_no_orphan(scene):
     with patched(add_worktree=add_then_fail, make_scratch=lambda: scratch):
         code, out, err = call_parity(SimpleNamespace(shard=None, keep=False), head_sha())
     path = scratch / 'pristine'
-    check('fail 分支返回环境失败码', code, 2)
-    check('登记已摘掉', parity.is_registered(path), False)
-    check('登记表里没有本现场条目', [p for p, _ in scene_paths(str(scratch))], [])
-    check('目录已删', path.exists(), False)
-    check('现场已删', scratch.exists(), False)
-    check('说出建树失败', 'FAIL: 建不起 pristine worktree' in out, True)
+    try:
+        check('fail 分支返回环境失败码', code, 2)
+        check('登记已摘掉', parity.is_registered(path), False)
+        check('登记表里没有本现场条目', [p for p, _ in scene_paths(str(scratch))], [])
+        check('目录已删', path.exists(), False)
+        check('现场已删', scratch.exists(), False)
+        check('说出建树失败', 'FAIL: 建不起 pristine worktree' in out, True)
+    finally:
+        forget_or_report(path)
 
 
 def case_keep_prints_commands(scene):
@@ -593,14 +719,17 @@ def case_keep_prints_commands(scene):
     with patched(run_gates=lambda pristine, shard, env: 0, make_scratch=lambda: scratch):
         code, out, err = call_parity(SimpleNamespace(shard=None, keep=True), head_sha())
     path = scratch / 'pristine'
-    check('keep 跑通', code, 0)
-    check('keep 打印现场路径', '保留现场' in out, True)
-    check('keep 打印 worktree remove 命令', 'git worktree remove --force' in out, True)
-    check('keep 打印目录删除命令', 'Remove-Item -LiteralPath' in out, True)
-    check('keep 命令含确切现场路径', str(scratch) in out, True)
-    report = parity.cleanup(path)
-    check('keep 现场可被 cleanup 收掉', report.ok, True)
-    check('keep 现场登记已清', parity.is_registered(path), False)
+    try:
+        check('keep 跑通', code, 0)
+        check('keep 打印现场路径', '保留现场' in out, True)
+        check('keep 打印 worktree remove 命令', 'git worktree remove --force' in out, True)
+        check('keep 打印目录删除命令', 'Remove-Item -LiteralPath' in out, True)
+        check('keep 命令含确切现场路径', str(scratch) in out, True)
+        report = parity.cleanup(path)
+        check('keep 现场可被 cleanup 收掉', report.ok, True)
+        check('keep 现场登记已清', parity.is_registered(path), False)
+    finally:
+        forget_or_report(path)
 
 
 def case_cleanup_scope(scene):
@@ -622,6 +751,42 @@ def case_cleanup_scope(scene):
           any('Remove-Item -LiteralPath' in line for line in commands), True)
 
 
+def case_forget_registration(scene):
+    """15. 孤儿登记逐条自摘：只摘自己那一条，旁人活树一格都不碰（#378 卫生部分）。"""
+    print('\n[15] 孤儿登记逐条自摘')
+    sha = head_sha()
+    orphan = neighbour = None
+    try:
+        status, orphan, _ = parity.add_worktree(sha, scene / 'forget-orphan')
+        check('孤儿树建好', status, parity.ADD_OK)
+        shutil.rmtree(orphan)
+        check('孤儿登记还在', parity.is_registered(orphan), True)
+        status, neighbour, _ = parity.add_worktree(sha, scene / 'forget-neighbour')
+        check('旁人树建好', status, parity.ADD_OK)
+        reason = forget_registration(orphan)
+        check('孤儿登记摘得掉（不 prune 全仓）', reason, None)
+        check('孤儿登记已不在表里', parity.is_registered(orphan), False)
+        check('旁人活树的登记一格没动', parity.is_registered(neighbour), True)
+        check('旁人活树的目录一格没动',
+              (Path(neighbour) / 'scripts' / 'gates.json').is_file(), True)
+    finally:
+        forget_or_report(orphan)
+        forget_or_report(neighbour)
+
+
+def case_registry_snapshot_diff(scene):
+    """16. 登记表快照对比：多一条/少一条/条目变化都必须报出差异（#378 回归断言的自检）。"""
+    print('\n[16] 登记表快照对比')
+    same = (('a', 'b'), ('x', 'y'))
+    check('相同快照无差异', registry_diff(same, same), [])
+    check('多一条 worktree 有差异',
+          bool(registry_diff(same, (('a', 'b', 'c'), ('x', 'y')))), True)
+    check('少一条 worktree 有差异',
+          bool(registry_diff(same, (('a',), ('x', 'y')))), True)
+    check('.git/worktrees 条目变化有差异',
+          bool(registry_diff(same, (('a', 'b'), ('x', 'y', 'z')))), True)
+
+
 def guarded(name, case, scene):
     """一组用例崩了也继续跑下一组：崩在哪一组、崩成什么，都要看得见（基线对照要的是全貌）。"""
     try:
@@ -636,7 +801,9 @@ def main():
         print('SKIP: parity 是 Windows-only（msvcrt）')
         return 0
     scene = Path(tempfile.mkdtemp(prefix='parity-348-'))
+    before = registry_state()
     try:
+        prunable_report('跑前')
         for name, case in (('跨进程互斥', case_lock_is_cross_process),
                            ('同进程重入互斥', case_same_process_two_handles),
                            ('等锁串行化', case_lock_serializes_threads),
@@ -650,19 +817,34 @@ def main():
                            ('建树中途失败不留现场', case_build_failure_no_scene),
                            ('fail 分支不留孤儿登记', case_fail_branch_no_orphan),
                            ('--keep 打印清理命令', case_keep_prints_commands),
-                           ('清理只认前缀', case_cleanup_scope)):
+                           ('清理只认前缀', case_cleanup_scope),
+                           ('孤儿登记逐条自摘', case_forget_registration),
+                           ('登记表快照对比', case_registry_snapshot_diff)):
             guarded(name, case, scene)
     finally:
         shutil.rmtree(scene, ignore_errors=True)
-        # 先看收尾之前现场还剩什么：这时 `unregister_scene` 还没跑，账是「测试留下了几条」。
+        # 回归断言（issue #378 卫生）：跑完的登记表必须与跑前**逐条一致**。
+        # 先拍快照再清理：夹具漏了登记时这条要能翻红，而不是被收尾顺手抹平。
         left = scene_paths(str(scene))
-        if not unregister_scene(scene) and left:
-            FAILS.append(f'收尾没把本现场的孤儿登记清干净：{[scene_rel(scene, p) for p, _ in left]}')
+        if left:
+            FAILS.append(f'夹具留下登记：{[scene_rel(scene, p) for p, _ in left]}')
+        for problem in registry_diff(before, registry_state()):
+            FAILS.append(problem)
+        # 判红已记下，清理只为不把本机越跑越脏；摘不掉就打印可复制命令（不许静默）。
+        for path, _ in left:
+            forget_or_report(path)
+        still = scene_paths(str(scene))
+        if still:
+            FAILS.append(f'夹具残留摘不掉：{[scene_rel(scene, p) for p, _ in still]}')
+            for path, _ in still:
+                print(f'FAIL 手工清理命令 — git worktree remove --force "{path}"')
+        # WARN 级盘点：本机陈年 prunable 是环境前提，只观测、不判红（#378 C1）。
+        prunable_report('跑后')
     if FAILS:
         for line in FAILS:
             print(f'FAIL {line}')
         return 1
-    print('PASS parity 现场隔离十四项')
+    print('PASS parity 现场隔离十六项')
     return 0
 
 

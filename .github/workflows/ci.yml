@@ -59,7 +59,14 @@ jobs:
         # issue #338：不再注入 PR_BODY。`github.event.pull_request.body` 是事件快照，
         # `gh run rerun` 重放旧事件，作者改完正文再重跑仍读到旧正文。正文由门禁按
         # PR_NUMBER 现取（上面的 pull-requests: read 就是为它开的）。
+        # issue #375：`permissions` 只是授权，Actions **不会**自动把 token 塞进环境变量。
+        # 不注入 GH_TOKEN 时 check_gate_change_review.py 的 fetch_pull() 恒为 None：
+        # 正文取不到，`created_at` 也拿不到（时点判据退回的是 commit sha，解析不出时间，
+        # 独立复核闸门整体不生效）。fork PR 的 pull_request token 是只读 token，
+        # `pull-requests: read` 读 PR 元数据够用，所以注入不因 fork 失效。
         env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}

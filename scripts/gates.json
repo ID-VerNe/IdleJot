@@ -515,7 +515,7 @@
   {
    "name": "check_exit_main_return.py",
    "shard": "static",
-   "why": "入口退出码契约（#379，防 #375 复发）：AST 枚举 `sys.exit(<零参调用>)` / `raise SystemExit(<零参调用>)`，按形状不按函数名（`sys.exit(run_main())` 同样覆盖，带参调用不在口径内）；解析本文件 / 同包 `__init__.py` / `from ... import` 的函数定义，被交出的函数没有带值 `return` 即红，定义解析不出按 fail-closed 红。安全假阳性（`check_qr_login` / `check_sixty` 失败路径直接 `sys.exit(1)`、`check_dossier_cadence` 与首次扫描新发现的 `check_mcp_chat_turns` 靠断言抛出）走显式豁免清单并逐条注明理由，不靠逃逸规则侥幸放过；`self_test()` 用临时包夹具证明漏 `return` 必红、补上转绿，并钉住本门禁自己的 `main()` 带值返回（自指陷阱）"
+   "why": "入口退出码契约（#379，防 #375 复发）：AST 枚举 `sys.exit(<零参调用>)` / `raise SystemExit(<零参调用>)`，按形状不按函数名（`sys.exit(run_main())` 同样覆盖，带参调用不在口径内），别名按导入绑定解析（`from sys import exit as e` / `import sys as s` 的 `s.exit` / `SystemExit` 别名）；解析本文件顶层 `def` 与 `name = lambda`、同包 `__init__.py`、`from ... import`、一层 `mod.main()` 的函数定义。判据：被调函数带装饰器一律 fail-closed 红（无法确认装饰器保留返回值）；每个出口都必须是可确认的带值 `return`——裸 `return` / `return None` / 布尔短路兜底（`or 0`）/ 有一支无法静态确认非 None 的条件表达式均红；定义解析不出红。边界写清：`getattr(sys, 'exit')`、多级属性链、运行期为 None 的普通调用不在静态口径。扫描侧 fail-closed（#379 复核缺口 4）：`scripts/` 只收 `.py`，`.githooks/` 只收 `.py` 或 python shebang，其余 shell 钩子按文件类型排除；归入 Python 的文件读不出或 `SyntaxError` 直接判红。4 条豁免改成 `why + 理由守卫`（`check_qr_login` / `check_sixty` 验 `sys.exit(1)` 仍在、`check_dossier_cadence` / `check_mcp_chat_turns` 验同包仍有断言），守卫不成立或豁免项不再被枚举都判红。`self_test()` 对装饰器、别名、兜底口径、语法错、豁免守卫、lambda、`sys.exit(0)` 与 `mod.main()` 逐条做注入必红 / 修复必绿对照，并钉住本门禁自己的 `main()` 带值返回（自指陷阱）"
   }
  ],
  "manual": [

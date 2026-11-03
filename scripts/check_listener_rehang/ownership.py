@@ -432,40 +432,114 @@ def 嵌套worktree里的监听不算已有监听():
             shutil.rmtree(slot, ignore_errors=True)
 
 
-@case
-def 非约定路径的注册worktree不算已有监听():
-    """`git worktree list` 注册表也参与边界判定（issue #101）。
+def _worktree_registry(root):
+    """真实仓库的 worktree 登记快照（issue #384）。
 
-    约定判据（`.tmp/wt-*`）覆盖 §2.7 布局，但 worktree 不按约定放时它看不见
-    ——`git worktree add .tmp/nested-x` 这样的路径同样落在 ROOT 之下，只实现
-    约定判据的实现会把里面的监听成本树。这里真建一棵**非约定路径**的嵌套
-    worktree（注册进本仓）并起假监听，断言两个 finder 都不报它；git 不可用
-    或建不起树时跳过不红——约定判据已由『嵌套worktree里的监听不算已有监听』
-    端到端覆盖，这条只证明第二个判据真的接了线。
+    返回 `(porcelain 全文行元组, .git/worktrees 条目数)`；读不到时返回 `None`。
+    路径走 `--git-common-dir` 而不是 `<root>/.git`：门禁常在 `.tmp/wt-*` 里跑，
+    那时 `.git` 只是指向主库的 gitfile，登记表始终在主库的 `.git/worktrees` 下。
     """
-    if os.name != "nt":
-        return True
-    if shutil.which("git") is None:
-        print("  git 不可用：跳过注册表用例（约定判据由上一条端到端覆盖）")
-        return True
-    (ROOT / ".tmp").mkdir(parents=True, exist_ok=True)
-    nested = Path(tempfile.mkdtemp(prefix="nested-", dir=str(ROOT / ".tmp")))
+    listed = git_hidden(["worktree", "list", "--porcelain"], cwd=str(root),
+                        text=True, encoding="utf-8", errors="replace", timeout=60)
+    common = git_hidden(["rev-parse", "--git-common-dir"], cwd=str(root),
+                        text=True, encoding="utf-8", errors="replace", timeout=60)
+    if listed.returncode != 0 or common.returncode != 0:
+        return None
+    gitdir = Path(common.stdout.strip())
+    if not gitdir.is_absolute():
+        gitdir = (Path(root) / gitdir).resolve()
+    slots = gitdir / "worktrees"
+    count = len(list(slots.iterdir())) if slots.is_dir() else 0
+    return tuple(listed.stdout.splitlines()), count
+
+
+def _force_rmtree(path):
+    """删目录前先清只读位，删不净时留给调用方打印手工命令。
+
+    `git` 在 Windows 上把对象文件写成只读，裸 `shutil.rmtree(ignore_errors=True)`
+    会把它们留下——夹具收尾失败却不说话，正是 #384 要防的形状（issue #384）。
+    """
+    for base, dirs, files in os.walk(path):
+        for name in dirs + files:
+            try:
+                os.chmod(os.path.join(base, name), 0o700)
+            except OSError:
+                pass
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _registry_drift(before, after):
+    """两次登记快照的差异；无差异返回空串（issue #384）。
+
+    口径是「逐条一致」，所以比 `worktree list --porcelain` 的**全文**：只比路径
+    集合时，HEAD 漂移与 `prunable` / `locked` 标记的变化会被一起放过。
+    """
+    if before is None or after is None:
+        return "真实仓库的 worktree 登记快照取不到（git 不可用或不在仓库内）"
+    if before == after:
+        return ""
+    old_lines, old_count = before
+    new_lines, new_count = after
+    for idx, (old, new) in enumerate(zip(old_lines, new_lines), 1):
+        if old != new:
+            detail = f"第 {idx} 行不同：{old!r} → {new!r}"
+            break
+    else:
+        detail = f"登记表行数 {len(old_lines)} → {len(new_lines)}"
+    if old_count != new_count:
+        detail += f"；.git/worktrees 条目数 {old_count} → {new_count}"
+    return detail
+
+
+def _isolated_registry_probe():
+    """在一次性 `git init` 仓库里复现「非约定路径的注册 worktree」（issue #384）。
+
+    原夹具把真树建在 `ROOT/.tmp` 并注册进**真实仓库**，收尾还跑全仓
+    `git worktree prune`——那会连别人的登记一起清掉（#384）。判定本身只需要
+    一份真实注册表，不需要它属于本仓：这里在 `%TEMP%` 下 `git init`，add /
+    remove 全在临时仓库里做；`wg_up_probe.ROOT` 临时指向它，被测的
+    `_own_checkout()` 读到的就是这份真实注册表。真实仓库一次都不碰。
+
+    返回 `True`，或失败说明串（`run_cases` 以 `is True` 判通过）。
+    """
+    iso = Path(tempfile.mkdtemp(prefix="rehang-registry-"))
+    nested = iso / ".tmp" / "nested-fixed"
     procs = []
+    saved_root = wg_up_probe.ROOT
     try:
+        init = git_hidden(["init", "--quiet"], cwd=str(iso), text=True,
+                          encoding="utf-8", errors="replace", timeout=60)
+        if init.returncode != 0:
+            return f"隔离仓库 git init 失败：{(init.stderr or init.stdout).strip()}"
+        commit = git_hidden(["-c", "user.name=rehang-gate",
+                             "-c", "user.email=rehang@example.invalid",
+                             "-c", "commit.gpgsign=false", "commit",
+                             "--allow-empty", "--no-verify", "--quiet",
+                             "-m", "fixture"], cwd=str(iso), text=True,
+                            encoding="utf-8", errors="replace", timeout=60)
+        if commit.returncode != 0:
+            return f"隔离仓库建首个提交失败：{(commit.stderr or commit.stdout).strip()}"
+        nested.parent.mkdir(parents=True, exist_ok=True)
         add = git_hidden(["-c", "core.quotepath=false", "worktree",
-                          "add", "--detach", str(nested)],
-                         cwd=str(ROOT), text=True,
-                         encoding="utf-8", errors="replace", timeout=120)
+                          "add", "--detach", str(nested)], cwd=str(iso),
+                         text=True, encoding="utf-8", errors="replace", timeout=120)
         if add.returncode != 0:
-            print(f"  git worktree add 失败：{(add.stderr or add.stdout).strip()}")
-            return False
+            return f"隔离仓库 git worktree add 失败：{(add.stderr or add.stdout).strip()}"
         script = nested / "water-group" / "daemon" / "listen.py"
+        script.parent.mkdir(parents=True, exist_ok=True)
         script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
         procs.append(subprocess.Popen(
             [sys.executable, str(script), "--timeout", "1"],
             cwd=str(nested), stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL))
         foreign = str(procs[0].pid)
+        wg_up_probe.ROOT = iso
+        # 对照 1：这份注册表真的读到了本夹具那条——表为空时「不报」只是空壳。
+        registered = Path(os.path.normcase(str(nested))) \
+            in wg_up_probe._registered_worktrees()
+        # 对照 2：同一仓库的主 checkout 路径不跨任何 worktree 根，必须判本树。
+        own = wg_up_probe._own_checkout(str(iso / "water-group" / "daemon" / "listen.py"))
+        foreign_own = wg_up_probe._own_checkout(str(script) + " --timeout 90")
         raw = []
         deadline = time.time() + 30
         while time.time() < deadline:
@@ -475,14 +549,67 @@ def 非约定路径的注册worktree不算已有监听():
                 break
             time.sleep(1)
         if foreign not in raw:
-            return False  # WMI 没看见：用例前提不成立，不能当通过
+            return "WMI 没看见隔离仓库的假监听：用例前提不成立，不能当通过"
         pids = up.listener_pids()
         specs = [str(s.get("pid")) for s in up.listener_specs()]
-        return foreign not in pids and foreign not in specs
+        problems = []
+        if not registered:
+            problems.append("注册表里没有本夹具的嵌套树（判据会退化成空壳）")
+        if not own or foreign_own:
+            problems.append("对照失效：主 checkout 未判本树，或嵌套树未被判为异树")
+        if foreign in pids or foreign in specs:
+            problems.append("嵌套树里的假监听被 finder 报成了「已有监听」")
+        return True if not problems else "；".join(problems)
     finally:
+        wg_up_probe.ROOT = saved_root
         for proc in procs:
             kill_tree(proc.pid)
-        git_hidden(["worktree", "remove", "--force", str(nested)],
-                   cwd=str(ROOT), timeout=60)
-        git_hidden(["worktree", "prune"], cwd=str(ROOT), timeout=60)
-        shutil.rmtree(nested, ignore_errors=True)
+        removed = git_hidden(["worktree", "remove", "--force", str(nested)],
+                             cwd=str(iso), text=True, encoding="utf-8",
+                             errors="replace", timeout=60)
+        if removed.returncode != 0:
+            # 不静默：给出可直接粘贴的清理命令（issue #384）
+            print("  隔离仓库收尾失败，请手工执行：")
+            print(f'    git -C "{iso}" worktree remove --force "{nested}"')
+            print(f'    Remove-Item -LiteralPath "{iso}" -Recurse -Force')
+        _force_rmtree(iso)
+        for _ in range(3):
+            if not iso.exists():
+                break
+            time.sleep(0.3)
+            _force_rmtree(iso)
+        if iso.exists():
+            print("  隔离仓库目录未删净，请手工执行：")
+            print(f'    Remove-Item -LiteralPath "{iso}" -Recurse -Force')
+
+
+@case
+def 非约定路径的注册worktree不算已有监听():
+    """`git worktree list` 注册表也参与边界判定（issue #101；夹具隔离见 #384）。
+
+    约定判据（`.tmp/wt-*`）覆盖 §2.7 布局，但 worktree 不按约定放时它看不见
+    ——`git worktree add .tmp/nested-x` 这样的路径同样落在 ROOT 之下，只实现
+    约定判据的实现会把里面的监听成本树。这里在**一次性 `git init` 仓库**里真建
+    一棵非约定路径的嵌套 worktree 并起假监听，断言两个 finder 都不报它；git
+    不可用或建不起树时跳过不红——约定判据已由『嵌套worktree里的监听不算已有
+    监听』端到端覆盖，这条只证明第二个判据真的接了线。
+
+    夹具隔离（issue #384）：原实现把树注册进**真实仓库**，收尾还跑全仓
+    `git worktree prune`，会静默清掉旁人的登记。现在 add / remove 只在临时仓库
+    里做，并把真实仓库的登记表钉在用例两端：跑前跑后必须逐条一致、
+    `.git/worktrees` 条目数不许变——谁再把登记写回真实仓库（或删掉）就红。
+    """
+    if os.name != "nt":
+        return True
+    if shutil.which("git") is None:
+        print("  git 不可用：跳过注册表用例（约定判据由上一条端到端覆盖）")
+        return True
+    before = _worktree_registry(ROOT)
+    try:
+        result = _isolated_registry_probe()
+    except Exception as exc:  # noqa: BLE001  夹具坏了也要先把登记表比对完
+        result = f"夹具抛异常：{type(exc).__name__}: {exc}"
+    drift = _registry_drift(before, _worktree_registry(ROOT))
+    if drift:
+        return f"真实仓库的 worktree 登记表被改动：{drift}"
+    return result

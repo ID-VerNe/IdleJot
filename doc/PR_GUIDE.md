@@ -133,6 +133,10 @@ type/<issue 号>-p<字母>[-<数字>]-<slug>   # 多分节时，如 feat/41-pe4-
 
 **重跑读的是当下正文（issue #338）**：CI 里的正文**不再**取自 `github.event.pull_request.body`——那是事件快照，`gh run rerun` 重放同一个旧事件，改完正文再重跑读到的还是旧正文，于是「补了段与结论」和「什么都没改」在日志里同形，只能靠空推一个 commit 骗出新事件。现在门禁按 `PR_NUMBER` 现取（`GET /repos/<slug>/pulls/<n>`，需要 `pull-requests: read`），所以**改完正文直接 `gh run rerun <run-id>` 即可**，不必再推空 commit。现取失败时它**不**退回快照：改动触及门禁链就照旧红，并打印 `正文取不到：<原因>`——`HTTP 403` 会提示 token 缺 `pull-requests: read`。正文被清空（`body` 为 null）按「有正文、没有段」处理，与「取不到正文」分开报，别把两件事混成一条。列表接口默认一页 30 条，所以脚本显式取 `per_page=100`：`slim` 上同时开着的 PR 超过 30 条以后，不翻页就会把正在跑的那条漏出去。
 
+**退出码必须跟日志结论一致（issue #375）**：打了 `FAIL` 就必须非 0。`fc1b419`（#343）把 `main()` 拆成 `main()` + `_main(argv)` 时漏了 `return`，`_main()` 的每个 `return 1` 都被丢弃，`sys.exit(main())` 拿到 `None` → 0——日志里一路 `FAIL`，CI 记成通过，闸门形同不存在。现在 `main()` 原样交出 `_main()` 的退出码，`self_test()` 每次执行都复跑一条**真的调用 `main()`** 的离线夹具（`--gate-changes` 无 base 的必红路径 + 无判红的 SKIP 对照），这类回归当场红；只测 `check()` 的判定码看不见它（判定码一直是 1）。
+
+**CI 注入 `GH_TOKEN`（issue #375）**：`permissions: pull-requests: read` 只是授权，Actions **不会**自动把 token 放进环境变量，所以 `ci.yml` 在跑门禁那一步注入 `GH_TOKEN: ${{ github.token }}` 与 `GITHUB_REPOSITORY: ${{ github.repository }}`。没有 token 时 `fetch_pull()` 恒 `None`：正文取不到，`created_at` 也拿不到（时点判据退回的是 commit sha，解析不出时间，独立复核闸门整体不生效）。降级语义只有一种——**拿不到正文就红（fail-closed），不跳过**：改动触及门禁链却读不到正文时判 `FAIL: 门禁改动段缺失（正文不可得）。` 并打印 `正文取不到：<原因>`；fork PR 的 `pull_request` token 是只读 token，`pull-requests: read` 读 PR 元数据够用，注入不因 fork 失效；真正取不到（限流 / 网络 / token 被吊销）同样判红，没有「拿不到就跳过」的分支。
+
 **结论行必须真的写进 `## 门禁改动` 段**（issue #324）。复核结论贴在 PR **评论**里时，机器读不到——所以结论行要落进正文那一节，两处并存：
 
 - 一行以 `独立复核` 开头，同行带 `APPROVE` / `APPROVED` / `REQUEST_CHANGES`；只写 `<PENDING>` / `待复核` / 什么都写算「还没贴」，**红**。

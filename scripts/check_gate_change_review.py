@@ -49,9 +49,17 @@ PR 正文被清空（`body` 为 null）按「有正文、没有段」处理，�
 
 入口处先跑 `self_test()`（issue #107 的离线夹具：PATTERNS 命中范围 + `check()`
 判定的回归，不碰 git / 网络 / 文件），把「钩子改动必须披露」钉在每次执行里。
+
+**退出码必须跟结论一致（issue #375）**：`fc1b419`（#343）把 `main()` 拆成
+`main()` + `_main(argv)` 时漏了 `return`，`_main()` 的每个 `return 1` 都被丢弃，
+`sys.exit(main())` 拿到 `None` → 0，日志打 `FAIL` 而 CI 记成通过，闸门形同不存在。
+`main()` 现在原样交出 `_main()` 的退出码，`self_test()` 里有一条**真的调用 `main()`**
+的离线夹具钉住它（只测 `check()` 的判定码看不出这种回归）。
 """
 import argparse
+import contextlib
 import fnmatch
+import io
 import json
 import os
 import re
@@ -568,17 +576,52 @@ def self_test():
             else:
                 os.environ[key] = value
 
+    # issue #375：入口契约——`main()` 必须把 `_main()` 的退出码原样交出来。
+    # #343 拆函数时漏了 return，所有判红分支都退出 0，「打了 FAIL 仍算通过」。
+    # 只测 check() 的判定码看不见这件事（它一直是 1），所以这里**真的调用 main()**。
+    # 两条用例都走「无 base」的离线分支（不碰 git / 网络 / 文件），并清空相关环境变量：
+    # 开发机上的 PR_BASE_SHA / PR_NUMBER 会把用例带到别的分支去，那就不再钉这条了。
+    entry_env = ('PR_BASE_SHA', 'GATE_CHANGES', 'PR_NUMBER', 'PR_BODY_FILE', 'PR_BODY',
+                 'PR_HEAD_SHA', 'GH_TOKEN', 'GITHUB_TOKEN', 'GITHUB_REPOSITORY')
+    saved_entry = {key: os.environ.pop(key, None) for key in entry_env}
+    try:
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = main(['--gate-changes'], selftest=False)
+        # 修前这里拿到 None（等价 0）：夹具红，正是 #375 的症状。
+        expect('#375 无 base + 显式声明：main() 退出码非 0（防 #343 回归）', code, 1)
+        expect('#375 失败路径仍打印 FAIL（不是把判据删掉了）',
+               'FAIL' in buffer.getvalue(), True)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = main([], selftest=False)
+        # 同形对照：没有判红就不许非 0，免得夹具退化成「怎么跑都红也算过」。
+        expect('#375 无 base 且未声明：main() 退回 0（SKIP 路径对照）', code, 0)
+    finally:
+        for key, value in saved_entry.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
     if failures:
         for line in failures:
             print(f'SELF-TEST FAIL {line}')
-        raise AssertionError(f'self_test 失败 {len(failures)} 项（issue #107 / #324 夹具）')
-    print('SELF-TEST OK PATTERNS 命中范围（含 .githooks/）、check() 判定、独立复核闸门（#324）'
-          '与正文现取（#338）的回归夹具全部符合预期')
+        raise AssertionError(f'self_test 失败 {len(failures)} 项（issue #107 / #324 / #375 夹具）')
+    print('SELF-TEST OK PATTERNS 命中范围（含 .githooks/）、check() 判定、独立复核闸门（#324）、'
+          '正文现取（#338）与入口退出码（#375）的回归夹具全部符合预期')
 
 
-def main():
-    self_test()
-    _main(sys.argv[1:])
+def main(argv=None, selftest=True):
+    """入口：先自检，再把 `_main()` 的退出码原样交给 `sys.exit()`（issue #375）。
+
+    `fc1b419`（#343）把 `main()` 拆成 `main()` + `_main(argv)` 时漏了返回值，
+    `_main()` 里的 `return 1` 全被丢掉，`sys.exit(main())` 拿到 `None` → 0。
+    `selftest=False` 只给 `self_test()` 自己用：它要验的正是这个返回值，不能递归回自检。
+    """
+    if selftest:
+        self_test()
+    return _main(sys.argv[1:] if argv is None else argv)
 
 
 def _main(argv):

@@ -19,6 +19,10 @@
 6. **收尾不误伤别人的登记**：本门禁收尾时若表里还有**现场之外活着**的 `idlejot-parity-*`
    树，`unregister_scene()` 必须拒绝全仓 prune、只把本现场的残留说出来；旁人只剩**孤儿
    登记**（目录早没了）时不拦——`prune` 正是给它们准备的，谁也伤不到。
+7. **收尾本身不再制造残留（issue #378 非破坏性部分）**：收尾某一步抛 `OSError` 时后续
+   步骤仍执行且失败被说出来；建树中途失败不留半截现场；`fail` 分支先摘登记再删目录
+   不造孤儿登记；`--keep` 给出可复制清理命令。清理只认 `idlejot-parity-` 前缀，绝不碰
+   `.tmp/wt-*` / `tulpa-*`（前缀约束落成断言，不只写在注释里）。
 
 本门禁**自己不跑全仓 prune 来造现场**：`cleanup()` 明文不调 `git worktree prune`，因为那是
 全仓写操作。用例要的「真树」换一个 scratch 直接建就行；只有收尾时为了摘掉**本门禁自己**
@@ -28,6 +32,8 @@
 跑法：`python scripts/check_pr_parity_isolation.py`（本机手跑；它建真 worktree，量级与
 `check_pr_parity.py` 同档，所以不在 CI 分片里跑）。
 """
+import contextlib
+from io import StringIO
 import json
 import os
 from pathlib import Path, PureWindowsPath
@@ -37,6 +43,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = Path(__file__).resolve().parent
@@ -54,6 +61,27 @@ def check(name, got, want):
     if not ok:
         FAILS.append(f'{name}：期望 {want!r}，实得 {got!r}')
     print(f'{"ok  " if ok else "FAIL"} {name}')
+
+
+@contextlib.contextmanager
+def patched(**attributes):
+    """临时替换 `check_pr_parity` 的函数/属性，出块必还原（异常路径也一样）。"""
+    saved = {name: getattr(parity, name) for name in attributes}
+    for name, value in attributes.items():
+        setattr(parity, name, value)
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            setattr(parity, name, value)
+
+
+def call_parity(args, sha):
+    """跑一次 `_parity()` 并捕获两路输出；替身函数由 `patched()` 负责还原。"""
+    out, err = StringIO(), StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = parity._parity(args, sha)
+    return code, out.getvalue(), err.getvalue()
 
 
 def git(*args):
@@ -490,6 +518,110 @@ def case_main_holds_lock(scene):
     check('main() 正常返回', runner.returncode, 0)
 
 
+def case_cleanup_step_oserror(scene):
+    """10. 收尾某步抛 `OSError` 后，后续步骤仍执行且失败被说出来（#378 缺口②）。
+
+    夹具刻意**不建真树**：`cleanup()` 第一步（读登记表）调 `run()` 抛 `OSError`，此时
+    目录还在、登记表里没有它（上一轮硬杀的形状）。修复前这里会直接抛出去，后面两次
+    `rmtree` 全跳过；修复后要看到目录被删、失败原因与清理命令都打出来。
+    """
+    print('\n[10] 收尾单步抛错仍继续')
+    scratch = scene / 'idlejot-parity-cleanup-error'
+    (scratch / 'pristine').mkdir(parents=True)
+    (scratch / 'home').mkdir()
+    (scratch / 'pristine' / 'leftover.txt').write_text('x', encoding='utf-8')
+
+    def exploding_run(command, cwd, env=None):
+        raise OSError('注入：git 不可用')
+
+    out, err = StringIO(), StringIO()
+    with patched(run=exploding_run):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            parity._finish_scene(SimpleNamespace(keep=False), scratch, None)
+    check('后续步骤仍删掉工作树目录', (scratch / 'pristine').exists(), False)
+    check('后续步骤仍删掉现场目录', scratch.exists(), False)
+    check('失败原因有日志', '收尾未完成' in err.getvalue(), True)
+    check('日志带可复制 remove 命令', 'git worktree remove --force' in err.getvalue(), True)
+    check('日志带可复制目录删除命令', 'Remove-Item -LiteralPath' in err.getvalue(), True)
+
+
+def case_build_failure_no_scene(scene):
+    """11. 建树中途抛错不留半截现场（#378 缺口③）。"""
+    print('\n[11] 建树中途失败不留半截现场')
+    scratch = scene / 'idlejot-parity-build-fail'
+    scratch.mkdir()
+
+    def exploding_add(sha, target):
+        raise OSError('注入：建树中途失败')
+
+    with patched(add_worktree=exploding_add, make_scratch=lambda: scratch):
+        code, out, err = call_parity(SimpleNamespace(shard=None, keep=False), head_sha())
+    check('建树抛错返回环境失败码', code, 2)
+    check('半截现场已回收', scratch.exists(), False)
+    check('抛错原因被说出来', '建树/跑门禁抛错' in err, True)
+
+
+def case_fail_branch_no_orphan(scene):
+    """12. `fail` 分支先摘登记再删目录，不留孤儿登记（#378 缺口④）。"""
+    print('\n[12] fail 分支不留孤儿登记')
+    scratch = scene / 'idlejot-parity-fail-branch'
+    scratch.mkdir()
+    real_add = parity.add_worktree
+
+    def add_then_fail(sha, target):
+        status, path, reason = real_add(sha, target)
+        if status == parity.ADD_OK:
+            return 'fail', None, '注入：add 成功但按失败处理'
+        return status, path, reason
+
+    with patched(add_worktree=add_then_fail, make_scratch=lambda: scratch):
+        code, out, err = call_parity(SimpleNamespace(shard=None, keep=False), head_sha())
+    path = scratch / 'pristine'
+    check('fail 分支返回环境失败码', code, 2)
+    check('登记已摘掉', parity.is_registered(path), False)
+    check('登记表里没有本现场条目', [p for p, _ in scene_paths(str(scratch))], [])
+    check('目录已删', path.exists(), False)
+    check('现场已删', scratch.exists(), False)
+    check('说出建树失败', 'FAIL: 建不起 pristine worktree' in out, True)
+
+
+def case_keep_prints_commands(scene):
+    """13. `--keep` 打印可复制清理命令，而不只是路径（#378 缺口）。"""
+    print('\n[13] --keep 打印清理命令')
+    scratch = scene / 'idlejot-parity-keep'
+    scratch.mkdir()
+    with patched(run_gates=lambda pristine, shard, env: 0, make_scratch=lambda: scratch):
+        code, out, err = call_parity(SimpleNamespace(shard=None, keep=True), head_sha())
+    path = scratch / 'pristine'
+    check('keep 跑通', code, 0)
+    check('keep 打印现场路径', '保留现场' in out, True)
+    check('keep 打印 worktree remove 命令', 'git worktree remove --force' in out, True)
+    check('keep 打印目录删除命令', 'Remove-Item -LiteralPath' in out, True)
+    check('keep 命令含确切现场路径', str(scratch) in out, True)
+    report = parity.cleanup(path)
+    check('keep 现场可被 cleanup 收掉', report.ok, True)
+    check('keep 现场登记已清', parity.is_registered(path), False)
+
+
+def case_cleanup_scope(scene):
+    """14. 清理只认 `idlejot-parity-` 前缀，绝不碰人工工作树（#378 安全约束）。"""
+    print('\n[14] 清理只认 idlejot-parity- 前缀')
+    check('本工具现场被认', parity.is_parity_scene(Path('idlejot-parity-abc')), True)
+    for foreign in ('.tmp/wt-378', 'tulpa-parity-abc', 'parity-348-abc'):
+        check(f'非本工具目录不认：{foreign}', parity.is_parity_scene(Path(foreign)), False)
+        raised = None
+        try:
+            parity.cleanup_commands(Path(foreign))
+        except ValueError as error:
+            raised = error
+        check(f'拒绝为非现场生成清理命令：{foreign}', raised is not None, True)
+    commands = parity.cleanup_commands(Path('idlejot-parity-abc'))
+    check('本工具现场给出 remove 命令',
+          any('git worktree remove --force' in line for line in commands), True)
+    check('本工具现场给出目录删除命令',
+          any('Remove-Item -LiteralPath' in line for line in commands), True)
+
+
 def guarded(name, case, scene):
     """一组用例崩了也继续跑下一组：崩在哪一组、崩成什么，都要看得见（基线对照要的是全貌）。"""
     try:
@@ -513,7 +645,12 @@ def main():
                            ('不静默', case_cleanup_not_silent),
                            ('孤儿登记不复用', case_orphan_not_reused),
                            ('main() 持锁接线', case_main_holds_lock),
-                           ('收尾不误伤别人的登记', case_unregister_spares_others)):
+                           ('收尾不误伤别人的登记', case_unregister_spares_others),
+                           ('收尾单步抛错仍继续', case_cleanup_step_oserror),
+                           ('建树中途失败不留现场', case_build_failure_no_scene),
+                           ('fail 分支不留孤儿登记', case_fail_branch_no_orphan),
+                           ('--keep 打印清理命令', case_keep_prints_commands),
+                           ('清理只认前缀', case_cleanup_scope)):
             guarded(name, case, scene)
     finally:
         shutil.rmtree(scene, ignore_errors=True)
@@ -525,7 +662,7 @@ def main():
         for line in FAILS:
             print(f'FAIL {line}')
         return 1
-    print('PASS parity 现场隔离九项')
+    print('PASS parity 现场隔离十四项')
     return 0
 
 

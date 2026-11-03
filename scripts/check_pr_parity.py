@@ -26,6 +26,14 @@ CI 本身不跑本脚本：CI 已经是那个干净环境，且它需要完整 g
 收尾只 `remove` 自己登记过的那条路径（不再全局 `prune`），收不掉时说进 stderr。
 取消全局 `prune` 之后，复用前必须**确认目录还在**：孤儿登记（目录已删、登记还在）按
 失败处理并提示 `git worktree prune`，不会把一棵不存在的树当成可复用的现场。
+
+issue #378（非破坏性部分）：`taskkill /F` 之类硬杀绕过 `finally`，一次收不掉的现场会永久
+留在 `%TEMP%`，八天累积 92 套。本次只加固「已经走到自己收尾」这条路径：每个收尾步骤独立
+兜底、建树三步进 `try`、`fail` 分支先摘登记再删目录、`--keep` 与收尾失败都打印可复制的手工
+清理命令。**不做启动期自动扫描/回收**——自动回收仍缺两样：`check_pr_parity_lock.py` 的
+`_pid_alive()` 只校验 holder 里记录的 pid，没有「这棵树有没有进程在用」的判据（硬杀后
+锁会释放，但门禁子进程可能还活着，#366/#370 家族）；`--keep` 现场与硬杀残留没有标记可
+区分，直接回收会误删有意保留的排查现场。这两样补齐之前，扫描回收不得上线。
 """
 import argparse
 import json
@@ -43,6 +51,9 @@ ISOLATED_NAMES = ('WATER_GROUP_HOME', 'PYTHONPATH')
 ISOLATED_PREFIXES = ('IDLEJOT_WG_', 'TULPA_WG_')
 LOG_ENCODING = 'utf-8'
 ADD_OK = 'ok'
+# 本工具自己建的现场目录前缀（`mkdtemp(prefix=...)`）。任何清理/回收只认这个前缀，
+# 绝不碰 `.tmp/wt-*`、`tulpa-*` 或别的目录（issue #378 安全约束）。
+SCRATCH_PREFIX = 'idlejot-parity-'
 
 # 本脚本常由 `.githooks/pre-push` 拉起，而钩子所在的父进程未必有控制台（`pythonw`、
 # 编辑器内的任务、CI 的作业包装），它拉起的 `git` 与门禁执行器都是控制台程序——裸调会给
@@ -73,6 +84,36 @@ def run(command, cwd, env=None):
 
 def output_of(result):
     return (result.stderr or result.stdout or '').strip()
+
+
+def make_scratch():
+    """建本轮的现场目录：名字带固定前缀，任何清理只认这个前缀（issue #378）。"""
+    return Path(tempfile.mkdtemp(prefix=SCRATCH_PREFIX))
+
+
+def is_parity_scene(path):
+    """现场目录是不是本工具自己建的——只认 `idlejot-parity-` 前缀。
+
+    自动回收（另立 issue）只能对这里返回 True 的目录动手：`.tmp/wt-*` 是人工工作树，
+    `tulpa-*` 与其他目录也不是本工具的现场，误删等于抹掉别人未提交的工作。
+    """
+    return Path(path).name.startswith(SCRATCH_PREFIX)
+
+
+def cleanup_commands(scene):
+    """给本现场生成可复制的手工清理命令；非本工具的目录一概拒绝。
+
+    只生成命令、不执行：`--keep` 与收尾失败时给人一条能直接粘贴的退路。拒绝非前缀
+    目录是 issue #378 的安全约束——不能因为调用方传错一个路径就把人工工作树删了。
+    """
+    scene = Path(scene)
+    if not is_parity_scene(scene):
+        raise ValueError(f'拒绝为非 parity 现场生成清理命令：{scene}')
+    pristine = scene / 'pristine'
+    return [
+        f'git worktree remove --force "{pristine}"',
+        f'Remove-Item -LiteralPath "{scene}" -Recurse -Force',
+    ]
 
 
 def resolve_ref(ref):
@@ -142,6 +183,26 @@ def add_worktree(sha, scratch):
     return 'fail', None, f'git worktree add 成功但登记表里没有 {path}'
 
 
+def _exists(path):
+    """目录在不在；摸盘失败按「还在」记，宁可多说一句也不静默成功。"""
+    try:
+        return Path(path).exists()
+    except OSError:
+        return True
+
+
+def _remove_tree(report, target, label):
+    """删一个目录并记账；`rmtree(ignore_errors=True)` 删不掉时不许静默成功。"""
+    try:
+        if not _exists(target):
+            return
+        shutil.rmtree(target, ignore_errors=True)
+        if _exists(target):
+            report.problems.append(f'{label}删不掉：{target}')
+    except OSError as error:
+        report.problems.append(f'{label}删除抛错：{error}')
+
+
 def cleanup(path):
     """收掉**自己的**那棵树：先核对登记，再 `remove --force`，最后删临时目录。
 
@@ -150,31 +211,35 @@ def cleanup(path):
     正是「抽别人的树」最容易扩散的那一步；孤儿登记留给 `git worktree list` 自己报，
     或由人工 `git worktree prune` 处理。
 
-    收不掉时把原因写进 `Report.problems`，不静默成功；打不打到 stderr 由调用方决定
-    （`check_pr_parity.py` 的 `finally` 里统一说一次，门禁只读 `Report`）。
+    每个步骤独立 `try/except`（issue #378 缺口②）：`run()` 抛 `OSError` 时后面的目录
+    删除仍会执行，失败逐条写进 `Report.problems`，不静默跳过。调用方（`_finish_scene()`）
+    负责把原因与可复制的手工清理命令打印出来。
     注：调用方传进来的必须是 `add_worktree` 返回的那条路径——它是登记表里的写法。
     """
     report = Report(path)
     path = Path(path)
-    if is_registered(path):
-        result = run(['git', 'worktree', 'remove', '--force', str(path)], ROOT)
-        report.removed = result.returncode == 0
-        if not report.removed:
-            report.problems.append(f'git worktree remove 失败：{output_of(result) or "（无输出）"}')
-    else:
+    scratch = path.parent
+    try:
+        registered = is_registered(path)
+    except OSError as error:
+        registered = False
+        report.problems.append(f'读不到 worktree 登记表：{error}')
+    if registered:
+        try:
+            result = run(['git', 'worktree', 'remove', '--force', str(path)], ROOT)
+        except OSError as error:
+            report.problems.append(f'git worktree remove 抛错：{error}')
+        else:
+            report.removed = result.returncode == 0
+            if not report.removed:
+                report.problems.append(f'git worktree remove 失败：{output_of(result) or "（无输出）"}')
+    elif _exists(path):
         # 登记已经没了，这棵树不再是「git 的 worktree」。不能静默：正常路径下它此刻
         # 一定还在登记里，不在了就说明有人动了手脚（上一轮硬杀、或别处 prune 过）。
         report.problems.append('登记表里没有这棵树，按目录清理')
-    scratch = path.parent
-    if path.exists():
-        shutil.rmtree(path, ignore_errors=True)
-        if path.exists():
-            report.problems.append(f'目录删不掉：{path}')
-    if scratch.exists():
-        shutil.rmtree(scratch, ignore_errors=True)
-        if scratch.exists():
-            report.problems.append(f'临时目录删不掉：{scratch}')
-    report.ok = not report.problems and not path.exists() and not scratch.exists()
+    _remove_tree(report, path, '目录')
+    _remove_tree(report, scratch, '临时目录')
+    report.ok = not report.problems and not _exists(path) and not _exists(scratch)
     return report
 
 
@@ -266,19 +331,46 @@ def main():
         lock.release(fd, path)
 
 
-def _parity(args, sha):
-    scratch = Path(tempfile.mkdtemp(prefix='idlejot-parity-'))
+def _finish_scene(args, scratch, pristine):
+    """本轮现场的唯一收尾出口：保留现场或收掉它，失败必须说出来（issue #378）。"""
+    if scratch is None:
+        return
+    target = pristine if pristine is not None else scratch / 'pristine'
     home = scratch / 'home'
-    home.mkdir()
-    status, pristine, reason = add_worktree(sha, scratch)
-    if status == 'fail':
-        shutil.rmtree(scratch, ignore_errors=True)
-        print(f'FAIL: 建不起 pristine worktree（{reason}）')
-        return 2
-    if status == 'reuse':
-        print(f'parity: 复用了已登记的 worktree（{pristine}）')
+    if args.keep:
+        print(f'保留现场：worktree={target} home={home}')
+        for command in cleanup_commands(scratch):
+            print(f'parity: 手工清理命令 — {command}')
+        return
+    report = cleanup(target)
+    if report.ok:
+        return
+    # 收尾失败不改跑门禁的结论，但必须说出来：静默残留正是 #348 的现场。
+    for problem in report.problems:
+        print(f'parity: 收尾未完成 — {problem}', file=sys.stderr)
+    print(f'parity: 残留现场 {scratch}（请手工清理）', file=sys.stderr)
+    for command in cleanup_commands(scratch):
+        print(f'parity: 手工清理命令 — {command}', file=sys.stderr)
 
+
+def _parity(args, sha):
+    scratch = None
+    pristine = None
     try:
+        # 建树三步进 try（issue #378 缺口③）：中途抛错也要走到 finally 的收尾，
+        # 否则 `mkdtemp` 已经落地的半截现场没人管。
+        scratch = make_scratch()
+        home = scratch / 'home'
+        home.mkdir()
+        status, pristine, reason = add_worktree(sha, scratch)
+        if status == 'fail':
+            # 不在这里直接 rmtree：交给 finally 的 cleanup() 先摘登记再删目录，
+            # 直接抹目录会造出「登记在、目录不在」的孤儿登记（issue #378 缺口④）。
+            print(f'FAIL: 建不起 pristine worktree（{reason}）')
+            return 2
+        if status == 'reuse':
+            print(f'parity: 复用了已登记的 worktree（{pristine}）')
+
         problem = shard_problem(pristine, args.shard)
         if problem:
             print(f'FAIL: {problem}')
@@ -292,16 +384,11 @@ def _parity(args, sha):
             return 0
         print(f'FAIL: parity 未通过（{Path(str(pristine / "scripts" / "run_gates.py")).name} 退出 {code}）')
         return 1 if code == 1 else 2
+    except OSError as error:
+        print(f'parity: 建树/跑门禁抛错 — {error}', file=sys.stderr)
+        return 2
     finally:
-        if args.keep:
-            print(f'保留现场：worktree={pristine} home={home}')
-        else:
-            report = cleanup(pristine)
-            if not report.ok:
-                # 收尾失败不改跑门禁的结论，但必须说出来：静默残留正是 #348 的现场。
-                for problem in report.problems:
-                    print(f'parity: 收尾未完成 — {problem}', file=sys.stderr)
-                print(f'parity: 残留现场 {scratch}（请手工清理）', file=sys.stderr)
+        _finish_scene(args, scratch, pristine)
 
 
 if __name__ == '__main__':

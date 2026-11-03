@@ -99,7 +99,8 @@ EXCLUSIVE = frozenset({'check_listener_rehang', 'check_run_gates_parallel'})
 #
 # 墓碑（issue #369）：这个成员曾被 #353 的 `37700b7` 在**已合并的** #358（`cbb59d2`）
 # 之上连同上面那两段注释一起回退——#353 的改动面是窗口抑制（`winconsole` /
-# `run_passthrough`），与 `EXCLUSIVE` 无关，属于「合并/冲突处理带入」，不是有意收窄。
+# `run_passthrough`），与 `EXCLUSIVE` 无关；据父提交与改动面判断，更像是「合并/冲突处理
+# 带入」，而非有意收窄（git 只能证明父提交和删掉的那几行，动机无从实证，故留余地）。
 # 所以删成员前先看另外两处自述：`check_run_gates_parallel.py` 的模块 docstring 写着
 # 「This gate is itself in run_gates.EXCLUSIVE」、`scripts/gates.json` 里该条的 `why`
 # 写着「`check_run_gates_parallel` 自身在测计时」。三处自述要么一起改，要么都不动；

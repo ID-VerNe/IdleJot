@@ -16,9 +16,29 @@ PR #377 只在 `check_gate_change_review.py` 自己的 `self_test()` 里钉住�
   `sys.exit(main())`、`raise SystemExit(main())`、`sys.exit(run_main())` 都在
   口径内；带参数的 `sys.exit(run_main(Path(...)))` 不在此列（issue #379
   证据链里的 `check_no_console_child` 就是这种形状）。
+- **入口参数侧的兜底也判红（#382 复核条件 1）**：参数不是裸零参调用、而是
+  `BoolOp`（`or` / `and`）或单支未知的 `IfExp` 时，同样计入入口并判红——
+  `sys.exit(main() or 0)`、`sys.exit(main() if cond else 0)`、
+  `raise SystemExit(main() or 0)` 与 `return f() or 0` 是同一机制：把上游
+  `None` 兜成成功。两支都是非 None 常量（`sys.exit(1 if cond else 0)`）放行；
+  一支是已解析且确认带值的零参调用、另一支是非零常量（`sys.exit(main() if
+  cond else 1)`）也放行（非零兜底不会把失败伪装成成功）。
+- **`main(); sys.exit(0)` 边界（#382 复核条件 2）**：`main()` 独立调用后再
+  `sys.exit(0)` / `sys.exit()` 当前**不计入口、不判红**。理由：真实树有 46 个
+  脚本是「`main()` 独立调用、失败靠异常/断言抛出」的写法，这 46 个 `main()`
+  函数体实测全部没有带值 `return`，这套约定下与今天的 `main()` 等价安全。
+  代价：一旦某个 `main()` 改成带值返回，显式 `sys.exit(0)` 会静默丢弃，门禁
+  看不见——所以这是显式声明的边界，不是漏检。`rc = main(); sys.exit(0)` /
+  `sys.exit()` 属于显式「先取码再丢弃」，**直接判红**；`rc = main(); sys.exit(rc)`
+  是正确写法，但门禁不追 `rc` 来源。
 - 明确不覆盖的边界（写在这里而不是靠「扫不到」侥幸放过）：
-  `getattr(sys, 'exit')(...)` 等动态取属性形态；多级属性链 `pkg.mod.main()`
-  （一层 `mod.main()` 会解析）；`SystemExit` 被动态赋值/遮蔽的形态。
+  `getattr(sys, 'exit')(...)` 等动态取属性形态；`ex = sys.exit; ex(main())`
+  这类把退出函数存进变量再调用；多级属性链 `pkg.mod.main()`（一层
+  `mod.main()` 会解析）；`SystemExit` 被动态赋值/遮蔽的形态；`os._exit(...)`
+  （运行期 `os._exit(None)` 抛 `TypeError` 而不是干净退 0）；`.githooks/` 里
+  没有 shebang、也不是 `.py` 的 Python 钩子（文件类型边界）；`atexit` 改退出码
+  （静态不可见，且正常退出路径改不了退出码）。豁免守卫 `package_assert` 只验
+  「包内仍有 assert」，不承诺 `main()` 真能走到那条断言。
 
 被交出的函数按 AST 解析定义：本文件顶层 `def` / 顶层 `name = lambda: ...`、
 同包 `__init__.py`（`from . import main` 入口）、`from <模块> import <函数>`、
@@ -36,9 +56,9 @@ PR #377 只在 `check_gate_change_review.py` 自己的 `self_test()` 里钉住�
   - `return <IfExp>` → 仅当两支都能静态确认非 None（非 `None` 常量、`not`、
     比较运算、嵌套同类 `IfExp`）才算带值；`return x if cond else 0` 判红；
   - `return <Call>` / `<Name>` / `<Attribute>` 按带值处理。这是显式的能力
-    边界：静态无法证明运行期是否为 `None`，但真实树 60+ 入口都是
-    `return fs.run_cases(...)` / `return _runner.summary()` 的形态，全红会
-    把门禁变成噪音。
+    边界：静态无法证明运行期是否为 `None`。实测真实树 72 个入口里 31 个含
+    `Call` 出口、28 个只有常量出口、13 个含 `IfExp` 出口（均双常量分支），
+    全红会把门禁变成噪音。
 - 定义解析不出来 → 红（无法证明它带值返回，fail-closed）。
 - 入口文件在 `EXEMPT` 显式豁免清单里 → 先解析函数、再验**理由守卫**
   （#379 复核缺口 5）：守卫不成立就红，不再整文件跳过；`EXEMPT` 里的入口
@@ -122,13 +142,28 @@ def has_bare_return(func_node):
     )
 
 
+def constant_int(expr):
+    """整型常量（含正负号）的取值；不是整型常量返回 None。"""
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, int) and not isinstance(expr.value, bool):
+        return expr.value
+    if (
+        isinstance(expr, ast.UnaryOp)
+        and isinstance(expr.op, (ast.USub, ast.UAdd))
+        and isinstance(expr.operand, ast.Constant)
+        and isinstance(expr.operand.value, int)
+        and not isinstance(expr.operand.value, bool)
+    ):
+        return -expr.operand.value if isinstance(expr.op, ast.USub) else expr.operand.value
+    return None
+
+
 def static_non_none(expr):
-    """能否静态确认表达式不是 `None`（只认常量 / bool 运算 / 同类条件表达式）。"""
+    """能否静态确认表达式不是 `None`（常量 / bool 运算 / 容器 / 同类条件表达式）。"""
     if isinstance(expr, ast.Constant):
         return expr.value is not None
-    if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
-        return True
-    if isinstance(expr, ast.Compare):
+    if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, (ast.Not, ast.USub, ast.UAdd)):
+        return isinstance(expr.op, ast.Not) or constant_int(expr) is not None
+    if isinstance(expr, (ast.Compare, ast.JoinedStr, ast.List, ast.Tuple, ast.Set, ast.Dict)):
         return True
     if isinstance(expr, ast.IfExp):
         return static_non_none(expr.body) and static_non_none(expr.orelse)
@@ -188,20 +223,20 @@ def import_aliases(tree):
     return sys_names, exit_names, system_exit_names, builtins_names
 
 
-def exit_argument(node, aliases):
-    """`sys.exit(...)` / `raise SystemExit(...)` 的第一个参数节点；其它节点返回 None。"""
+def exit_call(node, aliases):
+    """`sys.exit(...)` / `raise SystemExit(...)` 对应的调用节点；其它节点返回 None。"""
     sys_names, exit_names, system_exit_names, builtins_names = aliases
     if isinstance(node, ast.Call):
         func = node.func
         if isinstance(func, ast.Name) and func.id in exit_names:
-            return node.args[0] if node.args else None
+            return node
         if (
             isinstance(func, ast.Attribute)
             and func.attr == 'exit'
             and isinstance(func.value, ast.Name)
             and func.value.id in sys_names
         ):
-            return node.args[0] if node.args else None
+            return node
         return None
     if isinstance(node, ast.Raise):
         exc = node.exc
@@ -209,14 +244,64 @@ def exit_argument(node, aliases):
             return None
         func = exc.func
         if isinstance(func, ast.Name) and func.id in system_exit_names:
-            return exc.args[0] if exc.args else None
+            return exc
         if (
             isinstance(func, ast.Attribute)
             and func.attr == 'SystemExit'
             and isinstance(func.value, ast.Name)
             and func.value.id in builtins_names
         ):
-            return exc.args[0] if exc.args else None
+            return exc
+    return None
+
+
+def exit_argument(node, aliases):
+    """退出调用的第一个参数节点；无参数或非退出调用返回 None。"""
+    call = exit_call(node, aliases)
+    return call.args[0] if call is not None and call.args else None
+
+
+def zero_arg_call(expr):
+    """无位置参数、无关键字参数的 `Call`；否则 None。"""
+    if isinstance(expr, ast.Call) and not expr.args and not expr.keywords:
+        return expr
+    return None
+
+
+def first_zero_arg_call(expr):
+    """兜底表达式里被交出的那个零参调用（`main() or 0` / `main() if c else 0`）。"""
+    for node in ast.walk(expr):
+        call = zero_arg_call(node)
+        if call is not None:
+            return call
+    return None
+
+
+def entry_argument_problem(argument, inner, record, wrapper):
+    """入口参数侧的兜底判据（#382 复核条件 1）；None 表示可放行。
+
+    `wrapper=False` 是裸零参调用，没有兜底问题；`BoolOp` 一律红（短路结果可能
+    落到兜底常量）；`IfExp` 两支都非 None 常量时放行，一支是已确认带值的零参
+    调用、另一支是非零整型常量时也放行（非零兜底不会把失败伪装成成功），其余红。
+    """
+    if not wrapper:
+        return None
+    if isinstance(argument, ast.BoolOp):
+        return f'参数 `{ast.unparse(argument)}` 用布尔短路兜底，上游 None 会被吞成成功'
+    if isinstance(argument, ast.IfExp):
+        branches = (argument.body, argument.orelse)
+        if all(isinstance(item, ast.Constant) and item.value is not None for item in branches):
+            return None
+        other = argument.orelse if argument.body is inner else argument.body
+        fallback = constant_int(other)
+        safe_call = (
+            record is not None
+            and decorator_problem(record) is None
+            and return_problem(record.node) is None
+        )
+        if fallback is not None and fallback != 0 and safe_call:
+            return None
+        return f'参数 `{ast.unparse(argument)}` 有一支无法静态确认非 None（不能靠 0/None 兜底）'
     return None
 
 
@@ -435,6 +520,50 @@ def collect_sources(root):
     return sources
 
 
+def discarded_exit_hits(tree, aliases):
+    """`rc = main(); sys.exit(0)` / `sys.exit()` 的显式丢弃（#382 复核条件 2）。
+
+    只认同一语句块里**紧邻**的「先取码、再显式退 0/空参」；`main(); sys.exit(0)`
+    是已声明边界，`rc = main(); sys.exit(rc)` 是正确写法，都不判红。
+    """
+    hits = []
+    for node in ast.walk(tree):
+        for field in ('body', 'orelse', 'finalbody'):
+            block = getattr(node, field, None)
+            if not isinstance(block, list):
+                continue
+            for prev, nxt in zip(block, block[1:]):
+                if not isinstance(nxt, ast.Expr):
+                    continue
+                call = exit_call(nxt.value, aliases)
+                if call is None:
+                    continue
+                success = not call.args or constant_int(call.args[0]) == 0
+                if not success:
+                    continue
+                variable = None
+                if (
+                    isinstance(prev, ast.Assign)
+                    and len(prev.targets) == 1
+                    and isinstance(prev.targets[0], ast.Name)
+                    and zero_arg_call(prev.value) is not None
+                ):
+                    variable = prev.targets[0].id
+                elif (
+                    isinstance(prev, ast.AnnAssign)
+                    and isinstance(prev.target, ast.Name)
+                    and zero_arg_call(prev.value) is not None
+                ):
+                    variable = prev.target.id
+                if variable is not None:
+                    hits.append(
+                        (nxt.lineno,
+                         f'`{variable} = {ast.unparse(prev.value)}` 后 `{ast.unparse(nxt.value)}`：'
+                         '先取退出码再显式丢弃，返回值没有传给退出码')
+                    )
+    return hits
+
+
 def audit(sources, check_stale=False):
     """扫描一组 `(相对路径, 文件路径)` → (入口, 豁免, 命中)。纯函数，供 main 与 self_test 共用。"""
     entries, exempted, hits = [], [], []
@@ -449,24 +578,41 @@ def audit(sources, check_stale=False):
             if argument is None:
                 continue
             kind = 'sys.exit' if isinstance(node, ast.Call) else 'raise SystemExit'
-            if not isinstance(argument, ast.Call) or argument.args or argument.keywords:
-                continue  # 非零参调用不在口径内（判据按形状，不按函数名）
-            if isinstance(argument.func, ast.Lambda):
-                name = '<lambda>'
-                record = Resolved(argument.func, tree, path)
+            if zero_arg_call(argument) is not None:
+                inner, wrapper = argument, False
+            elif isinstance(argument, (ast.BoolOp, ast.IfExp)):
+                inner = first_zero_arg_call(argument)
+                if inner is None:
+                    continue  # 纯常量 switch / 常量兜底，没有可解析的被交出函数
+                wrapper = True
             else:
-                qualifier, name = callee_ref(argument)
+                continue  # 非零参调用不在口径内（判据按形状，不按函数名）
+            if isinstance(inner.func, ast.Lambda):
+                name = '<lambda>'
+                record = Resolved(inner.func, tree, path)
+            else:
+                qualifier, name = callee_ref(inner)
                 if name is None:
-                    hits.append((rel, node.lineno, f'{kind}(<非简单调用>) 无法解析被交出的函数'))
+                    hits.append(
+                        (rel, node.lineno,
+                         f'{kind}({ast.unparse(argument)}) 无法解析被交出的函数')
+                    )
                     continue
                 record = resolve_function(path, tree, qualifier, name)
                 if record is None:
                     hits.append(
                         (rel, node.lineno,
-                         f'{kind}({name}()) 的被调函数定义未解析，无法确认它带值 return')
+                         f'{kind}({ast.unparse(argument)}) 的被调函数定义未解析，'
+                         '无法确认它带值 return')
                     )
                     continue
             entries.append((rel, node.lineno, kind, name))
+            wrapper_problem = entry_argument_problem(argument, inner, record, wrapper)
+            if wrapper_problem is not None:
+                hits.append(
+                    (rel, node.lineno, f'{kind}({ast.unparse(argument)}) 的{wrapper_problem}')
+                )
+                continue
             if rel in EXEMPT:
                 guard = GUARDS[EXEMPT[rel]['guard']]
                 if guard(record):
@@ -481,6 +627,8 @@ def audit(sources, check_stale=False):
             problem = decorator_problem(record) or return_problem(record.node)
             if problem is not None:
                 hits.append((rel, node.lineno, f'{kind}({name}()) 的{problem}'))
+        for line, message in discarded_exit_hits(tree, aliases):
+            hits.append((rel, line, message))
     if check_stale:
         seen = {rel for rel, _line, _kind, _name in entries}
         for rel in EXEMPT:
@@ -490,275 +638,12 @@ def audit(sources, check_stale=False):
 
 
 def self_test():
-    """离线自检：每条新口径都配注入必红 / 修复必绿的对照，并钉住自指陷阱。"""
-    failures = []
-
-    def expect(name, got, want):
-        if got != want:
-            failures.append(f'{name}：期望 {want!r}，实得 {got!r}')
-
-    def write_package(root, package, init_body, entry_body=None):
-        package_dir = Path(root) / package
-        package_dir.mkdir(parents=True, exist_ok=True)
-        (package_dir / '__init__.py').write_text(init_body, encoding='utf-8')
-        (package_dir / '__main__.py').write_text(
-            entry_body if entry_body is not None else
-            'import sys\nfrom . import main\n\n'
-            "if __name__ == '__main__':\n    sys.exit(main())\n",
-            encoding='utf-8',
-        )
-        return package_dir
-
-    def audit_package(package_dir):
-        return audit([(f'scripts/{package_dir.name}/__main__.py', package_dir / '__main__.py')])
-
-    bad_main = 'def main():\n    print("FAIL")\n'
-    good_main = 'def main():\n    print("FAIL")\n    return 0\n'
-
-    with tempfile.TemporaryDirectory() as tmp:
-        # 1) 原有反向对照：漏 return 必红，同形补上转绿。
-        package = write_package(tmp, 'pkg', bad_main)
-        entries, exempted, hits = audit_package(package)
-        expect('#379 反向对照：漏 return 被扫出', len(hits), 1)
-        expect('#379 反向对照：命中签名带文件名', hits and hits[0][0], 'scripts/pkg/__main__.py')
-        expect('#379 反向对照：入口被枚举', len(entries), 1)
-
-        package = write_package(tmp, 'pkg', good_main)
-        entries, exempted, hits = audit_package(package)
-        expect('#379 同形对照：带值 return 放行', len(hits), 0)
-        expect('#379 同形对照：入口仍被枚举', len(entries), 1)
-
-        # 2) raise SystemExit 形态与非 main 命名同样命中。
-        (package / '__init__.py').write_text(bad_main, encoding='utf-8')
-        bad_raise = package / '__main__.py'
-        bad_raise.write_text(
-            'from . import main\n\n'
-            "if __name__ == '__main__':\n    raise SystemExit(main())\n",
-            encoding='utf-8',
-        )
-        entries, exempted, hits = audit([('scripts/pkg/__main__.py', bad_raise)])
-        expect('#379 raise SystemExit 形态同样命中', len(hits), 1)
-
-        alias_dir = Path(tmp) / 'alias'
-        alias_dir.mkdir()
-        (alias_dir / '__init__.py').write_text('def run_main():\n    print("FAIL")\n', encoding='utf-8')
-        (alias_dir / '__main__.py').write_text(
-            'import sys\nfrom . import run_main\n\n'
-            "if __name__ == '__main__':\n    sys.exit(run_main())\n",
-            encoding='utf-8',
-        )
-        entries, exempted, hits = audit([('scripts/alias/__main__.py', alias_dir / '__main__.py')])
-        expect('#379 非 main 命名的零参调用同样命中', len(hits), 1)
-        expect('#379 非 main 命名的入口名被识别', entries and entries[0][3], 'run_main')
-
-        # 3) 非零参调用不在口径内：与 check_no_console_child 的真实形状同形。
-        nonzero = Path(tmp) / 'nonzero'
-        nonzero.mkdir()
-        (nonzero / '__init__.py').write_text('def run_main(root):\n    return 0\n', encoding='utf-8')
-        (nonzero / '__main__.py').write_text(
-            'import sys\nfrom pathlib import Path\nfrom . import run_main\n\n'
-            "if __name__ == '__main__':\n    sys.exit(run_main(Path('x')))\n",
-            encoding='utf-8',
-        )
-        entries, exempted, hits = audit([('scripts/nonzero/__main__.py', nonzero / '__main__.py')])
-        expect('#379 非零参调用不误判', (len(entries), len(hits)), (0, 0))
-
-        # 4) 装饰器 fail-closed：即使函数本身带值 return，装饰器也让判据红。
-        package = write_package(
-            tmp, 'decorated',
-            'def deco(fn):\n    return fn\n\n\n@deco\ndef main():\n    return 0\n',
-        )
-        entries, exempted, hits = audit_package(package)
-        expect('#379 装饰器 fail-closed：带 return 也红', len(hits), 1)
-        expect('#379 装饰器 fail-closed：文案点明装饰器', '装饰器' in (hits[0][2] if hits else ''), True)
-        package = write_package(tmp, 'undecorated', good_main)
-        entries, exempted, hits = audit_package(package)
-        expect('#379 装饰器对照：去掉装饰器转绿', len(hits), 0)
-
-        # 5) sys.exit / SystemExit 别名解析（from sys import exit as e 等）。
-        package = write_package(
-            tmp, 'alias_exit', bad_main,
-            'from sys import exit as e\nfrom . import main\n\n'
-            "if __name__ == '__main__':\n    e(main())\n",
-        )
-        entries, exempted, hits = audit_package(package)
-        expect('#379 别名：from sys import exit as e 命中', len(hits), 1)
-
-        package = write_package(
-            tmp, 'alias_sys', bad_main,
-            'import sys as s\nfrom . import main\n\n'
-            "if __name__ == '__main__':\n    s.exit(main())\n",
-        )
-        entries, exempted, hits = audit_package(package)
-        expect('#379 别名：import sys as s 命中', len(hits), 1)
-
-        package = write_package(
-            tmp, 'alias_se', bad_main,
-            'from builtins import SystemExit as SE\nfrom . import main\n\n'
-            "if __name__ == '__main__':\n    raise SE(main())\n",
-        )
-        entries, exempted, hits = audit_package(package)
-        expect('#379 别名：SystemExit 别名命中', len(hits), 1)
-
-        package = write_package(
-            tmp, 'alias_getattr', bad_main,
-            'import sys\nfrom . import main\n\n'
-            "if __name__ == '__main__':\n    getattr(sys, 'exit')(main())\n",
-        )
-        entries, exempted, hits = audit_package(package)
-        expect('#379 别名边界：getattr 形态不在口径', (len(entries), len(hits)), (0, 0))
-
-        # 6) 条件表达式 / or 兜底口径。
-        cases = {
-            'fallback_or': ('def main():\n    return run() or 0\n', 1),
-            'fallback_if': ('def main():\n    return 1 if bad else 0\n', 0),
-            'fallback_if_name': ('def main():\n    return x if cond else 0\n', 1),
-            'return_none': ('def main():\n    return None\n', 1),
-            'return_bare': ('def main():\n    if cond:\n        return 1\n    return\n', 1),
-            'return_const': ('def main():\n    return 0\n', 0),
-        }
-        for package_name, (body, want) in cases.items():
-            package = write_package(tmp, package_name, body)
-            entries, exempted, hits = audit_package(package)
-            expect(f'#379 兜底口径：{package_name}', len(hits), want)
-
-        # 7) SyntaxError fail-closed；shell 钩子按文件类型排除。
-        broken = Path(tmp) / 'broken.py'
-        broken.write_text('def main(:\n', encoding='utf-8')
-        entries, exempted, hits = audit([('scripts/broken.py', broken)])
-        expect('#379 语法错文件 fail-closed', len(hits), 1)
-        expect('#379 语法错命中文案带 fail-closed', 'fail-closed' in (hits[0][2] if hits else ''), True)
-
-        hook_tree = Path(tmp) / 'hooks_tree'
-        (hook_tree / 'scripts').mkdir(parents=True)
-        (hook_tree / '.githooks').mkdir()
-        (hook_tree / 'scripts' / 'ok.py').write_text(good_main, encoding='utf-8')
-        (hook_tree / '.githooks' / 'pre-push').write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
-        sources = collect_sources(hook_tree)
-        expect('#379 shell 钩子不进 AST 扫描', [rel for rel, _p in sources], ['scripts/ok.py'])
-        expect('#379 shell 钩子被判为非 Python', is_python_source(hook_tree / '.githooks' / 'pre-push'), False)
-
-        # 8) 豁免守卫：理由仍在 → 豁免；守卫退化 → 红。
-        exempt_dir = Path(tmp) / 'check_dossier_cadence'
-        exempt_dir.mkdir()
-        (exempt_dir / '__init__.py').write_text('def main():\n    assert True\n', encoding='utf-8')
-        (exempt_dir / '__main__.py').write_text(
-            'import sys\nfrom . import main\n\n'
-            "if __name__ == '__main__':\n    sys.exit(main())\n",
-            encoding='utf-8',
-        )
-        entries, exempted, hits = audit(
-            [('scripts/check_dossier_cadence/__main__.py', exempt_dir / '__main__.py')]
-        )
-        expect('#379 豁免守卫：理由成立时放行', len(hits), 0)
-        expect('#379 豁免会计入豁免数而非通过数', len(exempted), 1)
-
-        (exempt_dir / '__init__.py').write_text('def main():\n    print("FAIL")\n', encoding='utf-8')
-        entries, exempted, hits = audit(
-            [('scripts/check_dossier_cadence/__main__.py', exempt_dir / '__main__.py')]
-        )
-        expect('#379 豁免守卫：断言被删后翻红', len(hits), 1)
-        expect('#379 豁免守卫：文案点明理由不成立', '理由已不成立' in (hits[0][2] if hits else ''), True)
-
-        exit_dir = Path(tmp) / 'check_qr_login'
-        exit_dir.mkdir()
-        (exit_dir / '__init__.py').write_text('import sys\n\n\ndef main():\n    sys.exit(1)\n',
-                                              encoding='utf-8')
-        (exit_dir / '__main__.py').write_text(
-            'import sys\nfrom . import main\n\n'
-            "if __name__ == '__main__':\n    sys.exit(main())\n",
-            encoding='utf-8',
-        )
-        entries, exempted, hits = audit(
-            [('scripts/check_qr_login/__main__.py', exit_dir / '__main__.py')]
-        )
-        expect('#379 豁免守卫：sys.exit(1) 成立时放行', (len(hits), len(exempted)), (0, 1))
-        (exit_dir / '__init__.py').write_text('def main():\n    print("FAIL")\n', encoding='utf-8')
-        entries, exempted, hits = audit(
-            [('scripts/check_qr_login/__main__.py', exit_dir / '__main__.py')]
-        )
-        expect('#379 豁免守卫：sys.exit(1) 被删后翻红', len(hits), 1)
-
-        ghost = 'scripts/ghost/__main__.py'
-        saved = dict(EXEMPT)
-        EXEMPT.clear()
-        EXEMPT[ghost] = {'why': '自检夹具', 'guard': 'package_assert'}
-        try:
-            entries, exempted, hits = audit([], check_stale=True)
-            expect('#379 失效豁免：真实树里不存在的豁免判红', len(hits), 1)
-            expect('#379 失效豁免：文案点明不再被枚举', '不再被枚举' in (hits[0][2] if hits else ''), True)
-        finally:
-            EXEMPT.clear()
-            EXEMPT.update(saved)
-
-        # 9) 复核提到的误红面：sys.exit(0)、lambda、mod.main()。
-        ok = Path(tmp) / 'explicit_zero'
-        ok.mkdir()
-        (ok / '__init__.py').write_text(good_main, encoding='utf-8')
-        (ok / '__main__.py').write_text(
-            'import sys\n\nif __name__ == \'__main__\':\n    sys.exit(0)\n', encoding='utf-8')
-        entries, exempted, hits = audit([('scripts/explicit_zero/__main__.py', ok / '__main__.py')])
-        expect('#379 显式成功：sys.exit(0) 不计入口不误红', (len(entries), len(hits)), (0, 0))
-
-        lam = Path(tmp) / 'lambda_main'
-        lam.mkdir()
-        (lam / '__init__.py').write_text('main = lambda: 0\n', encoding='utf-8')
-        (lam / '__main__.py').write_text(
-            'import sys\nfrom . import main\n\n'
-            "if __name__ == '__main__':\n    sys.exit(main())\n",
-            encoding='utf-8',
-        )
-        entries, exempted, hits = audit([('scripts/lambda_main/__main__.py', lam / '__main__.py')])
-        expect('#379 lambda：赋值为带值 lambda 时放行', (len(entries), len(hits)), (1, 0))
-        (lam / '__init__.py').write_text('main = lambda: None\n', encoding='utf-8')
-        entries, exempted, hits = audit([('scripts/lambda_main/__main__.py', lam / '__main__.py')])
-        expect('#379 lambda：lambda 体为 None 判红', len(hits), 1)
-
-        lam_iife = Path(tmp) / 'lambda_iife'
-        lam_iife.mkdir()
-        (lam_iife / '__main__.py').write_text(
-            'import sys\n\nif __name__ == \'__main__\':\n    sys.exit((lambda: 0)())\n',
-            encoding='utf-8',
-        )
-        entries, exempted, hits = audit(
-            [('scripts/lambda_iife/__main__.py', lam_iife / '__main__.py')])
-        expect('#379 lambda：立即调用带值不误红', (len(entries), len(hits)), (1, 0))
-
-        mod_dir = Path(tmp) / 'mod_main'
-        mod_dir.mkdir()
-        (mod_dir / 'mod.py').write_text('def main():\n    return 0\n', encoding='utf-8')
-        (mod_dir / '__main__.py').write_text(
-            'import sys\nfrom . import mod\n\n'
-            "if __name__ == '__main__':\n    sys.exit(mod.main())\n",
-            encoding='utf-8',
-        )
-        entries, exempted, hits = audit([('scripts/mod_main/__main__.py', mod_dir / '__main__.py')])
-        expect('#379 mod.main()：一层限定名解析后放行', (len(entries), len(hits)), (1, 0))
-        (mod_dir / 'mod.py').write_text('def main():\n    print("FAIL")\n', encoding='utf-8')
-        entries, exempted, hits = audit([('scripts/mod_main/__main__.py', mod_dir / '__main__.py')])
-        expect('#379 mod.main()：漏 return 判红', len(hits), 1)
-
-    # 10) 自指陷阱：本脚本自己的 main() 必须带值 return，且真实树扫描不含本文件。
-    own_tree = parse_module(Path(__file__).resolve())
-    expect('#379 自指：本脚本可解析', own_tree is not None, True)
-    own_main = next(
-        (node for node in (own_tree.body if own_tree else [])
-         if isinstance(node, ast.FunctionDef) and node.name == 'main'),
-        None,
-    )
-    expect('#379 自指：本脚本有 main() 定义', own_main is not None, True)
-    expect('#379 自指：本脚本 main() 可确认带值 return',
-           return_problem(own_main) if own_main else 'missing', None)
-    own_rel = Path(__file__).resolve().relative_to(ROOT).as_posix()
-    entries, exempted, hits = audit([(own_rel, Path(__file__).resolve())])
-    expect('#379 自指：本脚本扫描零命中', len(hits), 0)
-
-    if failures:
-        for line in failures:
-            print(f'SELF-TEST FAIL {line}')
-        raise AssertionError(f'self_test 失败 {len(failures)} 项（issue #379 夹具）')
-    print('SELF-TEST OK 入口枚举、别名、装饰器 fail-closed、兜底口径、语法错 fail-closed、'
-          '豁免守卫与自指陷阱的回归夹具全部符合预期')
+    """离线自检：委托给同目录夹具模块，避免主门禁越过 advisory 行数上限。"""
+    script_dir = Path(__file__).resolve().parent
+    if str(script_dir) not in sys.path:
+        sys.path.insert(0, str(script_dir))
+    from exit_main_return_selftest import run_self_test
+    run_self_test(sys.modules[__name__])
 
 
 def main():

@@ -202,7 +202,10 @@ async def wire_nested(service,token,raw):
                         user_id=444,time=time.time(),sender=dict(user_id=444),message=segments))
                     with chat.access.connect() as db:return db.execute('SELECT id FROM chat_inbox WHERE session_id=? AND message_id=?',(sid,str(mid))).fetchone()[0]
                 async def wait(cursor=0):
-                    return await call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0,acknowledge_through_id=cursor,known_prompt_version=version)
+                    # 本组断言要核对「自动交付的父事件像素」，所以显式要求全量投递。
+                    # 默认 candidates 只预热 @ 我那条消息，非 @ 消息里的转发图只会是
+                    # deferred 元数据（无 content_indexes），断言会误判为缺像素。
+                    return await call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0,acknowledge_through_id=cursor,known_prompt_version=version,auto_images='all')
                 async def reply(out,eid):
                     before=len(calls);await asyncio.sleep(.12)
                     plan=(await call('plan_chat_reply',**out.structuredContent['input_batch']['plan_call']['arguments'],
@@ -218,7 +221,10 @@ async def wire_nested(service,token,raw):
                 DetailBot.forwards.update({ident:dict(messages=nodes(count,'child body ')) for ident,count in zip(ids,[38,4,0,0,0])})
                 DetailBot.forwards[ids[0]]['messages'][0]['message'].append(dict(type='image',data=dict(base64=base64.b64encode(raw).decode())))
                 DetailBot.forwards['nested-outer']=dict(messages=[dict(message=[child(ident)]) for ident in ids])
-                before=len(DetailBot.queries);eid=add([child('nested-outer')]);out=await wait()
+                # 首条 @ 机器人：`get_chat_session` 不接受 auto_images 参数，恢复到它时
+                # 只能走默认 candidates 策略；非 @ 消息里的转发图只会是 deferred 元数据，
+                # 「缓存命中仍交付像素」这条断言（issue #355 暴露的陈旧夹具）就没法成立。
+                before=len(DetailBot.queries);eid=add([dict(type='at',data=dict(qq='111')),child('nested-outer')]);out=await wait()
                 detail=out.structuredContent['messages'][-1]['referenced_messages'][0]
                 assert [len(n['segments'][0]['nodes']) for n in detail['nodes']]==[38,4,0,0,0],detail
                 assert not out.structuredContent['materials']['incomplete']
@@ -264,14 +270,16 @@ async def wire_nested(service,token,raw):
 
 
 def nested_limits(chat,row):
-    from chatlocal.mcp_chat_details import sanitize_nodes,MAX_TEXT
+    from chatlocal.mcp_chat_details import MAX_FORWARD_DEPTH, sanitize_nodes,MAX_TEXT
     child=lambda ident:dict(type='forward',data=dict(id=ident))
     resources={'edge-cycle-a':[dict(message=[child('edge-cycle-b')])],
         'edge-cycle-b':[dict(message=[child('edge-cycle-a')])],
         'edge-large':[dict(message=[text('x'*1000)]) for _ in range(38)],
-        'edge-nodes':[dict(message=[text('n')]) for _ in range(38)],
-        'edge-depth-a':[dict(message=[child('edge-depth-b')])],
-        'edge-depth-b':[dict(message=[child('edge-depth-c')])]}
+        'edge-nodes':[dict(message=[text('n')]) for _ in range(38)]}
+    # 深度链按 MAX_FORWARD_DEPTH 现算（issue #355）：以前手写 a→b→c 正好卡在旧上限 2，
+    # #351 把上限提到 3 后这条链不够深，门禁反而去查第 4 层（'edge-depth-c' 的下一跳）。
+    depth_ids=[f'edge-depth-{i}' for i in range(MAX_FORWARD_DEPTH+1)]
+    resources.update({cur:[dict(message=[child(nxt)])] for cur,nxt in zip(depth_ids,depth_ids[1:])})
     queries=[];deadlines=[]
     def query(row,action,args,deadline,cancel):
         assert not chat.lock._is_owned() and not chat.turns.lock(row['id']).locked()
@@ -288,15 +296,17 @@ def nested_limits(chat,row):
         rendered=chat.details.render_forward(cycle,[],1,True,None,dict(session_id=row['id'],event_id=1,forward_index=0))
         assert rendered['limit_reason']=='cycle' and not rendered['continuation_supported'] and 'next_call' not in rendered
         large=chat.details.forward(row,dict(nodes=sanitize_nodes([dict(message=[child('edge-large')])]*5)),time.monotonic()+3,threading.Event())
-        assert sum(len(v.get('nodes',[])) for v in walk(large))<=50
+        # 节点预算的精确值就是 MAX_NODES（issue #355：这里以前写死 50，MAX_NODES
+        # 在 5821bd8 由 50 提到 100 后断言随之失真）。
+        assert sum(len(v.get('nodes',[])) for v in walk(large))<=MAX_NODES
         assert sum(len(v.get('text','')) for v in walk(large))<=MAX_TEXT
         assert any(v.get('truncated') for v in walk(large))
         bounded=chat.details.forward(row,dict(nodes=sanitize_nodes([dict(message=[child('edge-nodes')])]*5)),time.monotonic()+3,threading.Event())
-        assert sum(len(v.get('nodes',[])) for v in walk(bounded))==50
+        assert sum(len(v.get('nodes',[])) for v in walk(bounded))==MAX_NODES
         rendered=chat.details.render_forward(bounded,[],1,True,None,dict(session_id=row['id'],event_id=1,forward_index=0))
         assert rendered['unrecoverable_truncation'] and not rendered['has_more'] and not rendered['continuation_supported'] and 'next_call' not in rendered
-        deep=chat.details.forward(row,dict(id='edge-depth-a'),time.monotonic()+3,threading.Event())
-        assert 'edge-depth-c' not in queries and any(v.get('state')=='limit_reached' for v in walk(deep))
+        deep=chat.details.forward(row,dict(id=depth_ids[0]),time.monotonic()+3,threading.Event())
+        assert depth_ids[MAX_FORWARD_DEPTH] not in queries and any(v.get('state')=='limit_reached' for v in walk(deep))
     with patch.object(chat.actions,'client_factory',side_effect=AssertionError('expired/cancelled nested fetch')):
         assert chat.details.forward(row,{},time.monotonic()+3,threading.Event())['state']=='unavailable'
         # Missing IDs cannot be recovered by reading the same parent again.
@@ -353,7 +363,9 @@ async def wire_materials(service,token,chat,grant,raw):
                         return db.execute('SELECT id FROM chat_inbox WHERE session_id=? AND message_id=?',(sid,str(mid))).fetchone()[0],mid
                 def photo(data):return dict(type='image',data={'base64':base64.b64encode(data).decode()})
                 async def wait(**args):
-                    return await call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0,**args)
+                    # 本组专测图片物料链路（配额/权限/失败/预算/取消），需要真实像素，
+                    # 因此显式要求全量投递；默认 candidates 只会为 @ 我那条消息预热像素。
+                    return await call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0,auto_images='all',**args)
                 def check(result,eid,count):
                     data=result.structuredContent.get('updated_chat',result.structuredContent)
                     entries=[e for e in data['materials']['images'] if e['event_id']==eid]
@@ -377,7 +389,9 @@ async def wire_materials(service,token,chat,grant,raw):
                 eid,_=add([text('synthetic text')]);packet=await wait();assert not [c for c in packet.content if c.type=='image']
                 cursor=await reply(packet,eid)
                 red=io.BytesIO();Image.new('RGB',(64,48),'red').save(red,'PNG')
-                eid,_=add([photo(raw),photo(red.getvalue())]);packet=await wait(acknowledge_through_id=cursor)
+                # @ 机器人：`get_chat_session` 没有 auto_images 参数，随后用它验证
+                # 「缓存复用仍交付像素」时只能走默认 candidates 策略（issue #355）。
+                eid,_=add([dict(type='at',data=dict(qq='111')),photo(raw),photo(red.getvalue())]);packet=await wait(acknowledge_through_id=cursor)
                 entries=check(packet,eid,2)
                 colors=[]
                 for e in entries:
@@ -399,7 +413,9 @@ async def wire_materials(service,token,chat,grant,raw):
                 check(packet,eid,1);cursor=await reply(packet,eid)
                 eid,_=add([text('old decision')]);packet=await wait(acknowledge_through_id=cursor);await asyncio.sleep(.12)
                 plan=(await call('plan_chat_reply',**packet.structuredContent['input_batch']['plan_call']['arguments'],action='reply',intent='fixture',target_event_id=eid,expressions=['text'])).structuredContent
-                latest,_=add([text('correction'),photo(raw)])
+                # 同样 @ 机器人：stale 恢复预览走默认 candidates 策略，非 @ 消息的图
+                # 只会是 deferred，不会触发一次真实的 event_image 读取。
+                latest,_=add([dict(type='at',data=dict(qq='111')),text('correction'),photo(raw)])
                 with patch.object(chat,'read_context',wraps=chat.read_context) as reads, \
                      patch.object(chat.details,'enrich',wraps=chat.details.enrich) as details, \
                      patch.object(chat.media,'event_image',wraps=chat.media.event_image) as pixels:
@@ -443,7 +459,8 @@ async def wire_materials(service,token,chat,grant,raw):
                 packet=await wait()
                 assert packet.structuredContent['messages'] and any(e.get('state')=='rate_limited' for e in packet.structuredContent['materials']['images'])
                 with chat.access.connect() as db:db.execute('DELETE FROM calls WHERE grant_id=?',(grant['id'],))
-                eid,_=add([dict(type='forward',data={'messages':nodes*3})]);packet=await wait(acknowledge_through_id=cursor)
+                # 同样必须真的超过 MAX_NODES（25*3=75 在 100 上限下不截断，issue #355）。
+                eid,_=add([dict(type='forward',data={'messages':nodes*(MAX_NODES//len(nodes)+1)})]);packet=await wait(acknowledge_through_id=cursor)
                 assert packet.structuredContent['materials']['incomplete'] and packet.structuredContent['messages'][-1]['referenced_messages'][0]['truncated']
                 # Cancel during pixel preparation: no output pixels and no ACK advancement.
                 eid,_=add([photo(raw)]);previous=chat.row(sid)['cursor']
@@ -713,9 +730,12 @@ def main():
                             with access.connect() as db:db.execute('UPDATE grants SET scope=? WHERE id=?',(saved,grant['id']))
                         # Hard limits never advertise an endless continuation past
                         # the retained content; supported inline nested content stays.
-                        oversized,_=add([dict(type='forward',data={'messages':nodes*3})])
+                        # 夹具必须真的超过 MAX_NODES：nodes*3 只有 75 条，在旧上限 50
+                        # 下超限、在 100 下不超限，`processing_limit` 这条语义会失效
+                        # （issue #355）。
+                        oversized,_=add([dict(type='forward',data={'messages':nodes*(MAX_NODES//len(nodes)+1)})])
                         packet();page=call('read_chat_forward',session_id=sid,event_id=oversized)
-                        assert len(page['nodes'])==50 and not page['has_more']
+                        assert len(page['nodes'])==MAX_NODES and not page['has_more']
                         small=call('read_chat_forward',session_id=sid,event_id=oversized,limit=20)
                         assert small['unrecoverable_truncation'] and small['has_more'] and small['next_call']['arguments']['limit']==20
                         retained=[]
@@ -724,7 +744,7 @@ def main():
                             assert page['unrecoverable_truncation'] and page['limit_reason']=='processing_limit'
                             if not page['has_more']:break
                             link=page['next_call'];page=call(link['tool'],**link['arguments'])
-                        assert len(retained)==50 and 'next_call' not in page and not page['continuation_supported']
+                        assert len(retained)==MAX_NODES and 'next_call' not in page and not page['continuation_supported']
                         nested_event,_=add([dict(type='forward',data={'messages':[dict(content=[dict(type='forward',data={'messages':nodes[:2]})])]})])
                         inner=message(packet(),nested_event)['referenced_messages'][0]['nodes'][0]['segments'][0]
                         assert len(inner['nodes'])==2 and inner['state']=='available' and not inner['truncated']

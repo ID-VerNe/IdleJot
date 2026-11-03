@@ -16,7 +16,11 @@ no other gate would notice:
    (``scripts/check_listener_rehang/budget.py:640-667``,
    ``water-group/daemon/wg_up_probe.py:99-138``). Running anything alongside it
    makes its "no listener yet" premise false. Membership is by gate *name*, so
-   re-sharding the manifest must not be able to open it up.
+   re-sharding the manifest must not be able to open it up. The **required**
+   members are a literal list in this file (``REQUIRED_EXCLUSIVE``), never
+   derived from the set under test: #353's ``37700b7`` dropped
+   ``check_run_gates_parallel`` and the fixture, built from
+   ``run_gates.EXCLUSIVE``, shrank with it (#369).
 
 Everything here is driven through the **real CLI** against a temp tree of stub
 gates (``scripts/gates.json`` + ``scripts/stub_*.py``), so the wire contract --
@@ -31,7 +35,15 @@ rows, ``[n/total]`` numbering, summary, exit code -- is what is under test:
    gates already in flight run to completion (killing them would leave
    half-written fixtures for the next attribution run);
 5. ``--jobs`` also works on a subset (``--shard``), so CI's per-shard invocation
-   keeps the same semantics as the local full run.
+   keeps the same semantics as the local full run;
+6. ``--timeout`` bounds a **single** gate (issue #366): a gate that leaves a
+   grandchild holding its stdout still returns promptly (the output comes back
+   from a temp file, not a pipe awaiting EOF), and a gate that hangs past the
+   limit is failed by tearing down its **whole process tree**;
+7. the bytes written back are normalized to universal newlines (a child's
+   ``\r\n`` must not become ``\r\r\n`` in CI logs), and the tail that a
+   *surviving* grandchild writes **after** the gate exits is dropped -- the
+   file-backed capture has no EOF, that is the #366 trade-off.
 
 Wall-clock is a *coarse* sieve and it is judged **relative to the serial baseline
 measured in the same run** (issue #347): ``_run()`` times a whole subprocess, so
@@ -79,9 +91,19 @@ import run_gates  # noqa: E402  (only for EXCLUSIVE; the run itself is a subproc
 OVERLAP_SLACK = 0.05
 # 桩门禁睡多久。够长到让调度抖动淹没不掉重叠，又短到整套用例几秒跑完。
 STUB_SLEEP = 0.30
+# issue #366 的两个时间预算：都远小于桩留的 300s 孙进程寿命，也远小于 `_run` 的
+# 外层 timeout——修复前那两种形状都要等满孙进程，修复后应在数秒内返回。
+HOLD_BUDGET = 20.0
+TIMEOUT_BUDGET = 20.0
 # 墙钟判据的松紧（issue #347）。两条泳道跑 4 条等长桩，理论时长正好是串行的一半；
 # 运行时再打三成余量给负载抖动——越过这条线就不是「波动」了，是「没并行」。
 PARALLEL_SLACK = 1.30
+# `EXCLUSIVE` 的**必需成员**（issue #369）。这是独立字面量，**不许**从
+# `run_gates.EXCLUSIVE` 派生：派生出来的期望值会跟着被测集合一起收窄，成员被删时夹具与
+# 断言同时变小、永远对得上——#353 的 `37700b7` 把 `check_run_gates_parallel` 删出集合那次
+# 就是这么绿过去的（当年的夹具直接 `sorted(run_gates.EXCLUSIVE)`，断言只判「非空」）。
+# 加/删成员时三处一起改：这里、`run_gates.EXCLUSIVE` 定义处、`gates.json` 该条的 `why`。
+REQUIRED_EXCLUSIVE = frozenset({'check_listener_rehang', 'check_run_gates_parallel'})
 # 片头那一行（`run_gates.run_ci` 打进控制台的那句）。捕获组取**实际生效的并发度**：
 # 断言钉的是这个数字，不是「输出里出现过 并行」。
 BANNER_RE = re.compile(r'门禁\s+\d+\s+条.*?(?:并行\s+(\d+)|(串行))')
@@ -103,6 +125,32 @@ time.sleep({sleep})
 (traces / (tag + '.log')).open('a', encoding='utf-8').write(
     '%s %.6f %.6f\\n' % (tag, started, time.time()))
 sys.exit(1 if tag.split('_')[0] == 'fail' else 0)
+'''
+
+# issue #366 的两棵桩树：都派生一个睡 300s 的孙进程，特征串写进它的命令行——用例按
+# 特征串认残留，不按进程名通配，也不碰别的会话。区别只在桩自己退不退出：
+# `_HOLD_STUB` 打完一行就退出（孙进程继续攥着 stdout），`_SLOW_STUB` 自己睡 300s。
+_HOLD_STUB = '''\
+import subprocess, sys
+subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)", {marker!r}])
+print("HOLD_STUB_DONE")
+sys.exit(0)
+'''
+
+_SLOW_STUB = '''\
+import subprocess, sys, time
+subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)", {marker!r}])
+time.sleep(300)
+'''
+
+# 行尾字节契约（PR #370 复核实测）：门禁子进程的 `TextIOWrapper` 在 Windows 上写出
+# `\r\n`，runner 必须归一后只落一次行尾；原样再经 `sys.stdout` 会变成 `\r\r\n`。
+_EOL_STUB = '''\
+import sys
+print("EOL-1")
+print("EOL-2")
+print("EOL-3")
+sys.exit(0)
 '''
 
 
@@ -212,6 +260,32 @@ def _clear_traces(root):
         trace.unlink()
 
 
+def _marker_pids(marker):
+    """按命令行特征串认这个用例自己起的进程（桩自身与桩派生的孙进程都算）。
+
+    不限定进程名（`python.exe` / `python3.x.exe` / `pythonw.exe` 都可能），只排除
+    查询自身那条 `powershell`；特征串每次运行唯一，本机同时跑着别的门禁也不会误伤。
+    """
+    command = ("Get-CimInstance Win32_Process | "
+               f"Where-Object {{ $_.ProcessId -ne $PID -and "
+               f"$_.CommandLine -like '*{marker}*' }} | "
+               "ForEach-Object { $_.ProcessId }")
+    out = subprocess.run(['powershell', '-NoProfile', '-Command', command],
+                         capture_output=True, text=True, timeout=60).stdout
+    return [int(line.strip()) for line in out.splitlines() if line.strip().isdigit()]
+
+
+def _kill_pids(pids):
+    """收掉 `_marker_pids` 认出来的残留（用例自己起的，失败路径也要清干净）。
+
+    `/T` 是兜底：本机 venv 的 `python.exe` 是重定向器，按 PID 单杀会留下它起的那层
+    真实解释器；树杀把两层一起收掉。
+    """
+    for pid in pids:
+        subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)],
+                       capture_output=True, timeout=30)
+
+
 def _parallel_fast_enough(serial_elapsed, parallel_elapsed):
     """并行那一趟是否真的比串行基线省了时间（issue #347）。
 
@@ -303,6 +377,24 @@ def _judge_parallel(serial_elapsed, parallel_elapsed, pairs):
     return not failures, notes, failures
 
 
+def _exclusive_membership_failures(exclusive):
+    """`EXCLUSIVE` 是否保住了全部必需成员；返回 failure 列表（issue #369）。
+
+    判据只读传进来的集合，不读夹具、不起子进程——所以 `--self-test` 可以纯数据喂它。
+
+    「集合非空」不够：清空与「只剩一个」都是成员缺席，且都要**指名**报出缺了谁。
+    #369 的漏检就是这两级台阶：夹具集合同步收窄（对不上也看不出来）、断言只判非空
+    （收窄后照样绿）。期望值来自本文件的 `REQUIRED_EXCLUSIVE` 字面量，不从这里再派生。
+    """
+    missing = sorted(REQUIRED_EXCLUSIVE - set(exclusive))
+    if not missing:
+        return []
+    return [
+        f'EXCLUSIVE lost required member(s) {missing} (have {sorted(exclusive)}): they change '
+        f'the readings of the pool they would run in -- see run_gates.EXCLUSIVE and #369'
+    ]
+
+
 def scan(root):
     """跑完全部用例，返回 `(failures, notes)`。"""
     failures, notes = [], []
@@ -374,8 +466,10 @@ def scan(root):
     # * 归属断言全部落在**结果表的行号**上（行号 = 清单位置，与 `[n/total]` 同一套编号）；
     # * 轨迹只用来算时间：独占那趟起跑时，所有泳道是否真的都已经收摊。
     exclusive = sorted(run_gates.EXCLUSIVE)
-    if not exclusive:
-        failures.append('EXCLUSIVE is empty -- the listener gate lost its protection')
+    # 必需成员用**独立字面量**判（issue #369）：下面这棵树是照着 `EXCLUSIVE` 搭的，集合一
+    # 收窄树就跟着收窄、夹具永远不会错配——所以「非空」证明不了什么，必须换成「必需的
+    # 那几个还在」。别把这条断言改回 `if not exclusive:`，那正是 #369 漏检的形状。
+    failures.extend(_exclusive_membership_failures(exclusive))
     lanes = ['stub_lane_a', 'stub_lane_b']
     tree = _build_tree(
         base / 'exclusive',
@@ -509,6 +603,99 @@ def scan(root):
     notes.append(
         f'--jobs 999 clamped to 并行 {effective} ({cores} cores); '
         f'--jobs 1 stayed 串行; effective_jobs(0)=0')
+
+    # --- 7. 超时兜底：孙进程攥着 stdout 不拖等待，到点杀整棵进程树（issue #366）---
+    # 形状与 issue 的复现命令一致：桩派生一个睡 300s 的孙进程后立刻退出，孙进程继承
+    # 桩的 stdout。修复前 `_run()` 的外层 timeout 要等满孙进程寿命才拿到异常（本机
+    # 实测 timeout=8 要 300s），修复后 runner 只等桩退出、输出照样回到调用方。
+    # 特征串同时写进桩的文件名（= 桩自己的命令行）和孙进程 argv：`_marker_pids`
+    # 因此覆盖「直接子进程 + 孙进程」两层，而不是只证明孙进程不在（复核 3）。
+    marker = f'rg366-hold-{os.getpid()}-{time.time_ns()}'
+    name = f'zombie_hold_{marker}'
+    tree = _build_tree(base / 'hold', [name])
+    (tree / 'scripts' / f'{name}.py').write_text(
+        _HOLD_STUB.format(marker=marker), encoding='utf-8')
+    try:
+        code, console, elapsed = _run(tree, ['ci'], timeout=60, console_only=True)
+        held = _marker_pids(marker)
+        if code != 0:
+            failures.append(f'held stdout: must pass, exit={code}\n{console}')
+        if elapsed > HOLD_BUDGET:
+            failures.append(
+                f'held stdout: runner took {elapsed:.2f}s to return (> {HOLD_BUDGET}s) '
+                f'-- it waited for the grandchild holding the pipe (#366)')
+        # 「不再等 EOF」不许被实现成「丢输出」：桩打的那行必须还在控制台里。
+        if 'HOLD_STUB_DONE' not in console:
+            failures.append(f'held stdout: the gate output was dropped\n{console}')
+        # 孙进程此刻必须还活着：否则这棵树根本没搭出「攥着 stdout」的形状，
+        # 上面的耗时断言什么也证明不了（本机 venv 的 python.exe 是重定向器，
+        # 一次 spawn 可能落成两个 OS 进程，所以只断言「至少一个」）。
+        if not held:
+            failures.append('held stdout: the stub left no live grandchild -- scenario not built')
+        summary = (tree / 'step-summary.md').read_text(encoding='utf-8')
+        if _summary_rows(summary) != [(1, name, '通过')]:
+            failures.append(f'held stdout: result row drifted {_summary_rows(summary)}')
+        notes.append(f'held stdout: returned in {elapsed:.2f}s while {len(held)} '
+                     f'grandchild process(es) still held the handle')
+    finally:
+        _kill_pids(_marker_pids(marker))
+
+    # 到点树杀：桩自己睡 300s，同时留一个睡 300s 的孙进程。`--timeout 2` 必须在数秒
+    # 内返回、该条记失败，并且两个进程都不再存在——只杀直接子进程会留下孙进程。
+    marker = f'rg366-kill-{os.getpid()}-{time.time_ns()}'
+    name = f'zombie_slow_{marker}'
+    tree = _build_tree(base / 'kill', [name])
+    (tree / 'scripts' / f'{name}.py').write_text(
+        _SLOW_STUB.format(marker=marker), encoding='utf-8')
+    try:
+        code, console, elapsed = _run(tree, ['ci', '--timeout', '2'], timeout=60,
+                                       console_only=True)
+        leftovers = _marker_pids(marker)
+        # 超时记失败，但 runner 的总退出码与其它失败一致为 1（124 只是内部标记，
+        # 见 `run_gates.TIMEOUT_RC`；复核 2 的文案/实现对齐）。
+        if code != 1:
+            failures.append(
+                f'--timeout 2: runner must exit 1 like any other failure, got {code}\n{console}')
+        if elapsed > TIMEOUT_BUDGET:
+            failures.append(
+                f'--timeout 2: runner took {elapsed:.2f}s to return (> {TIMEOUT_BUDGET}s)')
+        if '超时' not in console:
+            failures.append(f'--timeout 2: the timeout was not reported\n{console}')
+        summary = (tree / 'step-summary.md').read_text(encoding='utf-8')
+        if _summary_rows(summary) != [(1, name, '失败')]:
+            failures.append(f'--timeout 2: result row drifted {_summary_rows(summary)}')
+        if leftovers:
+            failures.append(
+                f'--timeout 2: {len(leftovers)} process(es) survived the tree kill -- the '
+                f'stub itself or its grandchild is still alive (pids {leftovers})')
+        notes.append(f'--timeout 2: failed after {elapsed:.2f}s, tree fully reaped')
+    finally:
+        _kill_pids(_marker_pids(marker))
+
+    # 行尾字节：门禁子进程的 TextIOWrapper 在 Windows 上写出 `\r\n`，runner 必须归一
+    # 后只落一次行尾；否则 CI 日志每条门禁输出后凭空多一条空记录（复核实测 `\r\r\n`）。
+    tree = _build_tree(base / 'eol', ['eol_stub'])
+    (tree / 'scripts' / 'eol_stub.py').write_text(_EOL_STUB, encoding='utf-8')
+    env = dict(os.environ)
+    env.pop('PYTHONPATH', None)
+    env['GITHUB_STEP_SUMMARY'] = str(tree / 'step-summary.md')
+    # 与 `_run` 同源：把本门禁用的 runner 拷进夹具树的 scripts/，清单才来自夹具树
+    # （直接跑仓库里那份会读到真实 `gates.json`，那不是这组用例要的）。
+    (tree / 'scripts' / 'run_gates.py').write_text(
+        RUNNER.read_text(encoding='utf-8'), encoding='utf-8')
+    raw = subprocess.run(
+        [sys.executable, str(tree / 'scripts' / 'run_gates.py'), 'ci'],
+        cwd=tree, env=env, capture_output=True, timeout=60).stdout
+    sep = os.linesep.encode()
+    if b'\r\r\n' in raw:
+        failures.append("eol: runner double-translated CRLF (found b'\\r\\r\\n' in raw stdout)")
+    for line in (b'EOL-1', b'EOL-2', b'EOL-3'):
+        if raw.count(line) != 1:
+            failures.append(f'eol: {line!r} appears {raw.count(line)} time(s) in raw stdout')
+    if (b'EOL-1' + sep + b'EOL-2' + sep + b'EOL-3' + sep) not in raw:
+        failures.append(f'eol: line endings drifted; head of raw stdout: {raw[:120]!r}')
+    notes.append('eol: 3 gate lines intact, double-CRLF='
+                 f'{raw.count(bytes([13, 13, 10]))}')
     return failures, notes
 
 
@@ -566,7 +753,11 @@ _JUDGE_CASES = [
 
 
 def _self_test_timing():
-    """A/B 对照：判据对「真并行 / 退化回串行」两侧都给出正确结论，且组合语义逐分支对。"""
+    """A/B 对照：判据对「真并行 / 退化回串行」两侧都给出正确结论，且组合语义逐分支对。
+
+    末尾另跑两组**离线**对照（都不跑子进程）：`effective_jobs` 的钳制边界（#317）与
+    `EXCLUSIVE` 的必需成员（#369）——后者就是要拦住「被测集合自己当期望值」的自指。
+    """
     failures = []
     for serial, parallel, expected in _TIMING_CASES:
         got = _parallel_fast_enough(serial, parallel)
@@ -606,8 +797,9 @@ def _self_test_timing():
             'judge ignores wall clock: a run slower than the serial baseline passed '
             'just because two gates overlapped -- #339-style blanket relaxation is back')
     # 钳制判据与墙钟判据各管一路，两边都跑完再统一报——中间提前 return 会让
-    # 「墙钟坏了」把钳制的问题一起盖住，得改两次才发现第二处。
+    # 「墙钟坏了」把钳制的问题一起盖住，得改两次才发现第二处。必需成员断言同理（#369）。
     failures.extend(_self_test_clamp())
+    failures.extend(_self_test_exclusive_membership())
     if failures:
         for line in failures:
             print(f'SELF-TEST FAIL {line}')
@@ -642,6 +834,31 @@ def _self_test_clamp():
     if run_gates.effective_jobs(1) != 1:
         failures.append(
             f'effective_jobs(1) = {run_gates.effective_jobs(1)}: --jobs 1 must stay serial')
+    return failures
+
+
+def _self_test_exclusive_membership():
+    """必需成员断言的 A/B 对照（issue #369）：完整集合必须过，缺一个必须翻红。
+
+    反例**逐成员**做，不只清空整个集合：只拿「空集全红」当对照的话，一个「只认
+    `check_listener_rehang`、对另一个成员失明」的半成品判据照样能骗过自检——那正是
+    #353 之后的现状（集合里剩下的那个还在，缺的那个没人查）。清空那一枪另打一次，钉住
+    「退回 `if not exclusive`」这种改法：非空不再等于通过。
+    """
+    failures = []
+    if _exclusive_membership_failures(REQUIRED_EXCLUSIVE):
+        failures.append(
+            f'membership judge rejects the required set itself: '
+            f'{_exclusive_membership_failures(REQUIRED_EXCLUSIVE)}')
+    for member in sorted(REQUIRED_EXCLUSIVE):
+        narrowed = REQUIRED_EXCLUSIVE - {member}
+        if not _exclusive_membership_failures(narrowed):
+            failures.append(
+                f'membership judge is blind: dropping {member} (leaving {sorted(narrowed)}) '
+                f'still passed -- it cannot catch the #369 silent narrowing')
+    if not _exclusive_membership_failures(frozenset()):
+        failures.append(
+            'membership judge passes an empty EXCLUSIVE -- non-empty is not the contract')
     return failures
 
 

@@ -598,6 +598,11 @@ def 非约定路径的注册worktree不算已有监听():
     `git worktree prune`，会静默清掉旁人的登记。现在 add / remove 只在临时仓库
     里做，并把真实仓库的登记表钉在用例两端：跑前跑后必须逐条一致、
     `.git/worktrees` 条目数不许变——谁再把登记写回真实仓库（或删掉）就红。
+
+    边界（issue #384）：这条快照断言是 fail-closed 的——**运行窗口内任何并发
+    登记变化**（别的会话在同一仓库 `git worktree add/remove`）都会被判红。
+    口径刻意如此：它要抓的是**夹具泄漏**，不是抓并发；撞上并发时重跑，不要
+    为变绿放宽断言。
     """
     if os.name != "nt":
         return True

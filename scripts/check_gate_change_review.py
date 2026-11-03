@@ -41,11 +41,14 @@ CI 由 `.github/workflows/ci.yml` 注入 `PR_BASE_SHA` / `PR_NUMBER`（仅 pull_
 `正文取不到：<原因>`——拿旧正文冒充当下正文会让「已改好」与「没改」在日志里同形。
 PR 正文被清空（`body` 为 null）按「有正文、没有段」处理，与「取不到正文」分开报。
 
-**时点边界（#324）**：闸门上界是 `APPROVED_AT`。上界未到、`base` 无从得知（`--gate-changes`
-显式声明）或基线早于上界时，这条 PR 属于「闸门建立之前」，复核行按 `<PENDING>`
-视作，只打印提示不放行也不判红——闸门只管之后开的 PR。`gate_applies(base, now=None)`
-把「现在」收成可注入参数，上界未到这件事因此可测（#338 顺带补的夹具）。CI 按
-`pull_request.number` 现取 PR 创建时间（`GH_TOKEN` 只读 `pull_requests`，取不到时退回基线判据）。
+**时点边界（#324 / #380）**：闸门上界是 `APPROVED_AT`。上界未到时它尚未建立，
+复核行按 `<PENDING>` 视作，只打印提示不判红；上界已到则**只认 PR 创建时间**
+（`created_at`）：创建于上界之后才生效。**创建时间不可得时 fail-closed**——按闸门
+生效处理并判红（issue #380）。旧实现 `pr_created_at(...) or base` 把 commit sha
+当时点，`parse_time()` 解析不出就返回「不适用」，于是无 token / token 失效 / 限流 /
+`gh` 超时的本机与降级场景整体静默放行。`gate_applies(stamp, now=None)` 把「现在」
+收成可注入参数，「上界之前 / 之后」与「时点不可得」都因此可测。CI 按
+`pull_request.number` 现取创建时间（注入 `GH_TOKEN` + `GITHUB_REPOSITORY`）。
 
 入口处先跑 `self_test()`（issue #107 的离线夹具：PATTERNS 命中范围 + `check()`
 判定的回归，不碰 git / 网络 / 文件），把「钩子改动必须披露」钉在每次执行里。
@@ -145,8 +148,12 @@ def read_body_text(path):
 
 
 def parse_time(text):
-    """`2026-11-02T00:00:00Z` / GitHub 的 `2026-11-02T00:00:00Z` → aware datetime；空值与坏值返回 None。"""
-    if not text:
+    """`2026-11-02T00:00:00Z` / GitHub 的 `2026-11-02T00:00:00Z` → aware datetime；空值与坏值返回 None。
+
+    非字符串（API payload 字段类型意外）同样返回 None：调用方按「时点不可得」处理，
+    落到 fail-closed（issue #380），不在这里抛异常。
+    """
+    if not isinstance(text, str) or not text.strip():
         return None
     try:
         return datetime.fromisoformat(text.strip().replace('Z', '+00:00'))
@@ -154,22 +161,31 @@ def parse_time(text):
         return None
 
 
-def gate_applies(base, now=None):
-    """issue #324 时点边界：基线早于上界 → 闸门不适用（None 表示基线不可得，同样不适用）。
+def gate_applies(stamp, now=None):
+    """issue #324 时点边界；issue #380 起时点不可得即 fail-closed。
 
-    `now` 缺省取当前时刻（UTC）。上界还没到（`APPROVED_AT` 是未来）时同样不适用：
-    闸门自那个时刻起才生效，之前开的 PR 一律按旧口径。把它显式收进判据，是为了让
-    「上界之前」这件事**可测**——不然后测的夹具只能靠改系统时钟或伪造未来提交才能
-    走到闸门分支，那不是回归夹具该依赖的东西。
+    `stamp` 是 PR 的创建时间（`created_at`）。返回闸门是否生效：
+
+    - `now < APPROVED_AT`：一律不适用——闸门自那个时刻起才建立，之前开的 PR
+      按旧口径，这是「尚未生效」，不是「不可得」；
+    - `now >= APPROVED_AT` 且 `stamp` 可得：`stamp >= APPROVED_AT` 才适用；
+    - `now >= APPROVED_AT` 且 `stamp` 不可得（None / 空串 / 解析不出）：
+      **按适用处理（fail-closed）**。宁可红也不静默放行（issue #380）——
+      旧实现把 `base` 的 commit sha 当时点，`fromisoformat` 解析失败就返回
+      「不适用」，闸门在无 token / 降级场景下整体失效。
+
+    `now` 缺省取当前时刻（UTC），显式注入让「上界之前 / 之后」可测。
     """
-    stamp = parse_time(base)
     limit = parse_time(APPROVED_AT)
-    if stamp is None or limit is None:
-        return False
     current = now or datetime.now(timezone.utc)
+    if limit is None:
+        return True  # 常量坏了同样不许静默放行
     if current < limit:
         return False
-    return stamp >= limit
+    parsed = parse_time(stamp)
+    if parsed is None:
+        return True  # issue #380：时点不可得 → fail-closed
+    return parsed >= limit
 
 
 def review_record(section):
@@ -251,8 +267,8 @@ def fetch_pull(number, cache=None):
 def pr_created_at(number, cache=None):
     """PR 创建时间（`created_at`）；取不到时返回 None。
 
-    时点判据退回基线，**绝不因为查不到时间就放行**（放行由 gate_applies 的基线判据
-    决定）。
+    取不到时由 gate_applies 按 fail-closed 处理（issue #380），调用方**不再**退回
+    基线 commit sha——sha 解析不出时间，退回它等于把闸门改成恒「不适用」。
     """
     payload = fetch_pull(number, cache)
     if not payload or '__error__' in payload:
@@ -512,18 +528,31 @@ def self_test():
     # main() 无 base 但显式声明时 fail-closed（不冒充漏列），这条由 main 分支保证。
 
 
-    # 上界未到时一律按旧口径（与基线无关），上界之后才看基线——这条让「闸门建立前」
-    # 可测，而不是只能靠伪造未来提交 / 改系统时钟去撞。
+    # 上界未到时一律按旧口径（与基线无关），上界之后才看 PR 创建时间——这条让
+    # 「闸门建立前」可测，而不是只能靠伪造未来提交 / 改系统时钟去撞。
     before = datetime(2026, 11, 1, tzinfo=timezone.utc)
     after = datetime(2026, 11, 3, tzinfo=timezone.utc)
     # 时点判据一律显式喂 now：默认取墙钟，跑到上界那天这类用例会自己改结论。
-    expect('gate_applies 基线晚于上界', gate_applies('2026-11-03T00:00:00Z', after), True)
-    expect('gate_applies 基线恰为上界', gate_applies(APPROVED_AT, after), True)
-    expect('gate_applies 基线早于上界', gate_applies('2026-10-01T00:00:00Z', after), False)
-    expect('gate_applies 基线不可得不适用', gate_applies('', after), False)
-    expect('gate_applies 基线坏值不适用', gate_applies('not-a-sha', after), False)
-    expect('gate_applies 上界未到：新基线也不适用', gate_applies('2026-12-01T00:00:00Z', before), False)
-    expect('gate_applies 上界刚过：新基线适用', gate_applies('2026-11-02T00:00:00Z', after), True)
+    expect('gate_applies 创建时间晚于上界', gate_applies('2026-11-03T00:00:00Z', after), True)
+    expect('gate_applies 创建时间恰为上界', gate_applies(APPROVED_AT, after), True)
+    expect('gate_applies 创建时间早于上界', gate_applies('2026-10-01T00:00:00Z', after), False)
+    expect('gate_applies 上界刚过：新时点适用', gate_applies('2026-11-02T00:00:00Z', after), True)
+    # issue #380：时点不可得不再「不适用」，而是 fail-closed（宁可红）。
+    expect('gate_applies 时点 None → fail-closed', gate_applies(None, after), True)
+    expect('gate_applies 时点空串 → fail-closed', gate_applies('', after), True)
+    expect('gate_applies 时点坏值 → fail-closed', gate_applies('not-a-sha', after), True)
+    # 反向对照：上界未到是「尚未建立」，时点不可得也不适用——不是把闸门改成永远红。
+    expect('gate_applies 上界未到：时点不可得也不适用', gate_applies(None, before), False)
+    expect('gate_applies 上界未到：新时点也不适用', gate_applies('2026-12-01T00:00:00Z', before), False)
+    # 端到端两组：时点不可得 + PENDING 判红；同一时点不可得 + 已贴结论仍绿
+    # （证明红的是「复核缺席」，不是「时点判据恒红」）。另配时点可得且已贴结论的放行对照。
+    expect('闸门：时点不可得 → 按生效处理，PENDING 红',
+           check(touched, pending, gated=gate_applies(None, after))[0], 1)
+    expect('闸门：时点不可得 + 已贴结论 → 放行（对照：不是永远红）',
+           check(touched, approve_last, gated=gate_applies(None, after))[0], 0)
+    expect('闸门：时点可得且已贴结论 → 放行',
+           check(touched, approve_last,
+                 gated=gate_applies('2026-11-03T00:00:00Z', after))[0], 0)
 
     # issue #338：正文来源是「当下的 PR 正文」，不是事件快照。
     # 全部离线：现取路径用预置 cache 喂 payload，不打网络。
@@ -609,7 +638,7 @@ def self_test():
             print(f'SELF-TEST FAIL {line}')
         raise AssertionError(f'self_test 失败 {len(failures)} 项（issue #107 / #324 / #375 夹具）')
     print('SELF-TEST OK PATTERNS 命中范围（含 .githooks/）、check() 判定、独立复核闸门（#324）、'
-          '正文现取（#338）与入口退出码（#375）的回归夹具全部符合预期')
+          '正文现取（#338）、时点 fail-closed（#380）与入口退出码（#375）的回归夹具全部符合预期')
 
 
 def main(argv=None, selftest=True):
@@ -662,15 +691,21 @@ def _main(argv):
         return 1
 
     # issue #324 时点边界与 issue #338 现取正文共用同一次 GET pulls/<n>。
+    # issue #380：时点只认 PR 创建时间，**不再**退回 `base` 的 commit sha——那是
+    # fail-open 的来源。拿不到时 gate_applies() 会按 fail-closed 处理。
     cache = {}
-    stamp = pr_created_at(number, cache) or base
-    gated = gate_applies(stamp)
-    if gated:
-        print(f'  gate 独立复核闸门生效（基线 / PR 创建于 {stamp[:10]}，不早于 {APPROVED_AT[:10]}）')
+    created_at = pr_created_at(number, cache)
+    created = parse_time(created_at)
+    gated = gate_applies(created_at)
+    if gated and created is None:
+        print(f'  gate 独立复核闸门生效（PR 创建时间不可得 → fail-closed，'
+              f'不早于 {APPROVED_AT[:10]}）')
+    elif gated:
+        print(f'  gate 独立复核闸门生效（PR 创建于 {created_at[:10]}，不早于 {APPROVED_AT[:10]}）')
     elif datetime.now(timezone.utc) < parse_time(APPROVED_AT):
         print(f'  gate 独立复核闸门尚未生效（上界 {APPROVED_AT[:10]} 未到），只提示')
     else:
-        print(f'  gate 独立复核闸门不适用（基线 / PR 创建早于 {APPROVED_AT[:10]} 或不可得），只提示')
+        print(f'  gate 独立复核闸门不适用（PR 创建于 {created_at[:10]}，早于 {APPROVED_AT[:10]}），只提示')
     if head != 'HEAD':
         print(f'  info 对照 head={head}')
 

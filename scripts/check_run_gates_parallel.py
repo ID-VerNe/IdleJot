@@ -16,7 +16,11 @@ no other gate would notice:
    (``scripts/check_listener_rehang/budget.py:640-667``,
    ``water-group/daemon/wg_up_probe.py:99-138``). Running anything alongside it
    makes its "no listener yet" premise false. Membership is by gate *name*, so
-   re-sharding the manifest must not be able to open it up.
+   re-sharding the manifest must not be able to open it up. The **required**
+   members are a literal list in this file (``REQUIRED_EXCLUSIVE``), never
+   derived from the set under test: #353's ``37700b7`` dropped
+   ``check_run_gates_parallel`` and the fixture, built from
+   ``run_gates.EXCLUSIVE``, shrank with it (#369).
 
 Everything here is driven through the **real CLI** against a temp tree of stub
 gates (``scripts/gates.json`` + ``scripts/stub_*.py``), so the wire contract --
@@ -94,6 +98,12 @@ TIMEOUT_BUDGET = 20.0
 # 墙钟判据的松紧（issue #347）。两条泳道跑 4 条等长桩，理论时长正好是串行的一半；
 # 运行时再打三成余量给负载抖动——越过这条线就不是「波动」了，是「没并行」。
 PARALLEL_SLACK = 1.30
+# `EXCLUSIVE` 的**必需成员**（issue #369）。这是独立字面量，**不许**从
+# `run_gates.EXCLUSIVE` 派生：派生出来的期望值会跟着被测集合一起收窄，成员被删时夹具与
+# 断言同时变小、永远对得上——#353 的 `37700b7` 把 `check_run_gates_parallel` 删出集合那次
+# 就是这么绿过去的（当年的夹具直接 `sorted(run_gates.EXCLUSIVE)`，断言只判「非空」）。
+# 加/删成员时三处一起改：这里、`run_gates.EXCLUSIVE` 定义处、`gates.json` 该条的 `why`。
+REQUIRED_EXCLUSIVE = frozenset({'check_listener_rehang', 'check_run_gates_parallel'})
 # 片头那一行（`run_gates.run_ci` 打进控制台的那句）。捕获组取**实际生效的并发度**：
 # 断言钉的是这个数字，不是「输出里出现过 并行」。
 BANNER_RE = re.compile(r'门禁\s+\d+\s+条.*?(?:并行\s+(\d+)|(串行))')
@@ -367,6 +377,24 @@ def _judge_parallel(serial_elapsed, parallel_elapsed, pairs):
     return not failures, notes, failures
 
 
+def _exclusive_membership_failures(exclusive):
+    """`EXCLUSIVE` 是否保住了全部必需成员；返回 failure 列表（issue #369）。
+
+    判据只读传进来的集合，不读夹具、不起子进程——所以 `--self-test` 可以纯数据喂它。
+
+    「集合非空」不够：清空与「只剩一个」都是成员缺席，且都要**指名**报出缺了谁。
+    #369 的漏检就是这两级台阶：夹具集合同步收窄（对不上也看不出来）、断言只判非空
+    （收窄后照样绿）。期望值来自本文件的 `REQUIRED_EXCLUSIVE` 字面量，不从这里再派生。
+    """
+    missing = sorted(REQUIRED_EXCLUSIVE - set(exclusive))
+    if not missing:
+        return []
+    return [
+        f'EXCLUSIVE lost required member(s) {missing} (have {sorted(exclusive)}): they change '
+        f'the readings of the pool they would run in -- see run_gates.EXCLUSIVE and #369'
+    ]
+
+
 def scan(root):
     """跑完全部用例，返回 `(failures, notes)`。"""
     failures, notes = [], []
@@ -438,8 +466,10 @@ def scan(root):
     # * 归属断言全部落在**结果表的行号**上（行号 = 清单位置，与 `[n/total]` 同一套编号）；
     # * 轨迹只用来算时间：独占那趟起跑时，所有泳道是否真的都已经收摊。
     exclusive = sorted(run_gates.EXCLUSIVE)
-    if not exclusive:
-        failures.append('EXCLUSIVE is empty -- the listener gate lost its protection')
+    # 必需成员用**独立字面量**判（issue #369）：下面这棵树是照着 `EXCLUSIVE` 搭的，集合一
+    # 收窄树就跟着收窄、夹具永远不会错配——所以「非空」证明不了什么，必须换成「必需的
+    # 那几个还在」。别把这条断言改回 `if not exclusive:`，那正是 #369 漏检的形状。
+    failures.extend(_exclusive_membership_failures(exclusive))
     lanes = ['stub_lane_a', 'stub_lane_b']
     tree = _build_tree(
         base / 'exclusive',
@@ -723,7 +753,11 @@ _JUDGE_CASES = [
 
 
 def _self_test_timing():
-    """A/B 对照：判据对「真并行 / 退化回串行」两侧都给出正确结论，且组合语义逐分支对。"""
+    """A/B 对照：判据对「真并行 / 退化回串行」两侧都给出正确结论，且组合语义逐分支对。
+
+    末尾另跑两组**离线**对照（都不跑子进程）：`effective_jobs` 的钳制边界（#317）与
+    `EXCLUSIVE` 的必需成员（#369）——后者就是要拦住「被测集合自己当期望值」的自指。
+    """
     failures = []
     for serial, parallel, expected in _TIMING_CASES:
         got = _parallel_fast_enough(serial, parallel)
@@ -763,8 +797,9 @@ def _self_test_timing():
             'judge ignores wall clock: a run slower than the serial baseline passed '
             'just because two gates overlapped -- #339-style blanket relaxation is back')
     # 钳制判据与墙钟判据各管一路，两边都跑完再统一报——中间提前 return 会让
-    # 「墙钟坏了」把钳制的问题一起盖住，得改两次才发现第二处。
+    # 「墙钟坏了」把钳制的问题一起盖住，得改两次才发现第二处。必需成员断言同理（#369）。
     failures.extend(_self_test_clamp())
+    failures.extend(_self_test_exclusive_membership())
     if failures:
         for line in failures:
             print(f'SELF-TEST FAIL {line}')
@@ -799,6 +834,31 @@ def _self_test_clamp():
     if run_gates.effective_jobs(1) != 1:
         failures.append(
             f'effective_jobs(1) = {run_gates.effective_jobs(1)}: --jobs 1 must stay serial')
+    return failures
+
+
+def _self_test_exclusive_membership():
+    """必需成员断言的 A/B 对照（issue #369）：完整集合必须过，缺一个必须翻红。
+
+    反例**逐成员**做，不只清空整个集合：只拿「空集全红」当对照的话，一个「只认
+    `check_listener_rehang`、对另一个成员失明」的半成品判据照样能骗过自检——那正是
+    #353 之后的现状（集合里剩下的那个还在，缺的那个没人查）。清空那一枪另打一次，钉住
+    「退回 `if not exclusive`」这种改法：非空不再等于通过。
+    """
+    failures = []
+    if _exclusive_membership_failures(REQUIRED_EXCLUSIVE):
+        failures.append(
+            f'membership judge rejects the required set itself: '
+            f'{_exclusive_membership_failures(REQUIRED_EXCLUSIVE)}')
+    for member in sorted(REQUIRED_EXCLUSIVE):
+        narrowed = REQUIRED_EXCLUSIVE - {member}
+        if not _exclusive_membership_failures(narrowed):
+            failures.append(
+                f'membership judge is blind: dropping {member} (leaving {sorted(narrowed)}) '
+                f'still passed -- it cannot catch the #369 silent narrowing')
+    if not _exclusive_membership_failures(frozenset()):
+        failures.append(
+            'membership judge passes an empty EXCLUSIVE -- non-empty is not the contract')
     return failures
 
 

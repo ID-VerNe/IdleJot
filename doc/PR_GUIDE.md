@@ -135,7 +135,7 @@ type/<issue 号>-p<字母>[-<数字>]-<slug>   # 多分节时，如 feat/41-pe4-
 
 **退出码必须跟日志结论一致（issue #375）**：打了 `FAIL` 就必须非 0。`fc1b419`（#343）把 `main()` 拆成 `main()` + `_main(argv)` 时漏了 `return`，`_main()` 的每个 `return 1` 都被丢弃，`sys.exit(main())` 拿到 `None` → 0——日志里一路 `FAIL`，CI 记成通过，闸门形同不存在。现在 `main()` 原样交出 `_main()` 的退出码，`self_test()` 每次执行都复跑一条**真的调用 `main()`** 的离线夹具（`--gate-changes` 无 base 的必红路径 + 无判红的 SKIP 对照），这类回归当场红；只测 `check()` 的判定码看不见它（判定码一直是 1）。
 
-**CI 注入 `GH_TOKEN`（issue #375）**：`permissions: pull-requests: read` 只是授权，Actions **不会**自动把 token 放进环境变量，所以 `ci.yml` 在跑门禁那一步注入 `GH_TOKEN: ${{ github.token }}` 与 `GITHUB_REPOSITORY: ${{ github.repository }}`。没有 token 时 `fetch_pull()` 恒 `None`：正文取不到，`created_at` 也拿不到（时点判据退回的是 commit sha，解析不出时间，独立复核闸门整体不生效）。降级语义只有一种——**拿不到正文就红（fail-closed），不跳过**：改动触及门禁链却读不到正文时判 `FAIL: 门禁改动段缺失（正文不可得）。` 并打印 `正文取不到：<原因>`；fork PR 的 `pull_request` token 是只读 token，`pull-requests: read` 读 PR 元数据够用，注入不因 fork 失效；真正取不到（限流 / 网络 / token 被吊销）同样判红，没有「拿不到就跳过」的分支。
+**CI 注入 `GH_TOKEN`（issue #375）**：`permissions: pull-requests: read` 只是授权，Actions **不会**自动把 token 放进环境变量，所以 `ci.yml` 在跑门禁那一步注入 `GH_TOKEN: ${{ github.token }}` 与 `GITHUB_REPOSITORY: ${{ github.repository }}`。没有 token 时 `fetch_pull()` 恒 `None`：正文取不到，`created_at` 也拿不到。**这不等于独立复核闸门不生效（issue #380）**——上界已到就按「创建时间不可得」fail-closed 处理（见下条时点语义），不再退回 commit sha 判「不适用」。代价要写明白：**无 token 且 PR 实际早于上界时也会红**，这是刻意选的「宁可红」，不是把闸门只是「变严格」；只有拿到 token 的本机 / CI 才能区分「早于上界」与「创建时间不可得」。降级语义只有一种——**拿不到正文就红（fail-closed），不跳过**：改动触及门禁链却读不到正文时判 `FAIL: 门禁改动段缺失（正文不可得）。` 并打印 `正文取不到：<原因>`；fork PR 的 `pull_request` token 是只读 token，`pull-requests: read` 读 PR 元数据够用，注入不因 fork 失效；真正取不到（限流 / 网络 / token 被吊销）同样判红，没有「拿不到就跳过」的分支。
 
 **结论行必须真的写进 `## 门禁改动` 段**（issue #324）。复核结论贴在 PR **评论**里时，机器读不到——所以结论行要落进正文那一节，两处并存：
 

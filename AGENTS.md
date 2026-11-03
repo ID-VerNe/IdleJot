@@ -453,6 +453,8 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 
 **`--jobs N` 的边界（issue #317）**：并行单位是**每一条门禁**，不是分片——`shard` 只决定 CI 走哪个 matrix，本机不受它约束。默认 `--jobs 1` 就是原来的逐条串行，`check_pr_parity.py` 与 pre-push 钩子看到的行为不变。标了 `EXCLUSIVE` 的门禁（`run_gates.py:EXCLUSIVE`，目前只有 `check_listener_rehang`：它起真实 `listen.py`、靠全机 WMI 认进程再 `taskkill /T /F` 树杀）**在线程池收摊之后单独跑**，不交给池子排队——排进池子等于与并发条目同池竞争，独占名存实亡。`--fail-fast` 在并行下只拦住**还没启动**的条目，在途的跑完再收摊（中途杀掉会留下半写的临时目录）。**归因一条红门禁时退回 `--jobs 1`**，别让并发把「谁红的」搅成说不清。
 
+**门禁输出与超时的契约（issue #366）**：每条门禁的 stdout/stderr 合流进临时文件，进程退出即整块写回本进程 stdout（不再等管道 EOF），行尾按 universal newlines 归一后只落一次。因此**默认路径**（不传 `--timeout`，CI 也走这条）本身就接受「门禁退出后由幸存孙进程继续写出的尾巴会丢」——这是换取「孙进程攥着 stdout 也不拖住整次执行」的代价，不是可开关的优化。`--timeout SECONDS` 是**手动开关**：Windows 下到点 `taskkill /T /F` 尽力杀整棵树（非 Windows 只 `kill` 直接子进程，`taskkill` 失败也可能留下孙进程），该条记失败，runner 总退出码仍为 `1`（`124` 只是内部标记）。CI 只跑 `ci --shard …`、不传 `--timeout`：CI 里生效的是「退出即收尾、不等孙进程」，树杀只是本机手动兜底；长门禁的最终兜底仍是 job 的 `timeout-minutes: 40`。门禁内部自己 `subprocess.run(capture_output=True, timeout=…)` 的调用点不在这条契约内，仍归 issue #366 跟踪。
+
 **本机跑法同 §2.4**：一律 `/usr/bin/env -u PYTHONPATH .venv/Scripts/python.exe scripts/run_gates.py …`（清掉注入的 `PYTHONPATH`，并写全 `/usr/bin/env`，否则沙箱 `env` shim 会吞掉子进程输出还报 `exit 0`）。下面的 `uv run` 是 CI 等价写法。
 
 <!-- gates:ci:begin -->

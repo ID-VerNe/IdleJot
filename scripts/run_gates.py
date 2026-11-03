@@ -36,9 +36,11 @@ CI 与本地同一个入口：`.github/workflows/ci.yml` 只调用本脚本，�
 环境里有 `GITHUB_STEP_SUMMARY` 时把逐条结果写进 job 摘要，本机没有该变量时跳过。
 
 **超时兜底不再靠管道收尾**（issue #366）：门禁的输出合流进临时文件，进程退出即收尾；
-`--timeout` 到点用 `taskkill /T /F` 杀整棵进程树、放弃剩余输出。原因见 `_run_gate`：
-管道要读到 EOF 才算完，孙进程攥着写端时 `subprocess` 的 timeout 只杀直接子进程，
-随后照样等满孙进程的寿命（`timeout=8` 实测 300s 才返回）。
+`--timeout` 到点用 `taskkill /T /F` 尽力杀整棵进程树（非 Windows 只 `kill` 直接子进程）、
+放弃剩余输出。原因见 `_run_gate`：管道要读到 EOF 才算完，孙进程攥着写端时
+`subprocess` 的 timeout 只杀直接子进程，随后照样等满孙进程的寿命（`timeout=8` 实测
+300s 才返回）。注意这条路径**对所有调用无条件生效**（CI 也走它）：门禁退出后由幸存
+孙进程继续写出的尾巴会丢，详见 `AGENTS.md` §5.1。
 
 用 `sys.executable` 拉起子门禁：外层已由 `uv run --frozen` 进入锁定环境，
 逐个再起 uv 只是重复解析同一份环境。
@@ -73,7 +75,9 @@ except ImportError:  # 夹具树/裁剪安装里没有运行时树：退回「�
     winconsole = None
 BUCKETS = ('ci', 'manual', 'stale', 'dead', 'support')
 PASSED, FAILED, SKIPPED = '通过', '失败', '未执行'
-# 门禁到点被杀时记的退出码，与 coreutils `timeout` 同义（issue #366）。
+# 门禁到点被杀时的**内部**标记（issue #366）。不把 124 当 runner 的进程退出码：
+# `run_ci` 只要有失败就统一返回 1，把「超时」和「门禁自己退出 1」记成同一个总账，
+# 免得和 coreutils `timeout` 的约定混为一谈、让下游误判。
 TIMEOUT_RC = 124
 
 # 并行档里必须独占跑的门禁（issue #317）。它们会起**真实的**本树 `listen.py` 子进程，
@@ -230,8 +234,10 @@ def _run_gate(args, cwd, timeout):
     任何等待。放弃它之后写进来的尾巴读不到——这是本 issue 明确接受的代价，宁可少一截
     尾巴，也不让一条门禁把整次执行挂住。
 
-    `timeout` 为空时不设超时（既有行为不变）。到点杀整棵树后最多再等 5s 收尸，之后
-    无论进程是否真退，都按超时记账（`TIMEOUT_RC`），绝不回到无界等待。
+    `timeout` 为空时不设超时。到点杀整棵树后最多再等 5s 收尸，之后无论进程是否真退，
+    都按超时记账（内部标记 `TIMEOUT_RC`；runner 的总退出码仍与其它失败一致为 1，见
+    `run_ci`），绝不回到无界等待。`taskkill` 本身失败或非 Windows 平台（那里只 `kill`
+    直接子进程）时可能留下孙进程：这里只保证「不再无界等待」，不宣称一定清干净。
     """
     started = time.perf_counter()
     timed_out = False
@@ -248,6 +254,11 @@ def _run_gate(args, cwd, timeout):
                 pass
         sink.seek(0)
         text = sink.read().decode('utf-8', 'replace')
+    # 子进程的 `TextIOWrapper` 在 Windows 上把行尾写成 `\r\n`；原样交给本进程的
+    # `sys.stdout` 会再翻译一次，落成 `\r\r\n`（CI 日志里每条门禁输出后多一条空记录，
+    # 复核在 PR #370 实测过）。先按 universal newlines 归一，行尾由 `sys.stdout` 按平台
+    # 决定——#91 的「整块写回、成对行数不变」因此仍是 1:1。
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
     if text and sys.stdout is not None:
         if not text.endswith('\n'):
             text += '\n'
@@ -415,8 +426,8 @@ def main():
                         help='最多 N 条门禁同时跑（默认 1 = 串行；归因红门禁时保持 1；'
                              'N 超过本机 CPU 数时按 CPU 数跑，片头打印实际生效值）')
     parser.add_argument('--timeout', type=float, default=None, metavar='SECONDS',
-                        help='单条门禁的超时秒数（默认不设；到点杀掉整棵进程树，'
-                             '该条记失败并按 124 计入退出码，见 issue #366）')
+                        help='单条门禁的超时秒数（默认不设；Windows 下到点 taskkill /T '
+                             '尽力杀整棵进程树，该条记失败，runner 退出码仍为 1，见 issue #366）')
     args = parser.parse_args()
     if args.jobs < 1:
         print(f'FAIL: --jobs 必须 >= 1，收到 {args.jobs}')

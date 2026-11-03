@@ -35,7 +35,11 @@ rows, ``[n/total]`` numbering, summary, exit code -- is what is under test:
 6. ``--timeout`` bounds a **single** gate (issue #366): a gate that leaves a
    grandchild holding its stdout still returns promptly (the output comes back
    from a temp file, not a pipe awaiting EOF), and a gate that hangs past the
-   limit is failed by tearing down its **whole process tree**.
+   limit is failed by tearing down its **whole process tree**;
+7. the bytes written back are normalized to universal newlines (a child's
+   ``\r\n`` must not become ``\r\r\n`` in CI logs), and the tail that a
+   *surviving* grandchild writes **after** the gate exits is dropped -- the
+   file-backed capture has no EOF, that is the #366 trade-off.
 
 Wall-clock is a *coarse* sieve and it is judged **relative to the serial baseline
 measured in the same run** (issue #347): ``_run()`` times a whole subprocess, so
@@ -127,6 +131,16 @@ _SLOW_STUB = '''\
 import subprocess, sys, time
 subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)", {marker!r}])
 time.sleep(300)
+'''
+
+# 行尾字节契约（PR #370 复核实测）：门禁子进程的 `TextIOWrapper` 在 Windows 上写出
+# `\r\n`，runner 必须归一后只落一次行尾；原样再经 `sys.stdout` 会变成 `\r\r\n`。
+_EOL_STUB = '''\
+import sys
+print("EOL-1")
+print("EOL-2")
+print("EOL-3")
+sys.exit(0)
 '''
 
 
@@ -237,13 +251,14 @@ def _clear_traces(root):
 
 
 def _marker_pids(marker):
-    """按命令行特征串认这个用例自己起的进程（桩派生的孙进程也算）。
+    """按命令行特征串认这个用例自己起的进程（桩自身与桩派生的孙进程都算）。
 
-    不按进程名通配：本机同时跑着别的门禁与后端，按名杀会误伤别人的进程（
-    `check_listener_rehang` 的 WMI 查询是同一条纪律）。
+    不限定进程名（`python.exe` / `python3.x.exe` / `pythonw.exe` 都可能），只排除
+    查询自身那条 `powershell`；特征串每次运行唯一，本机同时跑着别的门禁也不会误伤。
     """
-    command = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-               f"Where-Object {{ $_.CommandLine -like '*{marker}*' }} | "
+    command = ("Get-CimInstance Win32_Process | "
+               f"Where-Object {{ $_.ProcessId -ne $PID -and "
+               f"$_.CommandLine -like '*{marker}*' }} | "
                "ForEach-Object { $_.ProcessId }")
     out = subprocess.run(['powershell', '-NoProfile', '-Command', command],
                          capture_output=True, text=True, timeout=60).stdout
@@ -251,9 +266,13 @@ def _marker_pids(marker):
 
 
 def _kill_pids(pids):
-    """收掉 `_marker_pids` 认出来的残留（用例自己起的，失败路径也要清干净）。"""
+    """收掉 `_marker_pids` 认出来的残留（用例自己起的，失败路径也要清干净）。
+
+    `/T` 是兜底：本机 venv 的 `python.exe` 是重定向器，按 PID 单杀会留下它起的那层
+    真实解释器；树杀把两层一起收掉。
+    """
     for pid in pids:
-        subprocess.run(['taskkill', '/F', '/PID', str(pid)],
+        subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)],
                        capture_output=True, timeout=30)
 
 
@@ -559,9 +578,12 @@ def scan(root):
     # 形状与 issue 的复现命令一致：桩派生一个睡 300s 的孙进程后立刻退出，孙进程继承
     # 桩的 stdout。修复前 `_run()` 的外层 timeout 要等满孙进程寿命才拿到异常（本机
     # 实测 timeout=8 要 300s），修复后 runner 只等桩退出、输出照样回到调用方。
+    # 特征串同时写进桩的文件名（= 桩自己的命令行）和孙进程 argv：`_marker_pids`
+    # 因此覆盖「直接子进程 + 孙进程」两层，而不是只证明孙进程不在（复核 3）。
     marker = f'rg366-hold-{os.getpid()}-{time.time_ns()}'
-    tree = _build_tree(base / 'hold', ['zombie_hold'])
-    (tree / 'scripts' / 'zombie_hold.py').write_text(
+    name = f'zombie_hold_{marker}'
+    tree = _build_tree(base / 'hold', [name])
+    (tree / 'scripts' / f'{name}.py').write_text(
         _HOLD_STUB.format(marker=marker), encoding='utf-8')
     try:
         code, console, elapsed = _run(tree, ['ci'], timeout=60, console_only=True)
@@ -581,7 +603,7 @@ def scan(root):
         if not held:
             failures.append('held stdout: the stub left no live grandchild -- scenario not built')
         summary = (tree / 'step-summary.md').read_text(encoding='utf-8')
-        if _summary_rows(summary) != [(1, 'zombie_hold', '通过')]:
+        if _summary_rows(summary) != [(1, name, '通过')]:
             failures.append(f'held stdout: result row drifted {_summary_rows(summary)}')
         notes.append(f'held stdout: returned in {elapsed:.2f}s while {len(held)} '
                      f'grandchild process(es) still held the handle')
@@ -591,30 +613,59 @@ def scan(root):
     # 到点树杀：桩自己睡 300s，同时留一个睡 300s 的孙进程。`--timeout 2` 必须在数秒
     # 内返回、该条记失败，并且两个进程都不再存在——只杀直接子进程会留下孙进程。
     marker = f'rg366-kill-{os.getpid()}-{time.time_ns()}'
-    tree = _build_tree(base / 'kill', ['zombie_slow'])
-    (tree / 'scripts' / 'zombie_slow.py').write_text(
+    name = f'zombie_slow_{marker}'
+    tree = _build_tree(base / 'kill', [name])
+    (tree / 'scripts' / f'{name}.py').write_text(
         _SLOW_STUB.format(marker=marker), encoding='utf-8')
     try:
         code, console, elapsed = _run(tree, ['ci', '--timeout', '2'], timeout=60,
                                        console_only=True)
         leftovers = _marker_pids(marker)
-        if code == 0:
-            failures.append(f'--timeout 2: the hung gate did not fail the run\n{console}')
+        # 超时记失败，但 runner 的总退出码与其它失败一致为 1（124 只是内部标记，
+        # 见 `run_gates.TIMEOUT_RC`；复核 2 的文案/实现对齐）。
+        if code != 1:
+            failures.append(
+                f'--timeout 2: runner must exit 1 like any other failure, got {code}\n{console}')
         if elapsed > TIMEOUT_BUDGET:
             failures.append(
                 f'--timeout 2: runner took {elapsed:.2f}s to return (> {TIMEOUT_BUDGET}s)')
         if '超时' not in console:
             failures.append(f'--timeout 2: the timeout was not reported\n{console}')
         summary = (tree / 'step-summary.md').read_text(encoding='utf-8')
-        if _summary_rows(summary) != [(1, 'zombie_slow', '失败')]:
+        if _summary_rows(summary) != [(1, name, '失败')]:
             failures.append(f'--timeout 2: result row drifted {_summary_rows(summary)}')
         if leftovers:
             failures.append(
-                f'--timeout 2: {len(leftovers)} process(es) survived the tree kill -- only '
-                f'the direct child was killed (pids {leftovers})')
+                f'--timeout 2: {len(leftovers)} process(es) survived the tree kill -- the '
+                f'stub itself or its grandchild is still alive (pids {leftovers})')
         notes.append(f'--timeout 2: failed after {elapsed:.2f}s, tree fully reaped')
     finally:
         _kill_pids(_marker_pids(marker))
+
+    # 行尾字节：门禁子进程的 TextIOWrapper 在 Windows 上写出 `\r\n`，runner 必须归一
+    # 后只落一次行尾；否则 CI 日志每条门禁输出后凭空多一条空记录（复核实测 `\r\r\n`）。
+    tree = _build_tree(base / 'eol', ['eol_stub'])
+    (tree / 'scripts' / 'eol_stub.py').write_text(_EOL_STUB, encoding='utf-8')
+    env = dict(os.environ)
+    env.pop('PYTHONPATH', None)
+    env['GITHUB_STEP_SUMMARY'] = str(tree / 'step-summary.md')
+    # 与 `_run` 同源：把本门禁用的 runner 拷进夹具树的 scripts/，清单才来自夹具树
+    # （直接跑仓库里那份会读到真实 `gates.json`，那不是这组用例要的）。
+    (tree / 'scripts' / 'run_gates.py').write_text(
+        RUNNER.read_text(encoding='utf-8'), encoding='utf-8')
+    raw = subprocess.run(
+        [sys.executable, str(tree / 'scripts' / 'run_gates.py'), 'ci'],
+        cwd=tree, env=env, capture_output=True, timeout=60).stdout
+    sep = os.linesep.encode()
+    if b'\r\r\n' in raw:
+        failures.append("eol: runner double-translated CRLF (found b'\\r\\r\\n' in raw stdout)")
+    for line in (b'EOL-1', b'EOL-2', b'EOL-3'):
+        if raw.count(line) != 1:
+            failures.append(f'eol: {line!r} appears {raw.count(line)} time(s) in raw stdout')
+    if (b'EOL-1' + sep + b'EOL-2' + sep + b'EOL-3' + sep) not in raw:
+        failures.append(f'eol: line endings drifted; head of raw stdout: {raw[:120]!r}')
+    notes.append('eol: 3 gate lines intact, double-CRLF='
+                 f'{raw.count(bytes([13, 13, 10]))}')
     return failures, notes
 
 

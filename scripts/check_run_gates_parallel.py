@@ -31,7 +31,11 @@ rows, ``[n/total]`` numbering, summary, exit code -- is what is under test:
    gates already in flight run to completion (killing them would leave
    half-written fixtures for the next attribution run);
 5. ``--jobs`` also works on a subset (``--shard``), so CI's per-shard invocation
-   keeps the same semantics as the local full run.
+   keeps the same semantics as the local full run;
+6. ``--timeout`` bounds a **single** gate (issue #366): a gate that leaves a
+   grandchild holding its stdout still returns promptly (the output comes back
+   from a temp file, not a pipe awaiting EOF), and a gate that hangs past the
+   limit is failed by tearing down its **whole process tree**.
 
 Wall-clock is a *coarse* sieve and it is judged **relative to the serial baseline
 measured in the same run** (issue #347): ``_run()`` times a whole subprocess, so
@@ -79,6 +83,10 @@ import run_gates  # noqa: E402  (only for EXCLUSIVE; the run itself is a subproc
 OVERLAP_SLACK = 0.05
 # 桩门禁睡多久。够长到让调度抖动淹没不掉重叠，又短到整套用例几秒跑完。
 STUB_SLEEP = 0.30
+# issue #366 的两个时间预算：都远小于桩留的 300s 孙进程寿命，也远小于 `_run` 的
+# 外层 timeout——修复前那两种形状都要等满孙进程，修复后应在数秒内返回。
+HOLD_BUDGET = 20.0
+TIMEOUT_BUDGET = 20.0
 # 墙钟判据的松紧（issue #347）。两条泳道跑 4 条等长桩，理论时长正好是串行的一半；
 # 运行时再打三成余量给负载抖动——越过这条线就不是「波动」了，是「没并行」。
 PARALLEL_SLACK = 1.30
@@ -103,6 +111,22 @@ time.sleep({sleep})
 (traces / (tag + '.log')).open('a', encoding='utf-8').write(
     '%s %.6f %.6f\\n' % (tag, started, time.time()))
 sys.exit(1 if tag.split('_')[0] == 'fail' else 0)
+'''
+
+# issue #366 的两棵桩树：都派生一个睡 300s 的孙进程，特征串写进它的命令行——用例按
+# 特征串认残留，不按进程名通配，也不碰别的会话。区别只在桩自己退不退出：
+# `_HOLD_STUB` 打完一行就退出（孙进程继续攥着 stdout），`_SLOW_STUB` 自己睡 300s。
+_HOLD_STUB = '''\
+import subprocess, sys
+subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)", {marker!r}])
+print("HOLD_STUB_DONE")
+sys.exit(0)
+'''
+
+_SLOW_STUB = '''\
+import subprocess, sys, time
+subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)", {marker!r}])
+time.sleep(300)
 '''
 
 
@@ -210,6 +234,27 @@ def _overlaps(spans):
 def _clear_traces(root):
     for trace in (root / 'scripts' / 'traces').glob('*.log'):
         trace.unlink()
+
+
+def _marker_pids(marker):
+    """按命令行特征串认这个用例自己起的进程（桩派生的孙进程也算）。
+
+    不按进程名通配：本机同时跑着别的门禁与后端，按名杀会误伤别人的进程（
+    `check_listener_rehang` 的 WMI 查询是同一条纪律）。
+    """
+    command = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+               f"Where-Object {{ $_.CommandLine -like '*{marker}*' }} | "
+               "ForEach-Object { $_.ProcessId }")
+    out = subprocess.run(['powershell', '-NoProfile', '-Command', command],
+                         capture_output=True, text=True, timeout=60).stdout
+    return [int(line.strip()) for line in out.splitlines() if line.strip().isdigit()]
+
+
+def _kill_pids(pids):
+    """收掉 `_marker_pids` 认出来的残留（用例自己起的，失败路径也要清干净）。"""
+    for pid in pids:
+        subprocess.run(['taskkill', '/F', '/PID', str(pid)],
+                       capture_output=True, timeout=30)
 
 
 def _parallel_fast_enough(serial_elapsed, parallel_elapsed):
@@ -509,6 +554,67 @@ def scan(root):
     notes.append(
         f'--jobs 999 clamped to 并行 {effective} ({cores} cores); '
         f'--jobs 1 stayed 串行; effective_jobs(0)=0')
+
+    # --- 7. 超时兜底：孙进程攥着 stdout 不拖等待，到点杀整棵进程树（issue #366）---
+    # 形状与 issue 的复现命令一致：桩派生一个睡 300s 的孙进程后立刻退出，孙进程继承
+    # 桩的 stdout。修复前 `_run()` 的外层 timeout 要等满孙进程寿命才拿到异常（本机
+    # 实测 timeout=8 要 300s），修复后 runner 只等桩退出、输出照样回到调用方。
+    marker = f'rg366-hold-{os.getpid()}-{time.time_ns()}'
+    tree = _build_tree(base / 'hold', ['zombie_hold'])
+    (tree / 'scripts' / 'zombie_hold.py').write_text(
+        _HOLD_STUB.format(marker=marker), encoding='utf-8')
+    try:
+        code, console, elapsed = _run(tree, ['ci'], timeout=60, console_only=True)
+        held = _marker_pids(marker)
+        if code != 0:
+            failures.append(f'held stdout: must pass, exit={code}\n{console}')
+        if elapsed > HOLD_BUDGET:
+            failures.append(
+                f'held stdout: runner took {elapsed:.2f}s to return (> {HOLD_BUDGET}s) '
+                f'-- it waited for the grandchild holding the pipe (#366)')
+        # 「不再等 EOF」不许被实现成「丢输出」：桩打的那行必须还在控制台里。
+        if 'HOLD_STUB_DONE' not in console:
+            failures.append(f'held stdout: the gate output was dropped\n{console}')
+        # 孙进程此刻必须还活着：否则这棵树根本没搭出「攥着 stdout」的形状，
+        # 上面的耗时断言什么也证明不了（本机 venv 的 python.exe 是重定向器，
+        # 一次 spawn 可能落成两个 OS 进程，所以只断言「至少一个」）。
+        if not held:
+            failures.append('held stdout: the stub left no live grandchild -- scenario not built')
+        summary = (tree / 'step-summary.md').read_text(encoding='utf-8')
+        if _summary_rows(summary) != [(1, 'zombie_hold', '通过')]:
+            failures.append(f'held stdout: result row drifted {_summary_rows(summary)}')
+        notes.append(f'held stdout: returned in {elapsed:.2f}s while {len(held)} '
+                     f'grandchild process(es) still held the handle')
+    finally:
+        _kill_pids(_marker_pids(marker))
+
+    # 到点树杀：桩自己睡 300s，同时留一个睡 300s 的孙进程。`--timeout 2` 必须在数秒
+    # 内返回、该条记失败，并且两个进程都不再存在——只杀直接子进程会留下孙进程。
+    marker = f'rg366-kill-{os.getpid()}-{time.time_ns()}'
+    tree = _build_tree(base / 'kill', ['zombie_slow'])
+    (tree / 'scripts' / 'zombie_slow.py').write_text(
+        _SLOW_STUB.format(marker=marker), encoding='utf-8')
+    try:
+        code, console, elapsed = _run(tree, ['ci', '--timeout', '2'], timeout=60,
+                                       console_only=True)
+        leftovers = _marker_pids(marker)
+        if code == 0:
+            failures.append(f'--timeout 2: the hung gate did not fail the run\n{console}')
+        if elapsed > TIMEOUT_BUDGET:
+            failures.append(
+                f'--timeout 2: runner took {elapsed:.2f}s to return (> {TIMEOUT_BUDGET}s)')
+        if '超时' not in console:
+            failures.append(f'--timeout 2: the timeout was not reported\n{console}')
+        summary = (tree / 'step-summary.md').read_text(encoding='utf-8')
+        if _summary_rows(summary) != [(1, 'zombie_slow', '失败')]:
+            failures.append(f'--timeout 2: result row drifted {_summary_rows(summary)}')
+        if leftovers:
+            failures.append(
+                f'--timeout 2: {len(leftovers)} process(es) survived the tree kill -- only '
+                f'the direct child was killed (pids {leftovers})')
+        notes.append(f'--timeout 2: failed after {elapsed:.2f}s, tree fully reaped')
+    finally:
+        _kill_pids(_marker_pids(marker))
     return failures, notes
 
 

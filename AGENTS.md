@@ -559,8 +559,9 @@ uv run python scripts/check_gate_manifest.py --write   # 改完清单后重写�
 | 95 | `reply` | `check_multigroup_isolation.py` | 一个会话只看一个群：watch/--list 读侧按 conversation_id 过滤（含「本群那条必须在」与「未钉死才不过滤」两组对照）、跨群回复被拒且不记账、批次轮换重定向只挑本群、身份四档解析与多群未钉死拒绝启动（#164）；id 撞号分节：事件流 id 与会话库 rowid 同号时 q&lt;n&gt; 只落到本群那条、裸 id 回库兜底要打出源说明（#203） |
 | 96 | `reply` | `check_trigger_mode.py` | 按群选择 natural/mention_only 触发模式：collector 请求值按 trigger_mode 取（不再硬编码 True）、natural 群普通消息 wake_reason 放行、@/关键词/is_self/指令早退不破坏、两群不同配置按群生效（#188） |
 | 97 | `reply` | `check_wake_audit.py` | 唤醒账本 / 追问攒批 / 监听去抖（#144）：@ 与关键词按 wake_reason 分来源落账且关键词明细不落盘（字段白名单，不是查词）、追问唤醒来自 chat_inbox 也记一行且一批只记一行 batch=条数、解禁唤醒 batch=1、群号只留 12 位哈希、坏行跳过好行照读、写失败静默返回 None 不拖垮真实唤醒、--status 的「唤醒」行把「账本还没开始记」/「过去 24h 无唤醒」/按来源计数三种说法分开；追问攒批未安静够时不唤醒且不推进 consume 游标（顺序不能反）、安静够后一批一次唤醒、quiet_seconds=0 退回改前行为、参数开窗时定死；settle 把窗口内新到的并成一批、后段新到的把截止再推一个窗口（不推后必红）、从不突破等待预算（预算耗尽原地返回一秒不睡）、一直有新唤醒时不超过 DEBOUNCE_CAP 倍（deadline 留 20 个窗口，只断上限生效）、贴着 deadline 时推后撞不到 deadline（deadline 只留 2.5 个窗口，不夹取会挂死）、静默窗口不自动撑到上限、重读失败不吞唤醒、--debounce 0 不额外等待 |
+| 98 | `static` | `check_exit_main_return.py` | 入口退出码契约（#379，防 #375 复发）：AST 枚举 `sys.exit(<零参调用>)` / `raise SystemExit(<零参调用>)`，按形状不按函数名（`sys.exit(run_main())` 同样覆盖，带参调用不在口径内）；解析本文件 / 同包 `__init__.py` / `from ... import` 的函数定义，被交出的函数没有带值 `return` 即红，定义解析不出按 fail-closed 红。安全假阳性（`check_qr_login` / `check_sixty` 失败路径直接 `sys.exit(1)`、`check_dossier_cadence` 与首次扫描新发现的 `check_mcp_chat_turns` 靠断言抛出）走显式豁免清单并逐条注明理由，不靠逃逸规则侥幸放过；`self_test()` 用临时包夹具证明漏 `return` 必红、补上转绿，并钉住本门禁自己的 `main()` 带值返回（自指陷阱） |
 
-共 97 个 CI 门禁，分 5 个分片（`static` 20、`runtime` 15、`mcp` 18、`storage` 11、`reply` 33）；`manual` 16、`stale` 0、`dead` 0、`support` 3 见 `scripts/gates.json` 的对应档位（理由写在那里）。
+共 98 个 CI 门禁，分 5 个分片（`static` 21、`runtime` 15、`mcp` 18、`storage` 11、`reply` 33）；`manual` 16、`stale` 0、`dead` 0、`support` 3 见 `scripts/gates.json` 的对应档位（理由写在那里）。
 <!-- gates:ci:end -->
 
 黑框闪（issue #39）分两步查：静态门禁管“别再写错”；真闪了要抓现行，挂

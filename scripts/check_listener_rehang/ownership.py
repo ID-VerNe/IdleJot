@@ -533,6 +533,16 @@ def _isolated_registry_probe():
                           encoding="utf-8", errors="replace", timeout=60)
         if init.returncode != 0:
             return f"隔离仓库 git init 失败：{(init.stderr or init.stdout).strip()}"
+        # 路径拼写以 git 为准（CI 的 TEMP 是 8.3 短名 `...\RUNNER~1\...`，而
+        # `git worktree list` 回的是长名 `...\runneradmin\...`）。夹具若还用
+        # mkdtemp 给的短名建树、起进程，注册表里那条长名就比不上，自家嵌套树
+        # 会被判成「不在注册表里」→ 假监听被当成本树监听（CI 实测红）。
+        top = git_hidden(["rev-parse", "--show-toplevel"], cwd=str(iso), text=True,
+                         encoding="utf-8", errors="replace", timeout=60)
+        if top.returncode != 0:
+            return f"隔离仓库路径解析失败：{(top.stderr or top.stdout).strip()}"
+        iso = Path(top.stdout.strip())
+        nested = iso / ".tmp" / "nested-fixed"
         commit = git_hidden(["-c", "user.name=rehang-gate",
                              "-c", "user.email=rehang@example.invalid",
                              "-c", "commit.gpgsign=false", "commit",

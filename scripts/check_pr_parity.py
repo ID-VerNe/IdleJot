@@ -16,6 +16,13 @@
     uv run python scripts/check_pr_parity.py                 # 当前 HEAD 全量
     uv run python scripts/check_pr_parity.py --shard static  # 只跑一片
     uv run python scripts/check_pr_parity.py --ref <sha> --keep
+    uv run python scripts/check_pr_parity.py --reclaim       # 只报告可回收现场，不删除
+
+`--reclaim`（issue #378 回收设计的第一档）**只读**：扫描 `%TEMP%` 下的
+`idlejot-parity-*` 现场，打印候选与可直接粘贴的清理命令，退出码 0，
+**一条都不会删**。删除能力（`--yes` 之类）本档尚未提供，也不打算在同一轮引入——
+先让人看见候选、手工清一轮，再决定要不要给机器删除权。另有 parity 正在跑时立即以
+退出码 2 说明「稍后再试」（不排队），且**不改动**锁与持有者记录文件（哪怕是死记录）。
 
 `pre-push` 钩子对每个被推送的本地 sha 跑一次；`SKIP_PARITY=1` 显式跳过（钩子里留痕）。
 CI 本身不跑本脚本：CI 已经是那个干净环境，且它需要完整 git 历史。
@@ -33,7 +40,9 @@ issue #378（非破坏性部分）：`taskkill /F` 之类硬杀绕过 `finally`�
 清理命令。**不做启动期自动扫描/回收**——自动回收仍缺两样：`check_pr_parity_lock.py` 的
 `_pid_alive()` 只校验 holder 里记录的 pid，没有「这棵树有没有进程在用」的判据（硬杀后
 锁会释放，但门禁子进程可能还活着，#366/#370 家族）；`--keep` 现场与硬杀残留没有标记可
-区分，直接回收会误删有意保留的排查现场。这两样补齐之前，扫描回收不得上线。
+区分，直接回收会误删有意保留的排查现场。这两样补齐之前**自动删除不得上线**；只读的
+`--reclaim` 已提供（只打印候选与可粘贴命令，判据里「无进程引用」按 `Win32_Process` 扫，
+`--keep` 不可判定所以只提示），删除能力仍未提供。
 """
 import argparse
 import json
@@ -43,6 +52,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import check_pr_parity_lock as lock
 
@@ -253,6 +263,147 @@ class Report:
         self.ok = False
 
 
+# `--reclaim` 只认本工具自己建的现场前缀（issue #378）：`.tmp/wt-*` 是人工工作树、
+# `tulpa-*` 与别的目录不是本工具的产物，`parity-348-*` 是隔离门禁的 scratch（另有生命周期）。
+RECLAIM_PREFIXES = (SCRATCH_PREFIX,)
+RECLAIM_KEEP_NOTE = ('已知限制：没有 `--keep` 标记机制。健康保留的现场（`pristine` 目录在、可复用）'
+                     '会被判据②排除；只有退化的现场（目录已删、登记成孤儿）才可能漏进候选，'
+                     '删除前请自行确认（issue #378）')
+# 进程表一次性拉全机、过滤在 Python 侧做：查询命令里**不含**特征串，所以 PowerShell
+# 自身的 CommandLine 不会命中任何现场（否则每个现场都会被判成「被占用」）。
+PROCESS_DUMP = ('[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
+                '$OutputEncoding = [System.Text.Encoding]::UTF8; '
+                '$rows = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine } | '
+                'ForEach-Object { [pscustomobject]@{ pid = [int]$_.ProcessId; '
+                'cmd = [string]$_.CommandLine } }); '
+                '$rows | ConvertTo-Json -Compress -Depth 3')
+
+
+def reclaim_commands(scene, registered_pristine=None):
+    """候选现场的可粘贴清理命令；非本工具现场拒绝（同 `cleanup_commands()` 的前缀约束）。
+
+    `registered_pristine` 非空时先摘那一条登记——孤儿登记不摘掉，目录删完就留下一条
+    指向不存在目录的记录。**只生成命令、不执行**。
+    """
+    scene = Path(scene)
+    if not is_parity_scene(scene):
+        raise ValueError(f'拒绝为非 parity 现场生成清理命令：{scene}')
+    commands = []
+    if registered_pristine is not None:
+        commands.append(f'git worktree remove --force "{registered_pristine}"')
+    commands.append(f'Remove-Item -LiteralPath "{scene}" -Recurse -Force')
+    return commands
+
+
+def process_command_lines():
+    """一次拉全机进程的 `(pid, CommandLine)`；拿不到返回 `None`（调用方按「有占用」保守处理）。"""
+    result = run(['powershell', '-NoProfile', '-NonInteractive', '-Command', PROCESS_DUMP],
+                 ROOT, env=dict(os.environ, PYTHONUTF8='1'))
+    if result.returncode != 0:
+        return None
+    text = (result.stdout or '').strip()
+    if not text:
+        return []
+    try:
+        rows = json.loads(text)
+    except ValueError:
+        return None
+    if isinstance(rows, dict):
+        rows = [rows]
+    rows = [row for row in rows if isinstance(row, dict)]
+    return [(int(row.get('pid') or 0), str(row.get('cmd') or '')) for row in rows]
+
+
+def busy_scenes(names):
+    """哪些现场正被进程引用：`(命中集合, 不可得原因)`。
+
+    这是判据③「无进程占用证据」的全部实现——按路径特征串（现场目录名）扫 `Win32_Process`
+    的 CommandLine；扫不到就**不列候选**（宁可少报，也不给人一条可能删掉在用现场的命令）。
+    查询自身按 pid 排除；特征串不在查询命令里（见 `PROCESS_DUMP`），所以不会有自匹配。
+    """
+    rows = process_command_lines()
+    if rows is None:
+        return set(), '进程表拿不到（Win32_Process 查询失败），按「有占用」保守处理'
+    mine = os.getpid()
+    hits = set()
+    for name in names:
+        token = name.lower()
+        for pid, command_line in rows:
+            if pid == mine or not command_line:
+                continue
+            if token in command_line.lower():
+                hits.add(name)
+                break
+    return hits, None
+
+
+def reclaim_candidates(root=None, *, prefixes=RECLAIM_PREFIXES, registered=None,
+                       usable=None, busy=None):
+    """扫 `root` 下的候选现场，返回 `(候选, 问题)`——**只读**，不删任何东西。
+
+    候选四条（issue #378 回收设计）：① 前缀只认 `prefixes`（默认 `idlejot-parity-`）；
+    ② `pristine` 不是活着的树（登记在且 `_usable()` 为真 → 排除；登记在但目录不在 → 可摘）；
+    ③ 没有进程引用（`busy` 注入集合时按集合判定，否则扫 `Win32_Process`）；
+    ④ `--keep` 现场：**当前不可判定**（没有标记机制），由调用方在输出里提示，不排除。
+
+    三个可注入参数（`registered` / `usable` / `busy`）让门禁用假现场覆盖判定逻辑，不必
+    去真实登记表里造树。
+    """
+    root = Path(root if root is not None else tempfile.gettempdir())
+    problems = []
+    candidates = []
+    try:
+        entries = sorted(path for path in root.iterdir() if path.is_dir())
+    except OSError as error:
+        return [], [f'现场根读不了：{root}（{error}）']
+    scenes = [path for path in entries
+              if any(path.name.startswith(prefix) for prefix in prefixes)]
+    if not scenes:
+        return [], []  # 没有现场就不必拉进程表（报告模式的常态，也省一次 PowerShell 启动）
+    registered = registered_worktrees() if registered is None else registered
+    usable = _usable if usable is None else usable
+    if busy is None:
+        busy, problem = busy_scenes([path.name for path in scenes])
+        if problem:
+            problems.append(problem)
+            return [], problems
+    for scene in scenes:
+        if scene.name in busy:
+            continue
+        pristine = scene / 'pristine'
+        entry = next((candidate for candidate in registered if _same_path(pristine, candidate)),
+                     None)
+        state = 'none'
+        if entry is not None:
+            if usable(entry):
+                continue  # 活树：正在被 parity 用（或者跑的就是它）
+            state = 'prunable'
+        candidates.append(SimpleNamespace(scene=scene, pristine=entry or str(pristine),
+                                          registration=state))
+    return candidates, problems
+
+
+def reclaim_report(root=None, **kwargs):
+    """`--reclaim` 的输出：候选 + 可粘贴命令，退出码 0，**一条都不删**（本档只读）。"""
+    candidates, problems = reclaim_candidates(root, **kwargs)
+    print(f'parity: --reclaim 只报告（扫描 {root or tempfile.gettempdir()}，不删除任何东西）')
+    for problem in problems:
+        print(f'WARN: {problem}', file=sys.stderr)
+    if not candidates:
+        print('parity: 候选 0 个（没有可回收的 parity 现场）')
+        return 0
+    print(f'parity: 候选 {len(candidates)} 个（只打印命令，未删除任何东西）')
+    for index, candidate in enumerate(candidates, 1):
+        label = ('孤儿登记（登记在表里、目录已不在）' if candidate.registration == 'prunable'
+                 else '无 worktree 登记')
+        print(f'parity: [{index}/{len(candidates)}] {candidate.scene} — {label}')
+        for command in reclaim_commands(candidate.scene, candidate.pristine
+                                        if candidate.registration == 'prunable' else None):
+            print(f'parity: 清理命令 — {command}')
+    print(f'parity: {RECLAIM_KEEP_NOTE}')
+    return 0
+
+
 def clean_env(home):
     """剥掉私有库与环境开关，只留 CI 同款变量（前缀匹配，新开关自动生效）。"""
     env = {
@@ -307,7 +458,26 @@ def main():
     parser.add_argument('--ref', default='HEAD', help='要复跑的 ref（默认 HEAD）')
     parser.add_argument('--shard', help='只跑某个分片（名字取自该 ref 的 scripts/gates.json）')
     parser.add_argument('--keep', action='store_true', help='保留临时 worktree 与空数据根，打印路径供排查')
+    parser.add_argument('--reclaim', action='store_true',
+                        help='只报告可回收的 parity 现场并打印清理命令（只读，不删除任何东西；'
+                             '锁被占时退出码 2）')
     args = parser.parse_args()
+
+    if args.reclaim:
+        # 报告也要持锁：无锁扫描会与正在建树/收尾的 parity 抢同一份登记表（issue #348）。
+        # 但**不排队**——报告不是跑门禁，拿不到就让人稍后再试，不阻塞很久。
+        path = lock.lock_path()
+        fd = lock.acquire(path)
+        if fd is None:
+            # 只说「锁被占」：这一档一条都不删，连「死记录顺手清掉」也不行——旧写法调
+            # `lock.recorded_holder()`，它会对 pid 已死的记录 `unlink()`（复审实测
+            # `stale_holder_before=True → after=False`）。持有者细节因此不再打印。
+            print('parity: 另一个 parity 正在跑，稍后再试')
+            return 2
+        try:
+            return reclaim_report()
+        finally:
+            lock.release(fd, path)
 
     sha = resolve_ref(args.ref)
     if sha is None:

@@ -37,6 +37,12 @@
    （最后一条当前**不可判定**：没有标记机制，只提示不排除）。这一档**只打印命令、不删除**，
    断言里加一条反向对照（把前缀放宽到 `tulpa-*` 后该目录必进候选）证明判据不是空转。
 
+10. **锁被占时 `--reclaim` 一条都不删**（复审窄修复）：旧写法在 rc=2 分支调
+   `recorded_holder()`，该函数对 pid 已死的持有者记录顺手 `unlink()`（复审实测
+   `stale_holder_before=True → after=False`），与「一条都不删」的字面口径冲突。夹具让
+   一个真进程拿着锁、再把持有者记录改成死 pid，此时 `--reclaim` 必须 rc=2 **且记录原样
+   还在**——修复前这一条必红。
+
 本门禁**自己不跑全仓 prune 来造现场**：`cleanup()` 明文不调 `git worktree prune`，因为那是
 全仓写操作。用例要的「真树」换一个 scratch 直接建就行；收尾也不再依赖 `prune`——本门禁
 自己造出来的孤儿登记逐条 `git worktree remove --force` 摘掉（`forget_registration()`），
@@ -67,6 +73,7 @@ import check_pr_parity_lock as lock  # noqa: E402
 
 FAILS = []
 LOCK_SCRIPT = SCRIPTS / 'check_pr_parity_lock.py'
+PARITY_SCRIPT = SCRIPTS / 'check_pr_parity.py'
 
 
 def check(name, got, want):
@@ -859,6 +866,41 @@ def case_reclaim_report(scene):
         FAILS.append(f'[17] --reclaim 用例中断 — {type(error).__name__}: {error}')
 
 
+def case_reclaim_busy_keeps_holder(scene):
+    """18. 锁被占时 `--reclaim` 退 2，且**一条都不删**——连死掉的持有者记录也不删。
+
+    形状照复审实测：一个真进程拿着锁，持有者记录里写的是**已经死掉的 pid**（上一轮
+    硬杀的形状）。修复前的 rc=2 分支调 `recorded_holder()`，它会把这条死记录 `unlink()`
+    （`stale_holder_before=True → after=False`）；修复后只读记录、文件原样还在。
+    """
+    print('\n[18] 锁被占时 --reclaim 不删 holder')
+    home = scene / 'reclaim-busy-home'
+    home.mkdir()
+    record = home / lock.HOLDER_NAME
+    holder = subprocess.Popen([sys.executable, str(LOCK_SCRIPT), '--hold'], cwd=ROOT,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              env=scene_env(home), text=True, encoding='utf-8')
+    try:
+        check('持锁进程拿到锁', wait_for(lambda: record.exists()), True)
+        # 改写成死记录：旧代码正是在这条记录上触发 `unlink()`。
+        record.write_text(json.dumps({'pid': 99999999, 'ref': 'stale', 'at': 0}),
+                          encoding='utf-8')
+        busy = subprocess.run([sys.executable, str(PARITY_SCRIPT), '--reclaim'], cwd=ROOT,
+                              capture_output=True, text=True, encoding='utf-8',
+                              env=scene_env(home), timeout=120)
+        check('锁被占时 --reclaim rc=2', busy.returncode, 2)
+        check('输出说明另一个 parity 正在跑', '另一个 parity 正在跑' in busy.stdout, True)
+        check('锁被占时 holder 文件仍存在（一条都没删）', record.exists(), True)
+        check('holder 内容没被改写', record.read_text(encoding='utf-8').find('stale') >= 0, True)
+    finally:
+        lock.terminate(holder)
+    # 对照：锁空出来后同一条命令必须退 0（证明 rc=2 来自锁，不是别处失败）。
+    free = subprocess.run([sys.executable, str(PARITY_SCRIPT), '--reclaim'], cwd=ROOT,
+                          capture_output=True, text=True, encoding='utf-8',
+                          env=scene_env(home), timeout=120)
+    check('锁空出来后 --reclaim rc=0（对照）', free.returncode, 0)
+
+
 def guarded(name, case, scene):
     """一组用例崩了也继续跑下一组：崩在哪一组、崩成什么，都要看得见（基线对照要的是全貌）。"""
     try:
@@ -892,7 +934,8 @@ def main():
                            ('清理只认前缀', case_cleanup_scope),
                            ('孤儿登记逐条自摘', case_forget_registration),
                            ('登记表快照对比', case_registry_snapshot_diff),
-                           ('--reclaim 只报告', case_reclaim_report)):
+                           ('--reclaim 只报告', case_reclaim_report),
+                           ('锁被占时不删 holder', case_reclaim_busy_keeps_holder)):
             guarded(name, case, scene)
     finally:
         shutil.rmtree(scene, ignore_errors=True)
@@ -917,7 +960,7 @@ def main():
         for line in FAILS:
             print(f'FAIL {line}')
         return 1
-    print('PASS parity 现场隔离十七项')
+    print('PASS parity 现场隔离十八项')
     return 0
 
 

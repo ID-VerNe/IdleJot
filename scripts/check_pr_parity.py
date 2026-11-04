@@ -21,7 +21,8 @@
 `--reclaim`（issue #378 回收设计的第一档）**只读**：扫描 `%TEMP%` 下的
 `idlejot-parity-*` 现场，打印候选与可直接粘贴的清理命令，退出码 0，
 **一条都不会删**。删除能力（`--yes` 之类）本档尚未提供，也不打算在同一轮引入——
-先让人看见候选、手工清一轮，再决定要不要给机器删除权。
+先让人看见候选、手工清一轮，再决定要不要给机器删除权。另有 parity 正在跑时立即以
+退出码 2 说明「稍后再试」（不排队），且**不改动**锁与持有者记录文件（哪怕是死记录）。
 
 `pre-push` 钩子对每个被推送的本地 sha 跑一次；`SKIP_PARITY=1` 显式跳过（钩子里留痕）。
 CI 本身不跑本脚本：CI 已经是那个干净环境，且它需要完整 git 历史。
@@ -265,7 +266,8 @@ class Report:
 # `--reclaim` 只认本工具自己建的现场前缀（issue #378）：`.tmp/wt-*` 是人工工作树、
 # `tulpa-*` 与别的目录不是本工具的产物，`parity-348-*` 是隔离门禁的 scratch（另有生命周期）。
 RECLAIM_PREFIXES = (SCRATCH_PREFIX,)
-RECLAIM_KEEP_NOTE = ('已知限制：当前没有 `--keep` 标记机制，有意保留的排查现场也会出现在候选里，'
+RECLAIM_KEEP_NOTE = ('已知限制：没有 `--keep` 标记机制。健康保留的现场（`pristine` 目录在、可复用）'
+                     '会被判据②排除；只有退化的现场（目录已删、登记成孤儿）才可能漏进候选，'
                      '删除前请自行确认（issue #378）')
 # 进程表一次性拉全机、过滤在 Python 侧做：查询命令里**不含**特征串，所以 PowerShell
 # 自身的 CommandLine 不会命中任何现场（否则每个现场都会被判成「被占用」）。
@@ -317,7 +319,7 @@ def busy_scenes(names):
 
     这是判据③「无进程占用证据」的全部实现——按路径特征串（现场目录名）扫 `Win32_Process`
     的 CommandLine；扫不到就**不列候选**（宁可少报，也不给人一条可能删掉在用现场的命令）。
-    查询自身按 pid 排除；特征串不在命令行里（见 `RECLAIM_TOKEN_ENV`），所以不会有自匹配。
+    查询自身按 pid 排除；特征串不在查询命令里（见 `PROCESS_DUMP`），所以不会有自匹配。
     """
     rows = process_command_lines()
     if rows is None:
@@ -457,7 +459,8 @@ def main():
     parser.add_argument('--shard', help='只跑某个分片（名字取自该 ref 的 scripts/gates.json）')
     parser.add_argument('--keep', action='store_true', help='保留临时 worktree 与空数据根，打印路径供排查')
     parser.add_argument('--reclaim', action='store_true',
-                        help='只报告可回收的 parity 现场并打印清理命令（只读，不删除任何东西）')
+                        help='只报告可回收的 parity 现场并打印清理命令（只读，不删除任何东西；'
+                             '锁被占时退出码 2）')
     args = parser.parse_args()
 
     if args.reclaim:
@@ -466,9 +469,10 @@ def main():
         path = lock.lock_path()
         fd = lock.acquire(path)
         if fd is None:
-            holder = lock.recorded_holder()
-            extra = f'（{lock.describe_wait(holder)}）' if holder else ''
-            print(f'parity: 另一个 parity 正在跑，稍后再试{extra}')
+            # 只说「锁被占」：这一档一条都不删，连「死记录顺手清掉」也不行——旧写法调
+            # `lock.recorded_holder()`，它会对 pid 已死的记录 `unlink()`（复审实测
+            # `stale_holder_before=True → after=False`）。持有者细节因此不再打印。
+            print('parity: 另一个 parity 正在跑，稍后再试')
             return 2
         try:
             return reclaim_report()

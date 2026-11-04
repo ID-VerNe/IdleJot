@@ -31,6 +31,12 @@
    后 `git worktree list --porcelain` 与 `.git/worktrees` 条目相对跑前必须逐条一致，
    夹具漏登记就翻红。`prunable` 条数只作 WARN 级盘点（#378 自动回收的观测入口）。
 
+9. **`--reclaim` 只报告档（issue #378 回收设计第一档）**：候选必须同时满足四条——前缀只认
+   `idlejot-parity-*`（`.tmp/wt-*` / `tulpa-*` / `parity-348-*` 一律不进候选）、`pristine`
+   不是活树、没有进程引用（按现场名扫 `Win32_Process` 的 CommandLine）、不在 `--keep` 现场
+   （最后一条当前**不可判定**：没有标记机制，只提示不排除）。这一档**只打印命令、不删除**，
+   断言里加一条反向对照（把前缀放宽到 `tulpa-*` 后该目录必进候选）证明判据不是空转。
+
 本门禁**自己不跑全仓 prune 来造现场**：`cleanup()` 明文不调 `git worktree prune`，因为那是
 全仓写操作。用例要的「真树」换一个 scratch 直接建就行；收尾也不再依赖 `prune`——本门禁
 自己造出来的孤儿登记逐条 `git worktree remove --force` 摘掉（`forget_registration()`），
@@ -787,6 +793,72 @@ def case_registry_snapshot_diff(scene):
           bool(registry_diff(same, (('a', 'b'), ('x', 'y', 'z')))), True)
 
 
+def case_reclaim_report(scene):
+    """17. `--reclaim` 只报告：四判据必须咬住，且**一条都不删**（#378 回收设计第一档）。"""
+    print('\n[17] --reclaim 只报告')
+    root = scene / 'reclaim-root'
+    root.mkdir()
+    good = root / 'idlejot-parity-good'
+    good.mkdir()
+    orphan = root / 'idlejot-parity-orphan'
+    (orphan / 'pristine').mkdir(parents=True)
+    live = root / 'idlejot-parity-live'
+    (live / 'pristine' / 'scripts').mkdir(parents=True)
+    (live / 'pristine' / 'scripts' / 'gates.json').write_text('{}', encoding='utf-8')
+    busy = root / 'idlejot-parity-busy'
+    busy.mkdir()
+    foreign = root / 'tulpa-foreign'
+    foreign.mkdir()
+    script = root / 'parity-348-foreign'
+    script.mkdir()
+    registered = {str(orphan / 'pristine'), str(live / 'pristine')}
+    usable = lambda path: (Path(path) / 'scripts' / 'gates.json').is_file()  # noqa: E731
+    busy_names = {'idlejot-parity-busy'}
+
+    candidates, problems = parity.reclaim_candidates(
+        root, registered=registered, usable=usable, busy=busy_names)
+    try:
+        names = [candidate.scene.name for candidate in candidates]
+        check('符合四条判据的假现场进候选', names,
+              ['idlejot-parity-good', 'idlejot-parity-orphan'])
+        check('活树不进候选', 'idlejot-parity-live' in names, False)
+        check('有进程引用不进候选', 'idlejot-parity-busy' in names, False)
+        check('tulpa- 前缀不进候选', 'tulpa-foreign' in names, False)
+        check('parity-348- 前缀不进候选', 'parity-348-foreign' in names, False)
+        check('扫描没有问题', problems, [])
+        states = {candidate.scene.name: candidate.registration for candidate in candidates}
+        check('孤儿登记标为 prunable', states.get('idlejot-parity-orphan'), 'prunable')
+        check('无登记标为 none', states.get('idlejot-parity-good'), 'none')
+        # 反向对照：把前缀放宽到 tulpa-* 之后，该目录必须进候选——证明①不是空转。
+        widened, _ = parity.reclaim_candidates(
+            root, prefixes=('tulpa-',), registered=registered, usable=usable, busy=busy_names)
+        check('反向对照：放宽前缀后 tulpa- 目录必进候选',
+              [candidate.scene.name for candidate in widened], ['tulpa-foreign'])
+        check('无登记只给目录删除命令', parity.reclaim_commands(good),
+              [f'Remove-Item -LiteralPath "{good}" -Recurse -Force'])
+        orphan_commands = parity.reclaim_commands(orphan, orphan / 'pristine')
+        check('孤儿登记先摘登记', 'git worktree remove --force' in orphan_commands[0], True)
+        out = StringIO()
+        with contextlib.redirect_stdout(out):
+            code = parity.reclaim_report(root, registered=registered, usable=usable,
+                                         busy=busy_names)
+        text = out.getvalue()
+        check('报告退出码 0', code, 0)
+        check('报告写明未删除任何东西', '未删除任何东西' in text, True)
+        check('报告打印目录删除命令', 'Remove-Item -LiteralPath' in text, True)
+        check('报告提示 --keep 已知限制', '已知限制' in text, True)
+        check('报告后假现场目录仍在（只读）', good.is_dir(), True)
+        empty = root / 'empty-root'
+        empty.mkdir()
+        empty_out = StringIO()
+        with contextlib.redirect_stdout(empty_out):
+            empty_code = parity.reclaim_report(empty, registered=set(), usable=usable, busy=set())
+        check('空根 0 候选也退 0', empty_code, 0)
+        check('空根打印 0 个候选', '候选 0 个' in empty_out.getvalue(), True)
+    except Exception as error:  # noqa: BLE001 — 用例自身崩了也要报出来，别让 guarded() 独自背
+        FAILS.append(f'[17] --reclaim 用例中断 — {type(error).__name__}: {error}')
+
+
 def guarded(name, case, scene):
     """一组用例崩了也继续跑下一组：崩在哪一组、崩成什么，都要看得见（基线对照要的是全貌）。"""
     try:
@@ -819,7 +891,8 @@ def main():
                            ('--keep 打印清理命令', case_keep_prints_commands),
                            ('清理只认前缀', case_cleanup_scope),
                            ('孤儿登记逐条自摘', case_forget_registration),
-                           ('登记表快照对比', case_registry_snapshot_diff)):
+                           ('登记表快照对比', case_registry_snapshot_diff),
+                           ('--reclaim 只报告', case_reclaim_report)):
             guarded(name, case, scene)
     finally:
         shutil.rmtree(scene, ignore_errors=True)
@@ -844,7 +917,7 @@ def main():
         for line in FAILS:
             print(f'FAIL {line}')
         return 1
-    print('PASS parity 现场隔离十六项')
+    print('PASS parity 现场隔离十七项')
     return 0
 
 

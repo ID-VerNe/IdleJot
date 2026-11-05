@@ -97,6 +97,9 @@ NO_RESTART = {
     # 体量的产物，同样只被一次性 CLI import，守护进程里没有副本。
     "water-group/daemon/wg_members.py": "shared member resolver for CLI (reply), no daemon imports it",
     "water-group/daemon/wg_wakes.py": "shared --list renderer for CLI (reply), no daemon imports it",
+    # issue #390：group_ban 事实行渲染只被 --list 视图（wg_wakes）import；事实的
+    # 写入方是 app 侧（chatlocal/mcp_chat_ban.py），daemon 进程没有这份代码的副本。
+    "water-group/daemon/wg_group_ban.py": "shared group_ban fact renderer for CLI (reply), no daemon imports it",
     "water-group/daemon/wg_aliases.py": "shared alias renderer for CLI (watch/reply), no daemon imports it",
     "water-group/daemon/wg_budget.py": "shared wait-budget constants for CLI (reply/listen), no daemon imports it",
     "water-group/daemon/wg_bubbles.py": "shared bubble-cap/split helper for CLI (reply), no daemon imports it",

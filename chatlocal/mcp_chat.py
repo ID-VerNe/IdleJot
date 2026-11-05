@@ -375,6 +375,17 @@ class MCPChat(ChatWaitMixin):
                 db.execute('INSERT OR REPLACE INTO chat_detail_cache VALUES(?,?,?,?)',
                            (session['id'],'reply:'+str(event.get('message_id','')),json.dumps(dict(state='recalled')),time.time()))
 
+    @timing.stage('chat.group_ban')
+    def group_ban(self, event):
+        """issue #390：group_ban notice → 禁言/解禁事实落盘（谁、何时、多久）。
+
+        只落盘不改行为：账本清理与 WAKE 归 issue #391；这里记账失败也不拖垮
+        接收线程（record_group_ban 内部吞错，返回 False）。
+        """
+        from .mcp_chat_ban import record_group_ban
+        record_group_ban(event)
+
+
     @timing.trace('chat.receive')
     def receive(self, event, *, send_request=None):
         if self.available and event.get('post_type')=='request':
@@ -382,6 +393,10 @@ class MCPChat(ChatWaitMixin):
         if self.available and self.apps.receive(event):return
         if self.available and event.get('post_type')=='notice' and event.get('notice_type') in ('group_recall','friend_recall'):
             self.recall(event);return
+        # issue #390：group_ban notice 不进消息流水，只落禁言/解禁事实——
+        # 谁操作的（operator_id）、何时、禁多久（duration）。
+        if self.available and event.get('post_type')=='notice' and event.get('notice_type')=='group_ban':
+            self.group_ban(event);return
         if not self.available or event.get('post_type') not in ('message','message_sent') or event.get('message_type') not in ('group','private'):return
         category='group' if event['message_type']=='group' else 'direct'
         account=str(event.get('self_id',''))

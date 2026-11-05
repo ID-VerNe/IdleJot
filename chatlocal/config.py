@@ -9,10 +9,15 @@ WG_HOME = Path(os.environ.get('WATER_GROUP_HOME') or (Path.home() / '.water-grou
 DATA = WG_HOME / 'data'
 DB = DATA / 'chats.sqlite3'
 TMP_DIR = WG_HOME / 'tmp'
+# state 目录与 water-group/daemon/wg_paths.py 的 state_dir() 同一约定（那边是单一
+# 事实来源；这边不能 flat import 到 daemon 目录，按同规则复述一份，改规则时两边
+# 一起改）。app 侧的 state 居民目前是 wg_group_ban.json（group_ban 事实，issue #390）。
+STATE = Path(os.environ.get('IDLEJOT_WG_STATE') or os.environ.get('TULPA_WG_STATE')
+             or (WG_HOME / 'state'))
 # 私有化人格卡与规则住在数据根，仓库里只留公开模板（同 wg_paths.personas_dir/rules_dir）。
 PRIVATE_PERSONAS = WG_HOME / 'personas'
 PRIVATE_RULES = WG_HOME / 'rules'
-for folder in (DATA, TMP_DIR, PRIVATE_PERSONAS, PRIVATE_RULES, ROOT / '.cache', ROOT / 'imports', ROOT / '.tmp'):
+for folder in (DATA, TMP_DIR, STATE, PRIVATE_PERSONAS, PRIVATE_RULES, ROOT / '.cache', ROOT / 'imports', ROOT / '.tmp'):
     # parents=True：全新机器上 ~/.water-group 本身不存在，缺了它首启即
     # FileNotFoundError（CI 全新 runner 上 check_mcp.py 就是这么挂的）。
     folder.mkdir(parents=True, exist_ok=True)

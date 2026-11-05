@@ -45,6 +45,7 @@
 | `wg_session.txt` | 当前会话 id |
 | `mcp_token.txt` | 当前授权 token |
 | `wg_send_failure.json` | 上一次发送失败的账本（真实 retcode / 禁言时刻 / 是否已恢复，issue #132）。禁言时刻是**失败那一刻的预测**，所以 `reply.py --list` 打表头前会复查一次（`mute_until` 到点且 `recovered` 未定时现查 `shut_up_timestamp`，issue #145）：实测解禁就写 `recovered_at` 并改口说「实测解禁」，查不动就降级成「未复查 / 复查未能确认」——不再拿过期预测当此刻的事实 |
+| `wg_group_ban.json` | `group_ban` 事实（谁禁的 / 谁解的：`operator_id`、`duration`、时刻，按群分组，issue #390）。**写者只有 app 侧**（`chatlocal/mcp_chat_ban.py`：只有连着事件 WS 的 server_wg 收得到 notice）；daemon 这边只读渲染（`wg_group_ban.py` → `reply.py --list` 的事实行），不与 `wg_send_failure.json` 互写——事件到达即清账本 + 立刻唤醒是 issue #391 的地盘 |
 
 ## 两套 id：事件流 `id` 与会话库 `qid`（issue #203）
 

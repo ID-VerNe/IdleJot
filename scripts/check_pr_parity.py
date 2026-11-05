@@ -17,12 +17,14 @@
     uv run python scripts/check_pr_parity.py --shard static  # 只跑一片
     uv run python scripts/check_pr_parity.py --ref <sha> --keep
     uv run python scripts/check_pr_parity.py --reclaim       # 只报告可回收现场，不删除
+    uv run python scripts/check_pr_parity.py --reclaim --yes # 删除档：真删候选现场
 
 `--reclaim`（issue #378 回收设计的第一档）**只读**：扫描 `%TEMP%` 下的
 `idlejot-parity-*` 现场，打印候选与可直接粘贴的清理命令，退出码 0，
-**一条都不会删**。删除能力（`--yes` 之类）本档尚未提供，也不打算在同一轮引入——
-先让人看见候选、手工清一轮，再决定要不要给机器删除权。另有 parity 正在跑时立即以
-退出码 2 说明「稍后再试」（不排队），且**不改动**锁与持有者记录文件（哪怕是死记录）。
+**一条都不会删**。`--yes`（第二档）才真删：逐条先摘登记再删目录、删不掉要说话并
+给出手工命令、动手前对候选再核一次进程引用（扫不到进程表一条都不删）。
+另有 parity 正在跑时立即以退出码 2 说明「稍后再试」（不排队），且**不改动**锁与
+持有者记录文件（哪怕是死记录）。
 
 `pre-push` 钩子对每个被推送的本地 sha 跑一次；`SKIP_PARITY=1` 显式跳过（钩子里留痕）。
 CI 本身不跑本脚本：CI 已经是那个干净环境，且它需要完整 git 历史。
@@ -34,15 +36,15 @@ CI 本身不跑本脚本：CI 已经是那个干净环境，且它需要完整 g
 取消全局 `prune` 之后，复用前必须**确认目录还在**：孤儿登记（目录已删、登记还在）按
 失败处理并提示 `git worktree prune`，不会把一棵不存在的树当成可复用的现场。
 
-issue #378（非破坏性部分）：`taskkill /F` 之类硬杀绕过 `finally`，一次收不掉的现场会永久
-留在 `%TEMP%`，八天累积 92 套。本次只加固「已经走到自己收尾」这条路径：每个收尾步骤独立
+issue #378（非破坏性部分，PR #383）：`taskkill /F` 之类硬杀绕过 `finally`，一次收不掉的现场
+会永久留在 `%TEMP%`，八天累积 92 套。「已经走到自己收尾」的路径已加固：每个收尾步骤独立
 兜底、建树三步进 `try`、`fail` 分支先摘登记再删目录、`--keep` 与收尾失败都打印可复制的手工
-清理命令。**不做启动期自动扫描/回收**——自动回收仍缺两样：`check_pr_parity_lock.py` 的
-`_pid_alive()` 只校验 holder 里记录的 pid，没有「这棵树有没有进程在用」的判据（硬杀后
-锁会释放，但门禁子进程可能还活着，#366/#370 家族）；`--keep` 现场与硬杀残留没有标记可
-区分，直接回收会误删有意保留的排查现场。这两样补齐之前**自动删除不得上线**；只读的
-`--reclaim` 已提供（只打印候选与可粘贴命令，判据里「无进程引用」按 `Win32_Process` 扫，
-`--keep` 不可判定所以只提示），删除能力仍未提供。
+清理命令。`--keep` 现场从 `make_scratch()` 起就带 `.keep` 标记（回收第二档）：保留意图在
+启动一刻声明，之后被硬杀（`finally` 不跑）标记也已在盘上，回收据此排除，不会误删排查现场。
+删除档是 `--reclaim --yes`：候选判定（前缀 / 非活树 / 无进程引用 / 非 keep）与动手之间
+再核一次进程引用，删不掉要说话。**启动期自动扫描/回收仍不做**——「这棵树有没有进程
+在用」仍只有 `Win32_Process` CommandLine 启发式（`_pid_alive()` 只校验 holder 里的 pid，
+硬杀后门禁子进程可能还活着，#366/#370 家族），自动入口等更强判据定论后另立单。
 """
 import argparse
 import json
@@ -108,6 +110,29 @@ def is_parity_scene(path):
     `tulpa-*` 与其他目录也不是本工具的现场，误删等于抹掉别人未提交的工作。
     """
     return Path(path).name.startswith(SCRATCH_PREFIX)
+
+
+# `--keep` 现场的标记文件（issue #378 回收第二档）：回收靠它把「有意保留的排查现场」
+# 与硬杀残留区分开。放在现场目录根上、随目录一起消失——目录已不在的现场本来就不会
+# 被扫描到，标记只需要覆盖「目录还在」的那一半。
+KEEP_NAME = '.keep'
+
+
+def write_keep_marker(scene):
+    """把现场标记为 `--keep` 保留；写不进去要说出来，不许静默失去回收保护。"""
+    marker = Path(scene) / KEEP_NAME
+    try:
+        marker.write_text('', encoding=LOG_ENCODING)
+    except OSError as error:
+        print(f'parity: keep 标记写不进去 — {marker}（{error}）', file=sys.stderr)
+
+
+def is_kept_scene(scene):
+    """现场是不是 `--keep` 保留的。读盘失败按「在保留」处理：判不清的一律不删。"""
+    try:
+        return (Path(scene) / KEEP_NAME).exists()
+    except OSError:
+        return True
 
 
 def cleanup_commands(scene):
@@ -266,9 +291,8 @@ class Report:
 # `--reclaim` 只认本工具自己建的现场前缀（issue #378）：`.tmp/wt-*` 是人工工作树、
 # `tulpa-*` 与别的目录不是本工具的产物，`parity-348-*` 是隔离门禁的 scratch（另有生命周期）。
 RECLAIM_PREFIXES = (SCRATCH_PREFIX,)
-RECLAIM_KEEP_NOTE = ('已知限制：没有 `--keep` 标记机制。健康保留的现场（`pristine` 目录在、可复用）'
-                     '会被判据②排除；只有退化的现场（目录已删、登记成孤儿）才可能漏进候选，'
-                     '删除前请自行确认（issue #378）')
+RECLAIM_KEEP_NOTE = ('已知限制：带 `.keep` 标记的 `--keep` 现场已被判据④排除；本改动之前'
+                     '保留的现场没有标记，仍会出现在候选里，删除前请自行确认（issue #378）')
 # 进程表一次性拉全机、过滤在 Python 侧做：查询命令里**不含**特征串，所以 PowerShell
 # 自身的 CommandLine 不会命中任何现场（否则每个现场都会被判成「被占用」）。
 PROCESS_DUMP = ('[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
@@ -293,6 +317,27 @@ def reclaim_commands(scene, registered_pristine=None):
         commands.append(f'git worktree remove --force "{registered_pristine}"')
     commands.append(f'Remove-Item -LiteralPath "{scene}" -Recurse -Force')
     return commands
+
+
+def remove_registration(path):
+    """把登记表里 `path` 这一条**只这一条**摘掉，绝不 prune 全仓（issue #378 删除档）。
+
+    孤儿登记（目录连同父目录都不在）也适用：`git worktree remove --force` 会按登记表
+    找回那条记录（隔离门禁实测过）。返回 `None` 表示已摘或本来就没有；否则回传原因，
+    由调用方打印可复制命令——摘不掉不许静默。
+    """
+    if path is None:
+        return None
+    path = Path(path)
+    if not is_registered(path):
+        return None
+    try:
+        result = run(['git', 'worktree', 'remove', '--force', str(path)], ROOT)
+    except OSError as error:
+        return str(error)
+    if result.returncode == 0 and not is_registered(path):
+        return None
+    return output_of(result) or f'rc={result.returncode}，登记仍在'
 
 
 def process_command_lines():
@@ -339,12 +384,12 @@ def busy_scenes(names):
 
 def reclaim_candidates(root=None, *, prefixes=RECLAIM_PREFIXES, registered=None,
                        usable=None, busy=None):
-    """扫 `root` 下的候选现场，返回 `(候选, 问题)`——**只读**，不删任何东西。
+    """扫 `root` 下的候选现场，返回 `(候选, 问题, kept)`——**只读**，不删任何东西。
 
     候选四条（issue #378 回收设计）：① 前缀只认 `prefixes`（默认 `idlejot-parity-`）；
     ② `pristine` 不是活着的树（登记在且 `_usable()` 为真 → 排除；登记在但目录不在 → 可摘）；
     ③ 没有进程引用（`busy` 注入集合时按集合判定，否则扫 `Win32_Process`）；
-    ④ `--keep` 现场：**当前不可判定**（没有标记机制），由调用方在输出里提示，不排除。
+    ④ `--keep` 现场：带 `.keep` 标记 → 排除（回传进 `kept`，由报告说出来，不只静默排除）。
 
     三个可注入参数（`registered` / `usable` / `busy`）让门禁用假现场覆盖判定逻辑，不必
     去真实登记表里造树。
@@ -352,23 +397,27 @@ def reclaim_candidates(root=None, *, prefixes=RECLAIM_PREFIXES, registered=None,
     root = Path(root if root is not None else tempfile.gettempdir())
     problems = []
     candidates = []
+    kept = []
     try:
         entries = sorted(path for path in root.iterdir() if path.is_dir())
     except OSError as error:
-        return [], [f'现场根读不了：{root}（{error}）']
+        return [], [f'现场根读不了：{root}（{error}）'], []
     scenes = [path for path in entries
               if any(path.name.startswith(prefix) for prefix in prefixes)]
     if not scenes:
-        return [], []  # 没有现场就不必拉进程表（报告模式的常态，也省一次 PowerShell 启动）
+        return [], [], []  # 没有现场就不必拉进程表（报告模式的常态，也省一次 PowerShell 启动）
     registered = registered_worktrees() if registered is None else registered
     usable = _usable if usable is None else usable
     if busy is None:
         busy, problem = busy_scenes([path.name for path in scenes])
         if problem:
             problems.append(problem)
-            return [], problems
+            return [], problems, []
     for scene in scenes:
         if scene.name in busy:
+            continue
+        if is_kept_scene(scene):
+            kept.append(scene)
             continue
         pristine = scene / 'pristine'
         entry = next((candidate for candidate in registered if _same_path(pristine, candidate)),
@@ -380,26 +429,111 @@ def reclaim_candidates(root=None, *, prefixes=RECLAIM_PREFIXES, registered=None,
             state = 'prunable'
         candidates.append(SimpleNamespace(scene=scene, pristine=entry or str(pristine),
                                           registration=state))
-    return candidates, problems
+    return candidates, problems, kept
 
 
-def reclaim_report(root=None, **kwargs):
-    """`--reclaim` 的输出：候选 + 可粘贴命令，退出码 0，**一条都不删**（本档只读）。"""
-    candidates, problems = reclaim_candidates(root, **kwargs)
-    print(f'parity: --reclaim 只报告（扫描 {root or tempfile.gettempdir()}，不删除任何东西）')
+def reclaim_apply(candidates, *, registration_remover=None, tree_remover=None):
+    """删除档：把候选现场真删掉——先摘登记，再删目录，删不掉要说话（issue #378 第二档）。
+
+    候选由 `reclaim_candidates()` 给出（前缀 / 非活树 / 无进程引用 / 非 keep 已过），
+    这里动手前对每条再独立复核一次前缀与 keep 标记——「候选列表」与「删除循环」之间
+    隔着输出与等待，上游判据被改坏也不许在这条循环里误删：复核不过一律跳过并记账。
+
+    `registration_remover` / `tree_remover` 两个注入位供门禁造假现场，默认走真实的
+    `remove_registration()` 与 `_remove_tree()`。返回 `(删净条数, 问题清单)`。
+    """
+    registration_remover = registration_remover or remove_registration
+    tree_remover = tree_remover or _remove_tree
+    problems = []
+    removed = 0
+    total = len(candidates)
+    for index, candidate in enumerate(candidates, 1):
+        scene = Path(candidate.scene)
+        label = f'[{index}/{total}]'
+        if not is_parity_scene(scene):
+            problems.append(f'{label} 候选不是本工具现场，跳过：{scene}')
+            print(f'parity: {label} 拒绝非 parity 现场不删：{scene}', file=sys.stderr)
+            continue
+        if is_kept_scene(scene):
+            problems.append(f'{label} keep 现场带 {KEEP_NAME} 标记，跳过：{scene}')
+            print(f'parity: {label} 跳过 keep 现场（带 {KEEP_NAME} 标记）：{scene}',
+                  file=sys.stderr)
+            continue
+        registration_gone = True
+        if candidate.registration == 'prunable':
+            reason = registration_remover(candidate.pristine)
+            if reason is not None:
+                registration_gone = False
+                problems.append(f'{label} 登记摘不掉 — {scene}：{reason}')
+                print(f'parity: {label} 登记摘不掉 — {reason}'
+                      f'（手工：git worktree remove --force "{candidate.pristine}"）',
+                      file=sys.stderr)
+        report = Report(scene)
+        try:
+            tree_remover(report, scene, '现场目录')
+        except OSError as error:
+            report.problems.append(f'删除抛错：{error}')
+        for problem in report.problems:
+            problems.append(f'{label} {problem}')
+            print(f'parity: {label} {problem}', file=sys.stderr)
+        if _exists(scene):
+            # 删不掉不许静默：把可粘贴的手工命令原样交出来（issue #378 缺口⑤同口径）。
+            for command in reclaim_commands(scene, candidate.pristine
+                                            if candidate.registration == 'prunable' else None):
+                print(f'parity: {label} 手工清理命令 — {command}', file=sys.stderr)
+            continue
+        if not registration_gone:
+            continue
+        removed += 1
+        print(f'parity: {label} 已回收 {scene}')
+    return removed, problems
+
+
+def reclaim_report(root=None, *, apply=False, **kwargs):
+    """`--reclaim` 的输出：`apply=False` 只报告（一条都不删），`apply=True` 真删候选。
+
+    删除档在动手前对候选**再核一次**进程引用（`busy` 未注入时真扫一次 `Win32_Process`）：
+    候选判定与动手之间隔着输出与等待，新出现的引用要来得及把现场从刀口下捞回来；
+    扫不到进程表 → 一条都不删（保守，退出码 1）。退出码：0 全部候选删净（或 0 候选），
+    1 有问题。
+    """
+    target = Path(root if root is not None else tempfile.gettempdir())
+    candidates, problems, kept = reclaim_candidates(root, **kwargs)
+    action = '删除候选现场' if apply else '不删除任何东西'
+    print(f'parity: --reclaim{" --yes" if apply else ""}（扫描 {target}，{action}）')
     for problem in problems:
         print(f'WARN: {problem}', file=sys.stderr)
+    for scene in kept:
+        print(f'parity: 跳过 keep 现场（带 {KEEP_NAME} 标记）— {scene}')
     if not candidates:
         print('parity: 候选 0 个（没有可回收的 parity 现场）')
         return 0
-    print(f'parity: 候选 {len(candidates)} 个（只打印命令，未删除任何东西）')
-    for index, candidate in enumerate(candidates, 1):
-        label = ('孤儿登记（登记在表里、目录已不在）' if candidate.registration == 'prunable'
-                 else '无 worktree 登记')
-        print(f'parity: [{index}/{len(candidates)}] {candidate.scene} — {label}')
-        for command in reclaim_commands(candidate.scene, candidate.pristine
-                                        if candidate.registration == 'prunable' else None):
-            print(f'parity: 清理命令 — {command}')
+    if not apply:
+        print(f'parity: 候选 {len(candidates)} 个（只打印命令，未删除任何东西）')
+        for index, candidate in enumerate(candidates, 1):
+            label = ('孤儿登记（登记在表里、目录已不在）' if candidate.registration == 'prunable'
+                     else '无 worktree 登记')
+            print(f'parity: [{index}/{len(candidates)}] {candidate.scene} — {label}')
+            for command in reclaim_commands(candidate.scene, candidate.pristine
+                                            if candidate.registration == 'prunable' else None):
+                print(f'parity: 清理命令 — {command}')
+        print(f'parity: {RECLAIM_KEEP_NOTE}')
+        return 0
+    print(f'parity: 候选 {len(candidates)} 个（--yes，开始删除）')
+    if 'busy' not in kwargs:
+        fresh, problem = busy_scenes([candidate.scene.name for candidate in candidates])
+        if problem is not None:
+            print(f'WARN: {problem}（一条都不删）', file=sys.stderr)
+            return 1
+        for candidate in candidates:
+            if candidate.scene.name in fresh:
+                print(f'parity: 跳过（删除前复查发现有进程引用）— {candidate.scene}')
+        candidates = [candidate for candidate in candidates
+                      if candidate.scene.name not in fresh]
+    removed, problems = reclaim_apply(candidates)
+    if problems:
+        return 1
+    print(f'parity: 已回收 {removed}/{len(candidates)} 个候选现场')
     print(f'parity: {RECLAIM_KEEP_NOTE}')
     return 0
 
@@ -459,13 +593,20 @@ def main():
     parser.add_argument('--shard', help='只跑某个分片（名字取自该 ref 的 scripts/gates.json）')
     parser.add_argument('--keep', action='store_true', help='保留临时 worktree 与空数据根，打印路径供排查')
     parser.add_argument('--reclaim', action='store_true',
-                        help='只报告可回收的 parity 现场并打印清理命令（只读，不删除任何东西；'
-                             '锁被占时退出码 2）')
+                        help='扫描可回收的 parity 现场并打印清理命令（只读）；与 --yes 连用时'
+                             '真删（锁被占时退出码 2）')
+    parser.add_argument('--yes', action='store_true',
+                        help='只与 --reclaim 连用：真删候选现场（默认只报告不删除）')
+    parser.add_argument('--root',
+                        help='--reclaim 的扫描根（默认系统临时目录；供回归用例注入隔离目录，'
+                             '候选仍只认 idlejot-parity- 前缀）')
     args = parser.parse_args()
+    if args.yes and not args.reclaim:
+        parser.error('--yes 只与 --reclaim 连用')
 
     if args.reclaim:
-        # 报告也要持锁：无锁扫描会与正在建树/收尾的 parity 抢同一份登记表（issue #348）。
-        # 但**不排队**——报告不是跑门禁，拿不到就让人稍后再试，不阻塞很久。
+        # 报告与删除都要持锁：无锁扫描会与正在建树/收尾的 parity 抢同一份登记表（issue #348）。
+        # 但**不排队**——回收不是跑门禁，拿不到就让人稍后再试，不阻塞很久。
         path = lock.lock_path()
         fd = lock.acquire(path)
         if fd is None:
@@ -475,7 +616,7 @@ def main():
             print('parity: 另一个 parity 正在跑，稍后再试')
             return 2
         try:
-            return reclaim_report()
+            return reclaim_report(args.root, apply=args.yes)
         finally:
             lock.release(fd, path)
 
@@ -530,6 +671,10 @@ def _parity(args, sha):
         # 建树三步进 try（issue #378 缺口③）：中途抛错也要走到 finally 的收尾，
         # 否则 `mkdtemp` 已经落地的半截现场没人管。
         scratch = make_scratch()
+        if args.keep:
+            # keep 标记越早落地越好（issue #378 删除档）：`--keep` 的意图在启动一刻就
+            # 声明，进程随后被硬杀（`finally` 不跑）标记也已在盘上，回收据此排除现场。
+            write_keep_marker(scratch)
         home = scratch / 'home'
         home.mkdir()
         status, pristine, reason = add_worktree(sha, scratch)

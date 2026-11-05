@@ -88,6 +88,23 @@
         "max_lines": 8
       }
     },
+    "hotel": {
+      "enabled": false,
+      "groups": [],
+      "options": {
+        "api_key": "",
+        "bundle": "",
+        "timeout": 0,
+        "cache_seconds": 300,
+        "max_hotels": 8,
+        "hotel_stars": "",
+        "hotel_bed_types": "",
+        "hotel_types": "",
+        "keywords": "",
+        "max_price": 0,
+        "sort": ""
+      }
+    },
     "repeater": {
       "enabled": false,
       "groups": [],

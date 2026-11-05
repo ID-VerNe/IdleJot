@@ -576,8 +576,8 @@
    "why": "推送前 parity：干净 worktree + 空数据根下复跑门禁（#61）；CI 本身就是干净环境，且本脚本要建 worktree/读 git 历史，不进 ci"
   },
   {
-   "name": "check_pr_parity_isolation.py",
-   "why": "parity 现场隔离（#348）：跨进程互斥、同进程重入互斥、收尾只认自己那份（不连坐别人的树）、收不掉不静默。建真 worktree，量级与 check_pr_parity.py 同档，不进 ci"
+   "name": "check_pr_parity_isolation",
+   "why": "parity 现场隔离（#348）：跨进程互斥、同进程重入互斥、收尾只认自己那份（不连坐别人的树）、收不掉不静默。建真 worktree，量级与 check_pr_parity.py 同档，不进 ci。#378 删除档：单文件 968 行按 #283/#285/#329 先例拆成包（__init__/__main__/_common/cases_scene/cases_reclaim），断言逐字搬运，入口改 python -m scripts.check_pr_parity_isolation，对 gates.json 与 CI 透明"
   },
   {
    "name": "check_repo_settings.py",

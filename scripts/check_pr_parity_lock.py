@@ -10,7 +10,7 @@
 各 push 一次、或者一边 push 一边手跑，是两个**独立进程**。
 
 为什么要独立成模块：锁的位置只能有一个出处，`check_pr_parity.py` 与门禁
-`check_pr_parity_isolation.py` 都从这里取，不在两处各写一份路径规则。`.githooks/pre-push`
+`check_pr_parity_isolation`（#378 删除档起为包）都从这里取，不在两处各写一份路径规则。`.githooks/pre-push`
 **不持这把锁**：它逐个 commit 调 `check_pr_parity.py`，那几次调用自己在同一条队上排好；
 钩子若先持锁再去起子进程，父子会互等同一把锁直到超时。
 

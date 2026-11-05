@@ -21,6 +21,7 @@ def list_wakes():
     import wg_dossiers
     import wg_event_ref
     import wg_gap
+    import wg_group_ban
     import wg_images
     import wg_isolation
     import wg_quotes
@@ -50,6 +51,9 @@ def list_wakes():
     for ln in ((wg_gap.header_lines() + gap_lines) if gap_lines else []):
         print(ln)
     wg_send_failure.print_last()
+    # issue #390：group_ban 事实行（谁禁的 / 谁解的、何时、禁多久）——事实由 app 侧
+    # 落盘，这里只读渲染；钉死群时只看本群，与上面的账本行一条街。
+    wg_group_ban.print_line(wg_isolation.group_id())
     shown = 0
     for e in rows:
         reason = up.wake_reason(e)
